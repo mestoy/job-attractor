@@ -1,0 +1,66 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(job-application-assistant)",
+      "Bash(bun run:*)",
+      "Bash(pdftotext:*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/session_start.py\" --hook"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/check_preview.py\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/record_decision.py\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/record_chat_ruling.py\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" 2>/dev/null || exit 0; out=$(bash scripts/consistency-check.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" > documents/.consistency-last.txt 2>/dev/null; [ \"$rc\" -eq 0 ] && exit 0; printf '%s\\n' \"$out\" | grep -E '🔴 ([0-9]+ hard issue|résumé QA FAILED|warm-network data is stale|agent findings captured|follow-ups DUE)' || printf '🔴 consistency-check exit %s carried hard drift with no recognised line — see documents/.consistency-last.txt\\n' \"$rc\"; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}

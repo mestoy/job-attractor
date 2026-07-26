@@ -1,0 +1,19 @@
+# --- YOUR PERSONAL DATA — never committed or pushed ---
+# Your filled-in profile, blocked list, outreach log, metrics, résumés, tracker.
+# Templates live in partner-docs/ (tracked); the installer copies them here.
+documents/
+
+# --- YOUR filled-in config — seeded from scripts/kit_config.example.py by install.sh ---
+# Kept OUT of git on purpose: /setup tells you to fill this in, and a TRACKED file you were
+# told to edit makes `git pull --ff-only` abort on every future update.
+scripts/kit_config.py
+
+# --- build / OS junk ---
+node_modules/
+**/node_modules/
+*.log
+*.aux
+*.out
+*.tmp
+bun.lockb
+.DS_Store

@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""log_linkedin_send.py — write a send-log row for a LinkedIn message.
+
+WHY THIS EXISTS (2026-07-24)
+----------------------------
+`mail-draft.sh` is the ONLY writer of `documents/send-log.jsonl`, and LinkedIn outreach is
+deliberately paste-and-send (browser prefill is RETIRED, WORKFLOW-RULES §8). So **every LinkedIn
+message silently skips the log**, and that log is the source of truth for FOUR mechanisms:
+
+  1. `replied`            → every reply-rate number, including the per-rung ladder
+  2. the 3-3-3 counter    → consistency-check [13]
+  3. the segment hot-zone → consistency-check [15]
+  4. `targets`            → `rank_criteria.burned_targets()`, the guard that stops one company
+                            being named in two different warm trios
+
+It bit twice in one day on 2026-07-24:
+
+  • Three real replies (three warm contacts) sat flagged `False`, so the
+    ladder reported the WARM rung at **0%** when it was in fact running at 13.6% — the best rung
+    on the board, and the one the strategy had just pivoted to.
+  • A rung-7 trio named to one contact never burned, so the ranker
+    would have re-offered those same three companies to the next contact the following morning. That is the exact
+    convergence Andy forbids (Boss Hunting Bible p.3: *"No. Pick the one you think is most likely
+    the 'direct' boss and try that person first."*).
+
+Three rows had to be hand-written that day. This script is the fix.
+
+PARITY WITH mail-draft.sh IS THE POINT
+--------------------------------------
+mail-draft.sh carries the warm-only follow-up rule (see its FOLLOW-UP ARMING block) with this comment: *"Both paths must agree
+or the rule is decorative."* The same applies here. `_followup_for()` below mirrors that case
+statement exactly, and `tests/test_groupD_send.py` asserts the two stay in sync.
+
+USAGE
+-----
+    python3 scripts/log_linkedin_send.py --rung warm --to linkedin.com/in/example \
+        --company ExampleCo --targets "AlphaCo,BetaCo,GammaCo" --segment payments \
+        --note "rung-7 trio ask"
+
+    python3 scripts/log_linkedin_send.py --rung reply --to linkedin.com/in/example2 \
+        --company "ExampleCo2" --no-targets --followup-due 2026-07-31
+
+    python3 scripts/log_linkedin_send.py --mark-replied --to linkedin.com/in/example
+"""
+import argparse
+import datetime
+import json
+import os
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SENDLOG = os.path.join(REPO, "documents", "send-log.jsonl")
+
+# Rungs mail-draft.sh accepts, plus the LinkedIn-only ones. `followup` (no hyphen) is a LEGACY
+# spelling that exists in historical rows; we normalize to `follow-up` on write but still accept it
+# so a user copying an old row does not get a spurious error.
+RUNGS = {
+    "cold-boss", "cold-stranger", "warm", "referred", "event", "off-ladder",
+    "reply", "thank-you", "follow-up", "reunion", "application",
+}
+LEGACY_RUNG = {"followup": "follow-up"}
+
+# WARM-ONLY FOLLOW-UPS. Mirrors mail-draft.sh:394-399 exactly. A cold boss who
+# does not answer gets NO second touch; the next action is a NEW target (Bible p.9, p.10).
+ARMS_FOLLOWUP = {"warm", "referred", "event", "off-ladder"}
+
+# Rungs where the ask NAMES target companies, so an empty `targets` is almost certainly a mistake
+# that silently defeats the burn guard. Requires an explicit --no-targets to proceed.
+TARGETS_EXPECTED = {"warm", "referred"}
+
+
+def _followup_for(rung, override=None, suppress=False):
+    """Return the follow-up date string. Parity with mail-draft.sh:394."""
+    if suppress:
+        return ""
+    if override:
+        return override
+    if rung in ARMS_FOLLOWUP:
+        return (datetime.date.today() + datetime.timedelta(days=7)).isoformat()
+    return ""
+
+
+def _load(path=SENDLOG):
+    if not os.path.exists(path):
+        return []
+    rows = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                # A malformed historical line must not stop a send from being logged. Skipping is
+                # correct here: this file is append-mostly and we rewrite it whole below.
+                pass
+    return rows
+
+
+def _write(rows, path=SENDLOG):
+    rows.sort(key=lambda r: (r.get("date", ""), r.get("ts", "")))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def mark_replied(to, path=SENDLOG, when=None):
+    """Set replied=True on the most recent row for `to`. Returns the row or None.
+
+    Backfilling replies by hand is what produced the 0%-warm-reply-rate defect, so this is a
+    first-class command rather than something to do in an ad-hoc heredoc.
+    """
+    rows = _load(path)
+    hits = [r for r in rows if r.get("to") == to]
+    if not hits:
+        return None
+    target = max(hits, key=lambda r: (r.get("date", ""), r.get("ts", "")))
+    target["replied"] = True
+    target["replied_note"] = f"marked replied {when or datetime.date.today().isoformat()}"
+    _write(rows, path)
+    return target
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Log a LinkedIn send to documents/send-log.jsonl")
+    ap.add_argument("--rung", help="one of: " + ", ".join(sorted(RUNGS)))
+    ap.add_argument("--to", required=True, help="linkedin.com/in/<handle> or linkedin:<handle>")
+    ap.add_argument("--company", default="")
+    ap.add_argument("--targets", default="", help="comma-separated companies NAMED in the ask; these BURN")
+    ap.add_argument("--no-targets", action="store_true", help="acknowledge a warm send that names no companies")
+    ap.add_argument("--segment", default="")
+    ap.add_argument("--kind", default="initial", choices=["initial", "reply"])
+    ap.add_argument("--status", default="sent", choices=["sent", "bounced", "drafted"])
+    ap.add_argument("--note", default="", help="sent_note: what it was and why")
+    ap.add_argument("--followup-due", default=None, help="YYYY-MM-DD; overrides the rung default")
+    ap.add_argument("--no-followup", action="store_true", help="deliberately arm nothing")
+    ap.add_argument("--mark-replied", action="store_true", help="flip the latest row for --to to replied")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--path", default=SENDLOG, help=argparse.SUPPRESS)
+    a = ap.parse_args(argv)
+
+    if a.mark_replied:
+        row = mark_replied(a.to, a.path)
+        if not row:
+            print(f"🔴 no send-log row found for {a.to}", file=sys.stderr)
+            return 1
+        print(f"✅ marked replied: {row.get('date')} · rung={row.get('rung')} · {a.to}")
+        return 0
+
+    if not a.rung:
+        print("🔴 --rung is required (or use --mark-replied)", file=sys.stderr)
+        return 2
+    rung = LEGACY_RUNG.get(a.rung, a.rung)
+    if rung not in RUNGS:
+        print(f"🔴 unknown rung {a.rung!r}. One of: {', '.join(sorted(RUNGS))}", file=sys.stderr)
+        return 2
+
+    # THE BURN GUARD. A warm ask that names companies must record them, or rank_criteria will
+    # re-offer the same companies to the next contact. Fail loudly rather than log a row that
+    # looks complete and silently defeats the guard.
+    if rung in TARGETS_EXPECTED and not a.targets and not a.no_targets:
+        print(f"🔴 rung {rung!r} usually NAMES target companies, and --targets is empty.\n"
+              "   Those companies BURN on naming (Bible p.3), and rank_criteria.burned_targets()\n"
+              "   reads this field. Pass --targets \"A,B,C\", or --no-targets if the message named none.",
+              file=sys.stderr)
+        return 2
+
+    rows = _load(a.path)
+    today = datetime.date.today().isoformat()
+    dupes = [r for r in rows if r.get("to") == a.to and r.get("date") == today and r.get("rung") == rung]
+    if dupes:
+        print(f"⚠️  {len(dupes)} row(s) already logged today for {a.to} at rung {rung} — check for a double-log.")
+
+    row = {
+        "ts": datetime.datetime.now().astimezone().isoformat(),
+        "date": today,
+        "rung": rung,
+        "to": a.to,
+        "company": a.company,
+        "targets": a.targets,
+        "subject": "(LinkedIn, in-thread)" if a.kind == "reply" else "(LinkedIn)",
+        "segment": a.segment,
+        "kind": a.kind,
+        "followup_due": _followup_for(rung, a.followup_due, a.no_followup),
+        "status": a.status,
+        "replied": False,
+        "sent_note": a.note or "logged via log_linkedin_send.py (LinkedIn paste-and-send)",
+    }
+
+    if a.dry_run:
+        print(json.dumps(row, ensure_ascii=False, indent=1))
+        return 0
+
+    rows.append(row)
+    _write(rows, a.path)
+
+    print(f"✅ logged: rung={rung} · {a.to} · status={a.status}")
+    if row["followup_due"]:
+        print(f"   📒 follow-up armed {row['followup_due']}")
+    else:
+        print("   📒 NO follow-up armed"
+              + ("  (deliberate, --no-followup)" if a.no_followup
+                 else "  (cold or post-contact rung — warm-only policy 2026-07-23)"))
+    if a.targets:
+        burned = [t.strip() for t in a.targets.split(",") if t.strip()]
+        print(f"   🔥 BURNED {len(burned)}: {', '.join(burned)}  (rank_criteria will now exclude them)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

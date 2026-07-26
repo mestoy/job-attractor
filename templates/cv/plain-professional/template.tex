@@ -1,0 +1,80 @@
+% Plain Professional CV Template
+% Reverse-engineered from a plain single-page Word-style resume (no icons,
+% no color accent scheme, standard sans-serif, compact one-page layout).
+% Compile with: pdflatex
+
+\documentclass[10pt,letterpaper]{article}
+
+\usepackage[left=0.75in,right=0.75in,top=0.6in,bottom=0.6in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[scaled]{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{titlesec}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, urlcolor=black, linkcolor=black, pdftitle={[YOUR_NAME] - CV}}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt plus 1pt}
+
+% Section headings: bold, left-aligned, thin rule underneath, tight spacing.
+\titleformat{\section}{\bfseries\fontsize{11}{13}\selectfont}{}{0em}{}[\vspace{-4pt}\hrule height 0.6pt]
+\titlespacing*{\section}{0pt}{8pt}{4pt}
+
+% Tight itemize spacing without depending on enumitem (not guaranteed present).
+\let\olditemize\itemize
+\let\endolditemize\enditemize
+\renewenvironment{itemize}
+  {\begin{olditemize}\setlength{\itemsep}{1pt}\setlength{\parskip}{0pt}\setlength{\topsep}{2pt}\setlength{\leftmargini}{1.1em}}
+  {\end{olditemize}}
+
+\pagestyle{empty}
+
+\begin{document}
+
+% ============================================================
+%     HEADER
+% ============================================================
+{\fontsize{20}{22}\selectfont\bfseries [YOUR_NAME]}\\[3pt]
+[YOUR_LOCATION] $\cdot$ [YOUR_REMOTE_STATUS] $\mid$ [YOUR_PHONE] $\mid$ [YOUR_EMAIL] $\mid$ [YOUR_LINKEDIN] $\mid$ [YOUR_WEBSITE]
+
+% ============================================================
+%     SUMMARY  (hard cap: 300 characters)
+% ============================================================
+\section*{Summary}
+[PROFILE_SUMMARY_MAX_300_CHARS]
+
+% ============================================================
+%     CORE SKILLS
+% ============================================================
+\section*{Core Skills}
+\textbf{[SKILL_CATEGORY_1]:} [skills, comma separated]\\
+\textbf{[SKILL_CATEGORY_2]:} [skills, comma separated]\\
+\textbf{[SKILL_CATEGORY_3]:} [skills, comma separated]
+
+% ============================================================
+%     PROFESSIONAL EXPERIENCE
+% ============================================================
+\section*{Professional Experience}
+
+\noindent\textbf{[COMPANY_1]} \hfill [LOCATION_1] $\cdot$ [DATES_1]\\
+\textit{[TITLE_1]} \hfill \textit{[DOMAIN_TAG_1]}
+\begin{itemize}
+    \item [BULLET_1]
+    \item [BULLET_2]
+    \item [BULLET_3]
+\end{itemize}
+
+\noindent\textbf{[COMPANY_2]} \hfill [LOCATION_2] $\cdot$ [DATES_2]\\
+\textit{[TITLE_2]} \hfill \textit{[DOMAIN_TAG_2]}
+\begin{itemize}
+    \item [BULLET_1]
+    \item [BULLET_2]
+\end{itemize}
+
+% ============================================================
+%     EDUCATION & CERTIFICATIONS
+% ============================================================
+\section*{Education \& Certifications}
+\textbf{[SCHOOL]} --- [DEGREE]\\
+[CERTIFICATION], [ISSUING_BODY], [YEAR]
+
+\end{document}
