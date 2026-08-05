@@ -1307,9 +1307,14 @@ class TestRecipientIdentity(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def run_cli(self, *args):
+        # 🔴 `--path` redirects the JSONL half ONLY. The logger also appends a NARRATIVE entry to
+        # `outreach_log.md`, and without CLAUDE_PROJECT_DIR that landed in the REAL one: a partner
+        # running the suite got fake "✅ SENT" blocks in their own outreach log, growing on every
+        # run, invisible because the file is git-ignored. Point the whole script at the sandbox.
+        env = dict(os.environ, CLAUDE_PROJECT_DIR=self.tmp)
         return subprocess.run(
             [sys.executable, os.path.join(KIT, "scripts", "log_linkedin_send.py"),
-             "--path", self.log, *args], capture_output=True, text=True)
+             "--path", self.log, *args], capture_output=True, text=True, env=env)
 
     def rows(self):
         if not os.path.exists(self.log):

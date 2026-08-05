@@ -216,14 +216,42 @@ except Exception:
 print("\n[6] staying current")
 if os.path.isdir(os.path.join(ROOT, ".git")):
     try:
-        r = subprocess.run(["git", "remote", "get-url", "origin"], cwd=ROOT,
-                           capture_output=True, text=True, timeout=10)
-        if r.returncode == 0 and r.stdout.strip():
-            ok("git remote set", f"update with: double-click 'Update Kit.command' "
-                                 f"(or `git pull && bash install.sh .`)")
-        else:
+        # 🔴 THIS USED TO CHECK ONLY THAT `origin` HAD A URL, and that is the blind spot that cost
+        # one real install weeks (fixed 2026-08-05). If you forked the kit, `origin` is YOUR repo.
+        # Every update then pulls from your own fork, finds nothing, and reports success, while
+        # this section printed "✅ git remote set" over the top of it.
+        # ⚠️ The updater cannot save you either: it resolves the kit by URL, but falls back to
+        # `origin` unconditionally when NO remote URL contains the kit name. A one-remote fork has
+        # no such URL, so the fallback fires and the fix never engages.
+        # ⚖️ So the question is not "is there a remote", it is "does ANY remote point at the kit".
+        rv = subprocess.run(["git", "remote", "-v"], cwd=ROOT,
+                            capture_output=True, text=True, timeout=10)
+        remotes = rv.stdout if rv.returncode == 0 else ""
+        if not remotes.strip():
             advisory("git repo has no remote — you cannot pull updates",
                      "clone the kit from GitHub instead of copying the folder")
+        elif "job-attractor" in remotes:
+            ok("a remote points at the kit",
+               "update with: double-click 'Update Kit.command'")
+        else:
+            blocking("NO remote points at the kit — updates cannot reach you, and the updater "
+                     "will report success anyway",
+                     'git remote add kit https://github.com/mestoy/job-attractor-kit '
+                     '&& git fetch kit && git merge --ff-only kit/main')
+
+        # A branch tracking a non-kit remote is the same trap wearing different clothes: the fetch
+        # succeeds, the merge finds nothing, and nothing says the update never arrived.
+        tb = subprocess.run(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+                            cwd=ROOT, capture_output=True, text=True, timeout=10)
+        up = (tb.stdout or "").strip()
+        if up and remotes.strip():
+            rname = up.split("/", 1)[0]
+            rurl = subprocess.run(["git", "remote", "get-url", rname], cwd=ROOT,
+                                  capture_output=True, text=True, timeout=10).stdout
+            if "job-attractor" not in rurl:
+                advisory(f"your branch tracks '{up}', which is not the kit",
+                         "a bare `git pull` follows this and delivers nothing; "
+                         "use 'Update Kit.command' or merge kit/main explicitly")
     except Exception:
         advisory("could not read the git remote", "check `git remote -v` yourself")
 else:

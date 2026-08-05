@@ -49,7 +49,12 @@ import os
 import re
 import sys
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# ⚠️ HONOUR `CLAUDE_PROJECT_DIR` (fixed 2026-08-05). This used to derive REPO from `__file__`
+# alone, so a test that redirected the JSONL half with `--path` still wrote the NARRATIVE half into
+# the real `outreach_log.md`. On a partner install that appended fake SENT rows to their live log,
+# and `check_followups.py` then reported follow-ups overdue on people they had never written to.
+# The file is git-ignored, so `git status` stayed clean and nothing surfaced it.
+REPO = os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SENDLOG = os.path.join(REPO, "documents", "send-log.jsonl")
 OUTREACH_LOG = os.path.join(REPO, "outreach_log.md")
 

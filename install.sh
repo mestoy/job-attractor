@@ -26,6 +26,11 @@ fi
 #    missing. The scripts read the rulebook, checklists, and dedup stores from documents/, so every
 #    shipped template + the operating rules doc get seeded here (that is what the gates look for).
 mkdir -p "$TARGET/documents"
+# 📄 /apply WRITES HERE, and neither directory existed (fixed 2026-08-05). `apply.md` references
+# `cv/main_<COMPANY>.tex` and `cover_letters/cover_*.tex` nine times, and its "read an existing CV
+# for structural reference" step found nothing on a first run. A command whose output directory does
+# not exist fails in a way a new user reads as the command being broken.
+mkdir -p "$TARGET/cv" "$TARGET/cover_letters"
 for f in "$HERE"/partner-docs/*.md; do
   [ -f "$f" ] || continue; b="$(basename "$f")"
   [ -f "$TARGET/documents/$b" ] || cp "$f" "$TARGET/documents/$b"

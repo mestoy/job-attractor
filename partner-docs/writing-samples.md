@@ -34,7 +34,7 @@ situation matters as much as the words, because a sentence carries the relations
 into.
 
 ```
-## Sample 1 - <what it was> (<date>, <who it went to, and how well you know them>)
+## Sample N - <what it was> (<date>, <who it went to, and how well you know them>)
 
 Setup:
   <one or two lines: what prompted it, how close you are to this person, what you wanted>

@@ -250,8 +250,24 @@ def main(argv):
 
     print(_hdr("TYPE: {0}".format(mtype)))
     print(TYPE_BLURB[mtype])
-    print("Read these samples FRESH before drafting: Sample " +
-          ", ".join(str(n) for n in TYPE_MAP[mtype]) + ".")
+    # ⚠️ AN EMPTY CORPUS MUST NOT BE TOLD TO READ SAMPLE 4 (fixed 2026-08-05). The shipped
+    # writing-samples.md is a TEMPLATE, so on a first run this printed "Read these samples FRESH:
+    # Sample 4" and pointed at something that has never existed. A tool that names a thing the user
+    # does not have reads as broken rather than as empty, on their very first command.
+    # ⚠️ ASK WHETHER THIS TYPE'S SAMPLES EXIST, not whether ANY do. The shipped template carries a
+    # worked EXAMPLE block whose heading parses as a real sample, so `samples` is non-empty on a
+    # first run while the sample this type needs is still absent. Checking the wrong set is how the
+    # first-run message kept pointing at a sample nobody has.
+    have = [n for n in TYPE_MAP[mtype] if n in samples]
+    if not have:
+        print("⚠️ Your corpus is empty, so there are no samples to read yet. Everything below is "
+              "the universal rules.")
+        print("   Fill it in about 15 minutes with `/voice-setup`. Until you do, outreach drafts "
+              "come out in a generic register, which is the one thing that makes a message look "
+              "automated.")
+    else:
+        print("Read these samples FRESH before drafting: Sample " +
+              ", ".join(str(n) for n in TYPE_MAP[mtype]) + ".")
 
     for n in TYPE_MAP[mtype]:
         if n in samples:
