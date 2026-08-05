@@ -25,13 +25,39 @@
 
 | Rung | Screen required |
 |---|---|
-| **Cold boss-hunt** | FULL: all screen gates + deep culture (5+5 verbatim, sub-ratings, TREND) + primary-sourced accomplishment + live-role verify |
+| **Cold boss-hunt** | FULL: all screen gates + deep culture (5+5 verbatim, sub-ratings, TREND) + praise evidence (**TIER A** artifact preferred, **TIER B** background specifics, see below) + live-role verify |
 | **Cold stranger, not the boss** | Deal-breakers + work-arrangement |
 | **Warm 1st-degree** | **Deal-breakers ONLY** |
 | **Referred 2nd-degree** | **Deal-breakers ONLY** |
 | **Event follow-up** | None |
 
 ⚖️ **Deliberate divergence, if you keep a desk-side culture screen:** some networking methods forbid culture/people/comp/travel as pre-interview filters and apply happiness criteria only AFTER interviews. If leadership stability is your top factor, keeping the desk screen is a reasoned choice, not drift — document the reasoning in `documents/WORKFLOW-RULES.md` and don't let a later cleanup "fix" it away.
+
+🎖 **THE PRAISE BEAT IS TWO-TIER.** Demanding a primary-sourced ARTIFACT (a talk, a post, a patent,
+a press quote) before any cold boss note is stricter than the LaCivita source, and it permanently
+blocks every target who does not publish. Real case: a product lead who had run a developer
+experience function for years had **4 posts in 6 years**. Two independent searches found nothing,
+and no further searching would, because the material did not exist.
+
+**What the source actually asks for** (Boss Hunting Bible, both cover-letter samples, verbatim):
+> *"I'm contacting you because I admire your accomplishments... I was impressed with your **[you
+> need to insert some specifics regarding the "boss's" background here]**."*
+
+**Specifics regarding their BACKGROUND.** Not a linkable artifact.
+
+| Tier | What it is | When |
+|---|---|---|
+| **A** | A primary-sourced artifact in their own words or credited to them: talk, podcast, article, patent, press quote, engineering blog, OSS, award | **Preferred. Hunt for it first** — this praise lands harder because it proves you read something. |
+| **B** | Specifics about their background, verifiable from a primary record (their own profile, a company page, a req they posted): what they have built, how long they have owned it, the function they created | **Fallback only, after a genuine search finds no artifact.** |
+
+⛔ **Tier B rules, and they are the whole safety of this.** Verifiable from a PRIMARY record, never
+an aggregator blurb. Never invented. And the sentence must NOT imply you read something they wrote:
+*"you've been building that function there for years"* is honest, *"I loved your piece on it"* is a
+lie when no piece exists.
+
+📊 **RECORD THE TIER ON EVERY SEND** (`log_linkedin_send.py --praise-tier A|B|none`). The point of a
+two-tier rule is to find out whether tier B converts. Compare the reply rates before loosening or
+tightening it again.
 
 **Deal-breakers** (never waived at any rung): work-arrangement · deal-breaker industries · any people-level exclusion you maintain · PE-owned (if a filter) · political (if a filter).
 
@@ -61,6 +87,45 @@
 - **CO-CONSTRUCT EVERY MESSAGE TYPE, never a fait accompli.** Not just cold-boss emails — **follow-ups, replies, warm intros** are ALL built via your selections, never handed over as finished drafts (single OR batch). Shorter types use **two-stage-per-message**: 3 angle concepts with sample lines → you pick → 3 phrasings in your voice → you pick → assemble → you send. Reply handling follows `skills/boss-hunt-response-playbook.md`.
 - **Every outreach email goes out as a PREFILLED DRAFT you review and send, never a hand-typed message that skipped the checks.** Cross-platform, that draft is the `outreach-send-prep` skill (a `mailto:` prefill that opens your compose window; you attach the résumé and send). **On macOS, `scripts/mail-draft.sh` is the stronger path** — it additionally script-enforces the boss-hunt gates (`--praise-source`, `--praise-phrasing`, `--lacivita-check`, dedup via `--company`, résumé-attach). Either way: lint the body with `check_outreach.py` first, log the send, and YOU send. What is retired is a by-hand message that bypassed the lint and the send-log, not the mailto prefill.
 - **Delivery:** the résumé is a real file you attach to the prefilled draft (a mail connector adds it directly, or you drag it in — see `outreach-send-prep`); on macOS `mail-draft.sh` attaches it to the Apple Mail draft. NEVER desktop-control or type inside the compose window, and NEVER auto-send. **You send.**
+
+## 🎛️ THE PAIR , owed at sign-in and after every piece of work
+
+⛔ **`scripts/check_pair.py` BLOCKS on this, so it belongs on the card it tells you to re-read.**
+Without this section the gate hard-exits against a rule that is not written down anywhere you were
+sent to look.
+
+**The pair is two things, always together:**
+
+1. **The LADDER summary** , how many messages have gone out per rung and how many came back.
+   Recompute it with `python3 scripts/pair_brief.py`. ⛔ **Never carry a summary forward from
+   earlier in the session.** The moment anything is sent it is wrong, and a stale number presented
+   as live is worse than no number.
+2. **The next-step PICKER** , options for what to do next, with the METHOD's derived suggestion as
+   option 1, named as the method's rather than the assistant's, so you can disagree with it
+   knowingly.
+
+**When it is owed:** at sign-in, and again whenever a piece of work reaches a stopping point.
+⚠️ **A status report is a finished task wearing a different hat**, and it is the case that gets
+skipped. Three turns in a row ended on a report with no picker before this was mechanized.
+
+**Mechanics the gate enforces:**
+- The picker's question and header must carry the literal marker `NEXT-STEP` and the live
+  `LADDER …` stamp, verbatim from `pair_brief.py`.
+- ⛔ **Keep build, draft and send vocabulary OUT of the question and header.** The decision recorder
+  reads those two fields as BUILD context, so "draft the next move?" plus a "yes" would mint a
+  signed authorization you never gave.
+- A follow-up that chases silence is **never** a derivable default at any priority. A reply, a
+  thank-you and a fresh contact at the same company are all still allowed, because none of them
+  chases silence.
+- Bug and test work is **never** the default and is **always** the last option.
+
+## 🧪 NEVER TEST A HOOK AGAINST LIVE STORES
+
+Hooks WRITE. Piping a fabricated payload into one to "see if it works" appends real rows to real
+stores, and the decision ledger is the one file whose whole purpose is to be unforgeable. Test hook
+LOGIC by importing the module and exercising its functions, or point the project directory at a temp
+folder **containing the data files the script reads** , an under-populated sandbox makes the script
+fail silently through a broad `except` and proves nothing.
 
 ## 🛠 RULE-EDIT GUARD — before adding/changing ANY durable rule
 - **Grep the existing rules on that topic first** (`grep -rniE "<topic>" documents/`). Never edit a rule file to match current behavior without confirming it isn't already ruled otherwise. (A wrong behavior gets entrenched when you codify it without checking; a grep for the topic would surface a "RETIRED" rule instantly.)

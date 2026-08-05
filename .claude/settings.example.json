@@ -16,6 +16,24 @@
             "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/session_start.py\" --hook"
           }
         ]
+      },
+      {
+        "matcher": "resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/session_start.py\" --hook"
+          }
+        ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/session_start.py\" --hook --pair-only"
+          }
+        ]
       }
     ],
     "PreToolUse": [
@@ -25,6 +43,10 @@
           {
             "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/check_preview.py\""
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/check_pair.py\" --hook-ask"
           }
         ]
       }
@@ -36,6 +58,15 @@
           {
             "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/record_decision.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/check_style.py\" --hook-write"
           }
         ]
       }
@@ -57,7 +88,23 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$CLAUDE_PROJECT_DIR\" 2>/dev/null || exit 0; out=$(bash scripts/consistency-check.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" > documents/.consistency-last.txt 2>/dev/null; [ \"$rc\" -eq 0 ] && exit 0; printf '%s\\n' \"$out\" | grep -E '🔴 ([0-9]+ hard issue|résumé QA FAILED|warm-network data is stale|agent findings captured|follow-ups DUE)' || printf '🔴 consistency-check exit %s carried hard drift with no recognised line — see documents/.consistency-last.txt\\n' \"$rc\"; exit 0"
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" 2>/dev/null || exit 0; out=$(bash scripts/consistency-check.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" > documents/.consistency-last.txt 2>/dev/null; [ \"$rc\" -eq 0 ] && exit 0; printf '%s\\n' \"$out\" | grep -E '\ud83d\udd34 ([0-9]+ hard issue|r\u00e9sum\u00e9 QA FAILED|warm-network data is stale|agent findings captured|follow-ups DUE|TRIPWIRE|pair gate DRIFT)' || printf '\ud83d\udd34 consistency-check exit %s carried hard drift with no recognised line \u2014 see documents/.consistency-last.txt\\n' \"$rc\"; exit 0"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/check_pair.py\" --hook-stop"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/kit_update.py\" --stop"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/check_style.py\" --hook-stop"
           }
         ]
       }

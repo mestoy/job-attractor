@@ -1,3 +1,8 @@
+---
+name: outreach-send-prep
+description: Turn a finalized entry in documents/outreach-queue.md into the two review-ready artifacts you inspect before sending — the prepared draft and its check report. Load when a boss is verified, the copy is approved, and the message is ready to go out.
+---
+
 # Skill: Outreach Send-Prep (review package)
 
 **When:** an entry in `documents/outreach-queue.md` is finalized (boss verified, copy approved) and you want it ready to send.

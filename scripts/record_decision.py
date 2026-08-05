@@ -89,8 +89,20 @@ def row_mac(row: dict, key: bytes) -> str:
 # Now: negation wins outright, and BUILD requires an exact match against a short literal set
 # that the scorecard template emits as option labels. Paraphrase and free text NEVER classify
 # as BUILD — they fall through to OTHER, which does not authorize anything.
+# NARROWED, WITHOUT weakening the fail-closed property. Negation winning outright over the WHOLE
+# answer fixed refusals-become-authorizations, but over-corrected: it also inverted real decisions
+# whose VERDICT was affirmative and whose JUSTIFICATION merely contained a negative word, e.g.
+#     "Keep it, X is not the mission"      -> recorded SKIP
+#     "Build it, and negotiate Y later"    -> recorded SKIP
+#     "Both in one pass"                   -> recorded SKIP  ("pass", the engineering sense)
+# The affirmative opener was never consulted, because negation returned first.
+#
+# THE FIX: negation may only veto from the VERDICT CLAUSE (before the first comma). No comma means
+# the whole answer is the verdict, so every red-teamed refusal ("don't build", "Not yet, build next
+# week", "Go ahead and skip it", "skip the email but build the resume") behaves exactly as before.
+# `pass` also lost its bare form; a bare "pass" answer is still caught verbatim by SKIP_EXACT.
 NEGATION = re.compile(r"(?:\bdon'?t\b|\bdo not\b|\bnever\b|\bnot\b|\bno\b|\bskip\b|\bdrop\b|"
-                      r"\bhold\b|\bpass\b|\blater\b|\bnot now\b|\bnot yet\b)", re.I)
+                      r"\bhold\b|\bpass on\b|\blater\b|\bnot now\b|\bnot yet\b)", re.I)
 
 BUILD_EXACT = {
     "build", "build it", "build this", "build now",
@@ -98,11 +110,26 @@ BUILD_EXACT = {
 }
 SKIP_EXACT = {"skip", "skip it", "drop", "drop it", "hold", "pass", "no", "not now"}
 
+# The safety invariant the narrowing rests on, checked at import rather than in prose:
+# if a BUILD label ever contained a negation token, moving the negation check could
+# authorize something. It cannot, because it never can.
+assert not any(NEGATION.search(_b) for _b in BUILD_EXACT), \
+    "a BUILD_EXACT label contains a negation token — the clause-scoped check is unsafe"
+
 
 def _norm(a: str) -> str:
     a = (a or "").strip().lower()
     a = re.sub(r"[^a-z0-9,\s']", " ", a)
     return re.sub(r"\s+", " ", a).strip()
+
+
+def _verdict_clause(a: str) -> str:
+    """The part of the answer carrying the RULING, not the reasoning.
+
+    A ruling routinely names what did NOT disqualify a thing ("Keep it, X is not the mission"), so a
+    negation in a trailing clause is evidence ABOUT the verdict, not the verdict itself.
+    """
+    return a.split(",", 1)[0].strip() or a
 
 
 def classify(answer: str) -> str:
@@ -112,10 +139,10 @@ def classify(answer: str) -> str:
     a = _norm(answer)
     if a in SKIP_EXACT:
         return "SKIP"
-    if NEGATION.search(a):
-        return "SKIP"  # a refusal, a conditional, or a deferral — never an authorization
     if a in BUILD_EXACT:
-        return "BUILD"
+        return "BUILD"  # exact whole-string whitelist; provably contains no negation (see assert)
+    if NEGATION.search(_verdict_clause(a)):
+        return "SKIP"  # a refusal, a conditional, or a deferral — never an authorization
     return "OTHER"  # free text / paraphrase: recorded for audit, authorizes nothing
 
 
@@ -158,10 +185,16 @@ def classify_answer(answer: str, *context: str) -> str:
     if base != "OTHER":
         return base
     a = _norm(answer)
-    if NEGATION.search(a):
-        return "SKIP"
-    if _is_build_context(*context) and AFFIRM.search(a):
+    # ── THE ASYMMETRY, AND IT IS DELIBERATE ───────────────────────────────────────────────────
+    # Authorizing and refusing do not get the same evidence bar: a wrong BUILD puts an unapproved
+    # message in front of a real person, while a wrong SKIP only mislabels the audit trail.
+    #   BUILD promotion keeps the STRICT whole-string veto: ANY negation ANYWHERE blocks it.
+    #   SKIP is decided from the VERDICT CLAUSE only, so a justification cannot invert a decision.
+    # The veto is evaluated BEFORE the SKIP branch so it can never be bypassed by reordering.
+    if _is_build_context(*context) and AFFIRM.search(a) and not NEGATION.search(a):
         return "BUILD"
+    if NEGATION.search(_verdict_clause(a)):
+        return "SKIP"
     return "OTHER"
 
 

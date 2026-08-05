@@ -117,6 +117,22 @@ def comp_from_text(txt: str):
     m = re.search(r"\$[\d,]{3,}k?\s*(?:-|–|—|to)\s*\$?[\d,]{3,}k?", txt, re.I)
     return m.group().strip() if m else ""
 
+# Board tokens that are NOT derivable from the company name. Add a row the moment a lookup
+# resolves the WRONG company or misses a real board, because that is the only way this file learns.
+#
+# The generated suffixes below (data/hq/app/ai/inc) are guesses that happen to be cheap. They do not
+# cover the common real case, which is name + industry word: a company called "Acme" may post on
+# 'acmehealth' while the bare token 'acme' belongs to an unrelated company that happens to share the
+# name. Seeded EMPTY on purpose: your aliases are yours to add.
+#
+#   ALIAS_TOKENS = {"acme": ["acmehealth"]}      # normalized company name -> extra tokens to probe
+#
+# ⚠️ This map is what makes the ambiguity check downstream able to fire at all. Without the second
+# token, only ONE board resolves, nothing looks ambiguous, and you get a single confident WRONG
+# answer, which is the worst outcome available here.
+ALIAS_TOKENS = {}
+
+
 def tokens_from(name: str):
     base = name.lower().strip()
     nospace = re.sub(r"[^a-z0-9]", "", base)
@@ -124,11 +140,40 @@ def tokens_from(name: str):
     first = re.sub(r"[^a-z0-9]", "", base.split()[0]) if base.split() else nospace
     cands = [nospace, hyphen, first, nospace + "data", nospace + "hq",
              nospace + "app", nospace + "ai", nospace + "inc"]
+    cands += ALIAS_TOKENS.get(nospace, [])
     seen, out = set(), []
     for c in cands:
         if c and c not in seen:
             seen.add(c); out.append(c)
     return out
+
+
+def board_identity(ats, token, _cache={}):
+    """One line saying WHO a board belongs to, so a wrong-entity match is visible on sight.
+
+    Every "About <company>" blurb differs even when the company NAME does not, which is what makes
+    this the cheapest possible disambiguator. Best-effort: identity is a convenience for a human
+    reading the ambiguity warning, so any failure returns a shrug rather than raising.
+    """
+    key = (ats, token)
+    if key in _cache:
+        return _cache[key]
+    out = "(could not read the board's About text)"
+    try:
+        if ats == "Greenhouse":
+            d = get_json(f"https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true")
+            blob = " ".join((j.get("content") or "") for j in (d or {}).get("jobs", [])[:3])
+            # UNESCAPE FIRST, then strip tags. Greenhouse returns `content` HTML-escaped, so
+            # stripping before unescaping turns &lt;p&gt; back into a live <p> and leaves tag
+            # debris in the one line a human reads to tell two companies apart.
+            txt = re.sub(r"<[^>]+>", " ", html.unescape(blob))
+            txt = re.sub(r"\s+", " ", txt).strip()
+            m = re.search(r"\bAbout\s+[A-Z][\w.&' -]{1,40}?\s+((?:is|was|builds?|makes?)\b.{50,300})",
+                          txt)
+            out = (m.group(1) if m else txt[:280]).strip()
+    except Exception:
+        pass
+    return _cache.setdefault(key, defang(out, limit=320))
 
 def probe_greenhouse(token):
     for tk in dict.fromkeys([token, token.capitalize(), token.upper()]):
@@ -207,14 +252,42 @@ def main():
         toks = tokens_from(sys.argv[1])
     print(f"check_ats: trying tokens {toks}\n")
 
+    # ⛔ PROBE EVERY TOKEN. This loop used to break on the first token that resolved ANY board, and
+    # "resolves a board" is not "is the right company". Found live 2026-07-26, where two unrelated
+    # real companies shared a name:
+    #
+    #   the bare token   →  2 roles, a company in a completely different industry (and one whose
+    #                       customer base would have been a hard-filter fail on its own)
+    #   the real token   → 57 roles, the company actually being screened
+    #
+    # The bare token sorts first, so the probe stopped there and reported "no Product-Manager role →
+    # 🟡 RADAR" for a company with SIX live remote product roles. That false fact then propagated
+    # into the notes and downranked the company. A wrong-entity match is worse than NO match,
+    # because it answers.
+    #
+    # Corroborating on the company NAME does not save you, because both companies really do carry
+    # that name. When a name is ambiguous it cannot be resolved from the name alone, so the honest
+    # move is to REFUSE a single verdict and make the human disambiguate with --token. Print each
+    # board's own "About" line: that one snippet makes a wrong entity obvious at a glance.
     boards = []
     for tk in toks:
         for probe in (probe_greenhouse, probe_ashby, probe_lever):
             res = probe(tk)
             if res:
                 boards.append(res)
-        if boards:  # first token that resolves a real board wins
-            break
+
+    if len(boards) > 1:
+        print(f"  🔴 AMBIGUOUS: {len(boards)} different ATS boards match this name. NOT verifying.")
+        print("     These are probably DIFFERENT COMPANIES that share a name. Identify the right")
+        print("     one below, then re-run with the exact token:\n")
+        for ats, tk, total, roles in boards:
+            print(f"     ▸ {ats} board '{tk}' — {total} open roles, {len(roles)} product role(s)")
+            print(f"        who this is: {board_identity(ats, tk)}")
+            print(f"        → python3 scripts/check_ats.py --token {tk}")
+        print("\n  VERDICT: 🔴 UNRESOLVED — live-role status is UNVERIFIED until a token is chosen.")
+        print("     ⛔ Do NOT build off either board. Picking the wrong one is how a company with")
+        print("        six open PM seats gets recorded as having zero.")
+        sys.exit(2)
 
     if not boards:
         print("  ❌ No ATS board found for these tokens (custom/other ATS, or wrong token).")

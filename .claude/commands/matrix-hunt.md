@@ -49,9 +49,9 @@ For each company to pursue, run the full screen BEFORE any outreach — this is 
 
 **If it fails, report why (with quotes) and drop it. Do NOT outreach a culture-fail.** Only survivors continue.
 
-## Step 5: Identify the Would-Be Boss (product lead, NOT the CEO)
+## Step 5: Identify the Would-Be Boss (the LIKELY BOSS, derived — not a title ladder)
 
-For each survivor, find the person who owns product hiring — **CPO → VP Product → Head/Director of Product**, or a would-be **peer** for a relationship-first note. Fall back to the founder/CEO **only** when the company is flat and the founder owns the product. **Verify the person currently holds that role** (people move on — a note to someone who left is wasted). **Only use a real, verifiable LinkedIn profile** (via WebSearch); never fabricate; flag partial matches.
+For each survivor, find the person who would actually MANAGE this role, derived from how the company is built rather than read off a title ladder. **Real product org** → usually the seated product leader (CPO / VP / Head / Director of Product). **No product function** → the founder, CEO, or COO IS the likely boss, which is a first-class answer and not a fallback. A would-be **peer** is valid for a relationship-first note. Never HR, never a recruiter. ⚖️ **Founder ordering:** among several plausible bosses the founder or CEO is the LAST choice; if a founder is the only one you can find, target them without hesitation. **Verify the person currently holds that role** (people move on — a note to someone who left is wasted). **Only use a real, verifiable LinkedIn profile** (via WebSearch); never fabricate; flag partial matches.
 
 ## Step 6: Boss-Hunt Outreach (candidate's voice, channel decided together)
 
@@ -68,6 +68,6 @@ For each survivor, find the person who owns product hiring — **CPO → VP Prod
 1. **Matrix drives discovery.** Companies come from the candidate's criteria, not job boards.
 2. **Culture-first, always.** Screen before outreach; a culture fail is dropped even at a perfect matrix score.
 3. **Hard filters gate; scoring factors rank.** Check the matrix for which is which.
-4. **Target the product lead, not the CEO** (unless the founder owns product); verifiable, current profiles only.
+4. **Target the LIKELY BOSS**, whoever would actually manage the role, derived from how the company is built rather than a title ladder; verifiable, current profiles only.
 5. **Quotes when flagging culture;** review every draft; decide channel together; no cover letters.
 6. Complements `/apply` and `/radar-outreach` — this one **generates** the targets; hand survivors into the same outreach + logging flow.

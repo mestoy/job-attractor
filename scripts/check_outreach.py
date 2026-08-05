@@ -14,7 +14,7 @@ and vocabulary only.
 Usage:  scripts/check_outreach.py <body.txt>
 Exit:   0 = clean · 1 = FAIL (issues printed) · 2 = usage/no file
 """
-import sys, os, re
+import sys, os, re, json
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
@@ -43,6 +43,20 @@ SOFT = [
     "just", "literally", "truly", "fundamentally", "importantly", "crucially",
     "inherently", "inevitably", "notably", "arguably", "ultimately", "very", "quite",
 ]
+
+# Ask-shaped vocabulary for a rung 1-2 LinkedIn invitation note. A connection request may ask to
+# connect and share networks, nothing more; any role pitch is a hard fail. check_preview reuses this
+# list for its rung 1-2 zero-ask exemption, so it lives here as one source of truth for both gates.
+_INVITATION_ASK = [
+    (re.compile(r"on your radar", re.I), '"on your radar" is a rung 3-4 ask'),
+    (re.compile(r"\bPM like me\b|looking for a (?:PM|product manager)", re.I),
+     'pitching yourself for a role'),
+    (re.compile(r"\bbe considered\b|when (?:you have|a spot|you build out)", re.I),
+     'asking to be queued for an opening'),
+    (re.compile(r"\b(?:just )?applied for|I'?m applying|let'?s talk\b", re.I),
+     'an application or meeting ask'),
+    (re.compile(r"work directly for you", re.I), 'the hire-me ask'),
+]
 # Banned words that DOUBLE AS COMPANY NAMES. Every one of these is a plausible employer, and a
 # boss-hunt names the company in nearly every sentence. For these, only a LOWERCASE occurrence
 # counts as a defect.
@@ -50,6 +64,29 @@ NAME_PRONE = frozenset({
     "foster", "streamline", "realm", "beacon", "elevate", "embark", "supercharge",
     "vibrant", "empower", "paramount", "transformative", "facilitate", "utilize",
 })
+
+
+# ── SANCTIONED PRAISE CONSTRUCTION ───────────────────────────────────────────────────────────
+# The LaCivita appreciation ingredient is "I was impressed with your [X]", which a plain-spoken
+# house style bans as consultant-speak. The reference ruling: follow the METHOD as the baseline so
+# it can be evaluated and iterated, but carry the praise beat in "I really like ..." instead.
+# "really" is a BANNED filler adverb everywhere else and STAYS banned — this carve-out whitelists
+# it ONLY inside that exact construction, so the appreciation beat is sanctioned while stray
+# filler ("this really works", "really glad") still fails. A narrow phrase span, never a blanket
+# unban. Edit the list if your own praise beat uses a different construction.
+SANCTIONED_ADVERB_PHRASES = [
+    re.compile(r"\bI\s+really\s+like\b", re.I),
+]
+
+
+def sanctioned_phrase_spans(body):
+    """[(start, end)] byte spans where a BANNED word sits inside a sanctioned praise construction.
+
+    Only the whitelisted phrases in SANCTIONED_ADVERB_PHRASES qualify. A banned-word match whose
+    position falls inside one of these spans is appreciation, not filler, and is not a hit.
+    """
+    return [(m.start(), m.end()) for pat in SANCTIONED_ADVERB_PHRASES
+            for m in pat.finditer(body)]
 
 
 def known_companies() -> set:
@@ -86,6 +123,45 @@ def known_companies() -> set:
                 out.add(m.group(1).strip().lower())
     except Exception:
         pass
+    # DURABLE STORE, ADDED ALONGSIDE. The regex above reads the FIRST cell of every board row, so on
+    # a numbered table it collects row numbers and on a sparse table it collects whatever leads. The
+    # store is header-driven, so it names the company column correctly across every table shape.
+    #
+    # ⚠️ ADDED, NOT SUBSTITUTED, and deliberately. This set widens a GATE: a name in it is a name the
+    # gate recognizes. Swapping the loose regex for the precise store would make the gate NARROWER,
+    # and a narrower gate here fails open. Union keeps every name either source knows.
+    try:
+        import state as _state
+        for _rec in _state.from_source("company", "green-board"):
+            _name = (_rec.get("payload") or {}).get("name")
+            if _name and len(_name) > 2:
+                out.add(_name.strip().lower())
+    except Exception:
+        pass
+    # RADAR-REGISTER COMPANIES. The two sources above only carry companies that reached the
+    # TRACKER or the GREEN BOARD, and neither is where a boss hunt STARTS. In the reference
+    # pipeline a company was screened, boss-verified and BUILD-ruled by the human, yet the
+    # decision recorder still wrote an empty company, because the name existed nowhere in this
+    # set. The gate then correctly refused to honour an unscoped row, so a decision the human had
+    # plainly given blocked the send. Same defect class as the lowercase-brand case above, one
+    # layer earlier in the funnel: that name was lowercase, this one was simply NEW.
+    #
+    # These stay a RECOGNITION list, not a pattern. The criterion is "a store that carries a
+    # company in a dedicated column", and both of these do. They are pipeline-written records of
+    # real, screened companies, so nothing a scorecard never touched can enter this way.
+    for rel, field in (("documents/state/boss.jsonl", "company"),
+                       ("documents/state/employer-segments.jsonl", "employer")):
+        try:
+            with open(os.path.join(repo, rel), encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    co = (json.loads(line).get(field) or "").strip()
+                    if len(co) > 2:
+                        out.add(co.lower())
+        except Exception:
+            pass
     return out
 
 
@@ -177,6 +253,7 @@ def banned_hit(body, word):
         positive only asks you to look.
     """
     _spans = attributed_quote_spans(body)
+    _sanc = sanctioned_phrase_spans(body)    # the appreciation beat — praise, not filler
 
     if word in NAME_PRONE:
         return any(not _in_spans(m.start(), _spans) for m in
@@ -185,6 +262,8 @@ def banned_hit(body, word):
     for m in re.finditer(r"(?<![A-Za-z])" + re.escape(word) + r"(?![A-Za-z])", body, re.I):
         if _in_spans(m.start(), _spans):
             continue                         # someone else's words, attributed — not an AI tell
+        if _in_spans(m.start(), _sanc):
+            continue                         # sanctioned praise construction — not filler
         if not body[m.start():m.end()][:1].isupper():
             return True                      # lowercase use — plain vocabulary
         before, after = body[max(0, m.start() - 40):m.start()], body[m.end():m.end() + 40]
@@ -211,30 +290,345 @@ def banned_hit(body, word):
 # literal-only list leaves the sample corpus as an active re-contamination channel. Write the
 # pattern, not the string.
 
+
+# ── PORTED METHOD LAYER (2026-08-05): the O-A-K ingredient check, the message-type
+# vocabulary, and the invitation-note gate. Previously the kit shipped a lighter linter;
+# these are METHOD rather than one person's register, so they belong in every copy.
+# ── ANDY'S 7 MESSAGE INGREDIENTS + THE O-A-K TEST (added 2026-07-20) ────────────────────────
+# Source: Job Search Boot Camp, "Searching" digest p.12-13 (your licensed Milewalk PDF).
+# Coverage-map finding: these had ZERO repo presence — not a script, not a checklist, not a line
+# of prose — despite being Andy's core message-quality gate. Every other message rule we enforce
+# (voice, honesty, praise-source) sits DOWNSTREAM of them.
+#
+#   1 Who you are · 2 Why you chose them · 3 What you want/why reaching out ·
+#   4 You did your research · 5 What you can offer them · 6 You're grateful · 7 The next step
+#
+# His annotation on the slide: "#2 + #4 is what shows a O-A-K message" — O-A-K = ONE-OF-A-KIND:
+#   "Does this message look like it's the only one in existence?
+#    Does it look like it could ONLY be sent to this person?"
+#
+# MECHANIZING O-A-K. The honest proxy for "could ONLY be sent to this person" is: strip out
+# your own boilerplate vocabulary and see whether any specific anchor remains. A body whose
+# only proper nouns are your own credentials (Rise8 / OnPay / CalPEST / Claude Code) is a template
+# with a mail-merged first name — exactly the message Andy says NOT to send. Requires >= 2
+# distinct THEIR-side proper nouns; a greeting name alone is one, and one is not enough.
+#
+# CALIBRATION. These are FAILs, so they were calibrated against your ACTUAL sent corpus in
+# outreach_log.md, not against an idea of a good message.
+#
+# ⚠️ INGREDIENT 6 ("you're grateful") — RULING REVERSED 2026-07-24. This block used to read that
+# gratitude was "ABSENT from your strongest sends" and treat its absence as a deliberate divergence
+# from Andy. That was an INFERENCE FROM THE ARCHIVE, not a ruling: the sent corpus lacked a
+# thank-you beat because nobody had put one in, and the calibration then wrote that absence down as
+# your voice. you corrected it on a warm-reply note: **"No, we need to have the grateful
+# part."** He wants all SEVEN of Andy's ingredients.
+#
+# It stays a WARN rather than a FAIL, because a warm in-thread reply legitimately drops it, but the
+# WARN now means "you are missing one of the seven", not "this is fine, it is your voice". The wider
+# lesson: calibrating a gate against the archive encodes whatever the archive happens to contain,
+# including its gaps. An absence is only a preference once the human says so.
+#
+# RUNG-AWARE. Andy's ask shrinks as relationship distance shrinks, so the required ingredients
+# differ. A warm 1st-degree intro request has no praise beat and no credential dump by design;
+# holding it to the cold-boss shape would flag correct messages.
+# ⛔ YOUR OWN BOILERPLATE VOCABULARY, and it must come from kit_config, not from here.
+# These are the proper nouns that appear in EVERY message you send (your name, your employers,
+# your products, your stack), so they prove NOTHING about who a given message is for. The O-A-K
+# test below subtracts them before asking "could this only have been sent to this person?"
+# ⚠️ Ships EMPTY on purpose. Someone else's boilerplate is worthless to you, and a populated
+# default would quietly weaken the one test that catches a mail-merged opener.
+try:
+    from kit_config import OWNER_BOILERPLATE as _OWNER_BOILERPLATE
+except Exception:
+    _OWNER_BOILERPLATE = []
+MINE = set(x.lower() for x in _OWNER_BOILERPLATE) | {
+    # Grammatical filler only. Nothing here identifies a person.
+    "the", "and", "for", "with", "you", "your", "i", "my", "we", "our", "at", "to", "of", "in",
+    "on", "a", "an", "is", "are", "was", "were", "it", "that", "this",
+}
+
+
+# Common words that legitimately START a sentence and are not proper nouns. Needed because the
+# first calibration run threw away every sentence-initial capital, which silently DELETED the
+# company name from bodies like the Xano send ("Xano giving builders a real backend…") and then
+# failed it for having no specifics. A positional rule cannot tell "Xano" from "Getting"; a
+# vocabulary rule can.
+SENTENCE_STARTERS = {
+    "the","a","an","it","its","this","that","these","those","there","here","you","your","yours",
+    "we","our","i","my","he","she","they","their","what","who","whom","whose","when","where",
+    "why","how","if","and","but","or","so","because","after","before","while","since","as",
+    "getting","letting","turning","building","making","taking","running","owning","having",
+    "being","doing","giving","seeing","looking","working","shipping","writing","reading",
+    "most","many","some","every","each","both","all","no","not","now","then","just","even",
+    "one","two","three","first","last","next","one-of-a-kind","nothing","everything","someone",
+    "let","let's","would","could","should","will","can","may","might","must","do","does","did",
+    "is","are","was","were","been","be","am","for","from","with","without","about","into","on",
+    "at","by","to","of","in","out","up","down","over","under","again","still","also","too",
+}
+
+
+# ── MESSAGE TYPES (--type) ───────────────────────────────────────────────────────────────────
+# "outreach" is a FIRST CONTACT (cold boss-hunt or warm intro ask). Everything else is IN-THREAD:
+# a message to someone already in the process, where the thread itself carries the context that a
+# first contact has to build from nothing. Rules about the SHAPE of a first contact (the greeting,
+# the signature block, the praise beat, the 7 ingredients, the O-A-K anchor) are gated on this;
+# voice and honesty rules are not, and run on every type.
+#
+# The aliases are not cosmetic. mail-draft.sh maps `--rung thank-you` to `--type thankyou` and
+# `--rung follow-up` to `--type followup` (no hyphen), so an in-thread set spelled only with
+# hyphens silently classified every mail-draft thank-you and follow-up as a first contact.
+KNOWN_TYPES = {"outreach", "reply", "follow-up", "thank-you", "bump", "reunion", "invitation"}
+
+
+TYPE_ALIASES = {
+    "thankyou": "thank-you", "thank_you": "thank-you", "thanks": "thank-you",
+    "followup": "follow-up", "follow_up": "follow-up", "bump-email": "bump",
+    "intro": "outreach", "cold": "outreach", "": "outreach",
+}
+
+
+IN_THREAD_TYPES = {"reply", "follow-up", "thank-you", "bump"}
+
+
+# NO-ASK types (added 2026-07-24). A REUNION is a first contact that carries NO ask: a close
+# friend gone quiet gets a note with nothing requested, and the outreach comes later as a separate
+# message ([[reunion-before-outreach-close-friends]], ruled 2026-07-22 and mechanized here).
+#
+# Why it needed its own name rather than reusing a type: every existing non-outreach type is
+# IN-THREAD, and a reunion is not. Labelling one `reply` to reach the right gate profile would be
+# lying to the linter to get a weaker check, which is the exact failure this file already guards
+# against (an unrecognized --type used to silently SKIP the O-A-K gate on a cold boss-hunt).
+#
+# It shares the in-thread PROFILE because the reasons line up: no 7-ingredient/O-A-K check (there
+# is no ask to be one-of-a-kind about), and no signature block (a portfolio URL in a note to a
+# friend is the transactional tell the reunion rule exists to prevent). Everything else still
+# runs: AI-tells, em dashes, spaced slashes, retired figures, engineer-implication. A note to a
+# friend has to be just as honest and just as clean as a cold email.
+NO_ASK_TYPES = {"reunion", "invitation"}
+
+
+# WARM LANE (added 2026-07-26 for the rung-aware signature below). These are the rungs where the
+# recipient already knows who he is and how to reach him, so the portfolio URL is optional.
+# ⚠️ This list ALSO lives in scripts/check_followups.py, which uses it to decide whether a send
+# arms a follow-up at all. Two copies of one rule drift, and the copy nobody re-reads is the one
+# that drifts, so tests/test_style.py pins them equal. Change both or change neither.
+WARM_RUNGS = ("warm", "referred", "event", "off-ladder")
+
+
+# ── THE INVITATION NOTE (added 2026-07-27, ruled off the July numbers) ─────────────
+# A LinkedIn connection request carrying a note. It shares the NO-ASK profile because the only
+# thing the format can deliver is ACCEPTANCE: there is no reply box, no signature, no room for
+# seven ingredients in 300 characters.
+#
+# WHAT THE DATA SAID. 45 went out in July carrying a rung 3-4 pitch ("Would love to be on your
+# radar for a product role", "I heard you may be looking for a PM like me"). 7 were accepted
+# (15.6%) and 2 of those ever wrote back (4.4% of all sent), which is indistinguishable from cold
+# boss messaging at 4.8%. Scored as an ASK it looks like a failure. Scored as what it is, it
+# converted 7 strangers into permanent 1st-degree connections, and 1st-degree is the pool the
+# warm rungs draw from, which reply at 17.1%. **The channel is a roster builder, not a boss hunt.**
+#
+# THE RULING (you, 2026-07-27): keep the channel, strip the pitch, ask only to connect, and
+# score it on acceptance rather than replies. That is Andy's template 1-2 verbatim ("at a minimum,
+# I'd love to connect online and share networks").
+#
+# ⛔ WHAT THIS DOES NOT RELAX. Andy's warning stands and is not ours to soften: "DO NOT send a
+# LinkedIn connection request to any bosses before you've made contact with them via these other
+# techniques. And, DO NOT send them a connection request unless you have their permission."
+# A clean rung 1-2 note to a non-boss is sanctioned. A connection request to the boss is not,
+# whatever the note says, and that check lives at the SEND GATE where the target is known.
+_INVITATION_MAX = 300  # LinkedIn's hard cap; over this it TRUNCATES silently, mid-sentence.
+
+
+INGREDIENTS = [
+    # (number, label, regex, hard-fail-for-cold, hard-fail-for-warm)
+    (1, "who you are",
+     r"\b(i'?m|i am)\s+(a|an)\b|\bbuilder\s+pm\b|\bproduct\s+manager\b|\bi'?ve\s+(spent|been)\b"
+     r"|\bi\s+(have\s+)?(taken|led|built|run|drove|driven)\b|\bi\s+ship\b",
+     False, False),
+    (2, "why you chose them",
+     r"\b(is|are)\s+(a\s+)?(problem|work|company|question|the\s+kind|something|exactly)\b"
+     r"|\bi\s+can'?t\s+stop\b|\bso\s+i'?m\s+saying\b|\bdrew\s+me\b|\bcaught\s+my\b"
+     r"|\bwhy\s+i'?m\s+(writing|reaching)\b|\bwork\s+i\s+care\s+about\b"
+     r"|\bi\s+(care|love|admire|follow)\b|\bbecause\b|\byour\s+work\b|\byour\s+\w+\s+is\b",
+     False, False),
+    # DIRECT-QUESTION CLAUSE added 2026-07-21. Ingredients 3 and 7 both LED with "on your radar",
+    # and 3 is a HARD fail — so passing this linter effectively required that one phrase. Meanwhile
+    # `documents/compass.md` diagnoses regulated-workflow (17 sends, 0 replies) with rule 3, "Ask a
+    # question… the regulated ones asked nothing answerable," and the payments send that DID convert
+    # asked about a named seat. The two mechanisms contradicted each other: the linter mandated the
+    # shape the compass blames for the zero. A question addressed to the recipient is a STRONGER
+    # statement of what you want and what happens next than a passive radar register, so it has to
+    # count. Scoped to interrogatives that address THEM (contain "you"/"your"), so a rhetorical
+    # question in the hook does not satisfy the ask on its own.
+    (3, "what you want / why you're reaching out",
+     r"\bon\s+your\s+radar\b|\bi'?d\s+love\s+to\b|\bwould\s+love\s+to\b|\bjust\s+a\s+hello\b"
+     r"|\bsaying\s+(hello|hi)\b|\bi'?m\s+saying\b|\bi'?m\s+(reaching\s+out|writing)\b|\bopportunity\s+to\b"
+     r"|\bintroduction\b|\bintroduce\b|\bconnect\b|\binterested\s+in\b|\bany\s+chance\b"
+     r"|[^.?!]*\byour?\b[^.?!]*\?",
+     True, True),
+    (4, "you did your research (specific, THEIR side)", None, False, False),  # computed below
+    (5, "what you can offer them",
+     r"\$[\d,]+|\b\d+%|\b\d+x\b|\b0-to-1\b|\bzero\s+to\s+one\b|\b\d+\s*(million|billion|m\b|b\b|k\b)"
+     r"|\bbuilder\s+pm\s+like\s+me\b|\bi\s+(have\s+)?(taken|drove|driven|led|shipped|built)\b"
+     # His give-back idiom is offering to SHARE what he knows — "trade/swap/compare notes",
+     # "happy/glad to share/help" (proven across two real sends). Andy's ingredient 5
+     # is "what you can offer them"; an offer of hard-won expertise is one, and the detector missed
+     # it because it only recognized a demonstrated-metric offer. Added 2026-07-29.
+     r"|\b(swap|trade|compare)\s+notes\b|\b(happy|glad)\s+to\s+(swap|trade|share|compare|help)\b"
+     # 🤝 OFFERING PEOPLE IS AN OFFER, and for a recruiter it is the BEST one. Added 2026-08-04 on
+     # a note to a staffing director with 15 years placing technologists.
+     # The note offered "if I run into a strong engineer or PM who's looking, I'll send them your
+     # way", which is Andy's ingredient 5 in its purest form: candidates are a recruiter's currency,
+     # and it costs you nothing. The detector failed the note anyway because it only knew about
+     # metrics and about sharing expertise. Same defect shape as the 2026-07-29 addition above, one
+     # idiom later.
+     r"|\bsend\s+(them|him|her|folks|people|anyone|someone)\s+your\s+way\b"
+     r"|\b(point|refer|introduce)\s+(them|him|her|folks|people|anyone|someone)\s+(to\s+you|your\s+way)\b"
+     # ⏱️ OUTCOME VERBS BEYOND THE BUILD LIST. "I cut secure pipeline release time from months to
+     # minutes" is a demonstrated result with no digit in it, so the numeric branch missed it and the
+     # verb branch (taken/drove/led/shipped/built) did not carry "cut" or "reduced". A months-to-
+     # minutes claim is the strongest offer in that whole note.
+     r"|\bi\s+(cut|reduced|shrank|took)\b[^.?!]*\bfrom\b[^.?!]*\bto\b",
+     True, False),
+    (6, "you're grateful", r"\bthank(s| you)\b|\bgrateful\b|\bappreciate\b", False, False),
+    (7, "what the next step would be",
+     r"\bon\s+your\s+radar\b|\btalk\b|\bconversation\b|\bchat\b|\bnext\s+step\b|\bfind\s+a\s+time\b"
+     r"|\bhear\s+back\b|\bforward\s+my\b|\bfollow\s+up\b|\bmake\s+an?\s+intro"
+     r"|[^.?!]*\byour?\b[^.?!]*\?",  # a question TO them is the next step: their answer
+     False, False),
+]
+
+
+def _their_anchors(body):
+    """The O-A-K substrate: specifics that belong to THEM, not to your boilerplate.
+
+    Two kinds count, because both are things a template cannot carry:
+      • proper nouns that are not your own vocabulary (their name, their product), and
+      • a figure inside a clause about them ("You've moved $1B+ for schools…").
+    The figure half was added after calibration: the Cheddar Up send never names the company,
+    carries its whole specificity in "$1B+ for schools, teams, and nonprofits", and was being
+    failed as a template. It is the opposite of a template.
+    """
+    toks = set()
+    for m in re.finditer(r"\b([A-Z][a-zA-Z0-9]{1,})\b", body):
+        t = m.group(1)
+        if t.lower() in MINE or t.lower() in SENTENCE_STARTERS or len(t) < 2:
+            continue
+        toks.add(t)
+    for m in re.finditer(r"\b([A-Z][a-z]+[A-Z][a-zA-Z0-9]*|[A-Z]{2,})\b", body):
+        if m.group(1).lower() not in MINE:
+            toks.add(m.group(1))
+    # LOWERCASE-BRAND ANCHORS. Naming the company IS a their-side specific, and a lowercase brand
+    # is still the company's name. Without this, a message naming brightwheel twice was failed as a
+    # mail-merge template because the scanner only collects Capitalized tokens. Recognition-only:
+    # see known_companies().
+    try:
+        for co in known_companies():
+            if len(co) > 3 and re.search(r"(?<![a-z])" + re.escape(co) + r"(?![a-z])", body, re.I):
+                toks.add(co)
+    except Exception:
+        pass
+    anchors = set(toks)
+    # a them-anchored figure is a one-of-a-kind specific too
+    for sent in re.split(r"(?<=[.!?])\s+", body):
+        if re.search(r"\byou(r|'ve|'re)?\b", sent, re.I):
+            for f in re.findall(r"\$[\d,.]+\s*(?:[BbMmKk]\+?|billion|million|thousand)?\+?|\b\d+[%x]\b", sent):
+                anchors.add(f.strip())
+    return anchors
+
+
+def check_ingredients(body, rung):
+    """Andy's 7 ingredients + the O-A-K test. Returns (fails, warns).
+
+    HARD gates are deliberately narrow. Andy's own annotation is that ingredients #2 and #4 are
+    what MAKE a message one-of-a-kind, so the O-A-K test is already their composite — and the
+    composite is far more robust to detect than either part. Calibration proved the point: the
+    per-ingredient vocabulary detectors for #2 and #4 produced a 17.6% false-fail rate against
+    your real sent corpus (the DonorsChoose send expresses "why I chose you" as admiration,
+    which no keyword list anticipates), while the fixed O-A-K composite produces none. So #2 and
+    #4 WARN, and the composite FAILs. Hard-failing an individually brittle detector is how you
+    get a gate that people learn to --force past, which is worse than no gate.
+    """
+    fails, warns = [], []
+    warm = rung in ("warm", "referred", "event")
+    low = body.lower()
+
+    anchors = _their_anchors(body)
+    did_research = False
+    for sent in re.split(r"(?<=[.!?])\s+", body):
+        if re.search(r"\byou(r|'ve|'re)?\b|\b" + r"\b|\b".join(
+                sorted((re.escape(a) for a in anchors if a[:1].isalpha()), key=len, reverse=True)[:6] or ["￿"]) + r"\b", sent, re.I):
+            if re.search(r"\d", sent) or _their_anchors(sent):
+                did_research = True
+                break
+
+    for num, label, pat, hard_cold, hard_warm in INGREDIENTS:
+        present = did_research if num == 4 else bool(re.search(pat, low, re.I))
+        if present:
+            continue
+        hard = hard_warm if warm else hard_cold
+        msg = f"ingredient {num} missing — {label}"
+        (fails if hard else warns).append(msg)
+
+    # ── the O-A-K test (the #2 + #4 composite, and the real gate) ──
+    # RUNG-AWARE (FIX D, 2026-07-24): "could ONLY be sent to this person" is a COLD-BOSS bar — a
+    # cold stranger who gets a generic note is the failure Andy warns about. A WARM note goes to a
+    # known 1st-degree contact by definition, so a thin rung-5/6 reconnect (one anchor) is
+    # legitimate, not a mail-merge. Mirror the ingredient loop's hard_warm split: FAIL cold, WARN warm.
+    if len(anchors) < 2:
+        (warns if warm else fails).append(
+            "O-A-K FAIL — nothing in this body could ONLY be sent to this person. "
+            f"Their-side specifics found: {sorted(anchors) or 'none'}. Andy: \"Does this message "
+            "look like it's the only one in existence? Does it look like it could ONLY be sent to "
+            "this person?\" A mail-merged first name is not an answer."
+        )
+    elif len(anchors) < 3:
+        warns.append(f"O-A-K thin — {sorted(anchors)} is all that is theirs; add one more specific")
+    return fails, warns
+
 def main():
-    # --rung / --type are OPTIONAL and mail-draft.sh always passes them. They are parsed rather
-    # than ignored on purpose: a flag a script silently swallows reads as wired while doing
-    # nothing, which is the defect class this kit keeps paying for. Only the rung-dependent checks
-    # below consult them; everything else (banned vocabulary, honesty figures, signature, spacing)
-    # applies to every rung, because a warm note is still your writing going to a real person.
-    argv = [a for a in sys.argv[1:]]
-    rung, mtype = "", "outreach"
-    for _f, _set in (("--rung", "rung"), ("--type", "type")):
-        if _f in argv:
-            _i = argv.index(_f)
-            if _i + 1 < len(argv):
-                _v = argv[_i + 1]
-                if _set == "rung":
-                    rung = _v
-                else:
-                    mtype = _v
-                del argv[_i:_i + 2]
-            else:
-                del argv[_i]
-    IS_WARM = rung in ("warm", "referred", "event", "off-ladder")
-    if not argv:
-        print("usage: check_outreach.py <body.txt> [--rung <rung>] [--type <type>]"); sys.exit(2)
-    path = argv[0]
+    if len(sys.argv) < 2:
+        print("usage: check_outreach.py <body.txt> [--rung <rung>] [--type <message type>]")
+        sys.exit(2)
+    rung = ""
+    if "--rung" in sys.argv:
+        _i = sys.argv.index("--rung")
+        if _i + 1 < len(sys.argv):
+            rung = sys.argv[_i + 1]
+        sys.argv = sys.argv[:_i] + sys.argv[_i + 2:]
+    # MESSAGE-TYPE awareness (added 2026-07-20). The 7-ingredient + O-A-K check is intrinsically
+    # about a COLD/WARM INTRO ("why you chose them", "what you can offer", a one-of-a-kind anchor).
+    # A thank-you / reply / follow-up-bump has none of those by nature, so running the ingredient
+    # check on one FALSE-FAILS it (hit live on Blake's Astra thank-you). --type gates ONLY the
+    # ingredient block; every other check (AI-tells, em-dash, spaced-slash, retired figures,
+    # engineer-implication, signature, sign-off) still runs — a thank-you must be just as honest and
+    # just as clean as an outreach email.
+    mtype = "outreach"
+    if "--type" in sys.argv:
+        _j = sys.argv.index("--type")
+        if _j + 1 < len(sys.argv):
+            mtype = sys.argv[_j + 1]
+        sys.argv = sys.argv[:_j] + sys.argv[_j + 2:]
+    # NORMALIZE + VALIDATE (2026-07-21). Two defects sat one line apart here.
+    #   1. mail-draft.sh spells two of these types without a hyphen (thankyou, followup), so the
+    #      in-thread exemptions never fired on a thank-you or a follow-up sent through the one
+    #      mechanism that sends everything. Both hard-failed on a missing signature block, which is
+    #      the beat an in-thread message is supposed to drop. Aliasing at the boundary is cheaper
+    #      than trusting two files to agree on a string forever.
+    #   2. An unrecognized --type fell through as "not outreach" and SKIPPED the 7-ingredient/O-A-K
+    #      gate. A typo bought a WEAKER check on a cold boss-hunt, which is the wrong direction for
+    #      a gate to fail, so an unknown type is a usage error now and mail-draft blocks on it.
+    mtype = mtype.strip().lower()
+    mtype = TYPE_ALIASES.get(mtype, mtype)
+    if mtype not in KNOWN_TYPES:
+        print(f"unknown --type '{mtype}'. One of: " + " | ".join(sorted(KNOWN_TYPES)))
+        sys.exit(2)
+    # IN-THREAD = the recipient already knows who he is and how to reach him, and the thread
+    # carries the context. Gates the first-contact SHAPE rules only; see each use below.
+    # Gates the FIRST-CONTACT-ASK shape rules (7 ingredients, O-A-K, signature block). True for a
+    # live thread, and also for a no-ask reunion, which is a first contact that requests nothing.
+    _IN_THREAD = mtype in IN_THREAD_TYPES or mtype in NO_ASK_TYPES
+    path = sys.argv[1]
     if not os.path.exists(path):
         print(f"body file not found: {path}"); sys.exit(2)
     body = open(path, encoding="utf-8", errors="ignore").read()
@@ -248,17 +642,17 @@ def main():
         fails.append("spaces around a slash (write fintech/payments)")
     if re.search(r"^\s*-\s+\S", body, re.M):
         fails.append("'-' bullet(s) — use '•' for Apple Mail")
-    # — banned words / AI tells —
+    # — banned words / AI tells (word-boundary) —
     # banned_hit(), not a bare regex on `low`: lowercasing first destroys the capitalization that
-    # tells a company name apart from a voice defect. See banned_hit's docstring.
+    # tells a company name apart from a voice defect. See banned_hit's docstring (Empower Project).
     for w in BANNED:
         if banned_hit(body, w):
             fails.append(f"banned/AI-tell word: \"{w}\"")
-    # — often-empty adverbs: WARN, never fail (see the SOFT comment above) —
+    # — often-empty adverbs: WARN, never fail (see the SOFT comment at the top of this file) —
     for w in SOFT:
         if re.search(r"(?<![a-z])" + re.escape(w) + r"(?![a-z])", low):
             warns.append(f"often-empty adverb: \"{w}\" — cut it unless it carries emphasis, "
-                         "uncertainty, or your spoken rhythm")
+                         "uncertainty, or his spoken rhythm")
     # — retired / dishonest figures —
     for w in RETIRED:
         if w.lower() in low:
@@ -266,15 +660,42 @@ def main():
     for pat, label in RETIRED_PATTERNS:
         if re.search(pat, low):
             fails.append(f"retired/incorrect claim: {label}")
-    # ROLE-CLAIM honesty (kit_config.ROLE_IMPLY_PATTERNS). Word-level lists miss the real
-    # failure, which is a whole phrasing that claims authorship of work someone else did —
-    # "I built the payments API" reads as engineering authorship even when you owned the
-    # requirements and the decision rather than the code. That phrasing goes out to a Head of
-    # Product who will read it literally. Match the shape of the claim, not a keyword.
-    for pat, label in ROLE_IMPLY_PATTERNS:
+    # ENGINEER-IMPLICATION (added 2026-07-19). This file had NO engineer patterns at all —
+    # only verify_resume.py did, and its patterns ("as an engineer", "engineer-turned-pm")
+    # would not have caught the phrasing that actually shipped: "I built OnPay's $35B+ B2B
+    # payments API" went to a Head of Product (Flexpa) and a co-founder/CPO (Zus Health) on
+    # 2026-07-14. you owned the REQUIREMENTS and the API-first decision; an engineer built
+    # the API. The repo's own vetted phrasing is "DROVE OnPayConnect's ... API-first".
+    # REWRITTEN 2026-07-19 after a red-team showed the first version was backwards. It keyed on
+    # verb-noun PROXIMITY ("I built" within 40 chars of api|platform|...), which:
+    #   • blocked 8/8 TRUE statements — "I built Ensemble with Claude Code", "I built a RAG
+    #     pipeline for the Air Force" — i.e. the builder-PM/Claude Code differentiator CLAUDE.md
+    #     tells him to lead with; and
+    #   • passed 5/5 evasions of the ACTUAL dishonest claim ("We built OnPay's API",
+    #     "I've built…", "I developed…").
+    # The real tell is not the verb, it is the OBJECT: claiming an EMPLOYER'S engineering artifact.
+    # "I built Ensemble" is true (he built it with Claude Code). "I built OnPay's payments API" is
+    # not (he owned requirements; an engineer built it). So match possession, and stay narrow —
+    # a precise check that catches the known-bad pattern beats a broad one that cries wolf.
+    ENGINEER_CLAIMS = (
+        (r"\b(i|we)(?:'ve| have)?\s+(built|coded|engineered|architected|developed|wrote|implemented)\b"
+         r"[^.]{0,40}?\b(onpay|onpayconnect|rise8)\b[^.]{0,25}\b(api|platform|pipeline|backend|infrastructure|system)\b",
+         'claims authorship of an EMPLOYER\'s engineering artifact — you owned requirements and the '
+         'API-first decision; an engineer built it. Use the vetted phrasing: "drove OnPayConnect\'s '
+         '$35B+ payments platform API-first"'),
+        # Possessive object = someone else's artifact. Exclude the things he genuinely DID build
+        # himself with Claude Code (Ensemble / the PM OS), or this flags a true statement.
+        (r"\b(i|we)(?:'ve| have)?\s+(built|coded|engineered|architected|developed|implemented)\b"
+         r"[^.]{0,30}?\b(?!ensemble|pm[- ]os|my own)[a-z]+'s\s+[^.]{0,20}\b(api|platform|backend|infrastructure)\b",
+         'claims authorship of someone ELSE\'s engineering artifact (possessive object) — scope the '
+         'claim to what you personally owned'),
+        (r"\bas an engineer\b|engineer[- ]turned[- ]pm|came up as an engineer|\bmy engineering background\b",
+         "implies an engineering background — you was NEVER an engineer"),
+    )
+    for pat, label in ENGINEER_CLAIMS:
         if re.search(pat, low):
             fails.append(f"honesty guardrail: {label}")
-    # Inflection hole: the (?![a-z]) boundary lets suffixed forms escape —
+    # Inflection hole (2026-07-19 audit): the (?![a-z]) boundary let suffixed forms escape —
     # "seamlessly", "leveraged", "delved", "robustness", "showcased" all passed clean while
     # the base word is banned. Catch the common -ly/-ed/-ing/-ness forms of the worst offenders.
     for stem in ("seamless", "leverag", "delv", "robust", "showcas", "utiliz"):
@@ -282,35 +703,114 @@ def main():
             m = re.search(r"(?<![a-z])(" + stem + r"[a-z]*)", low)
             fails.append(f"banned/AI-tell word: \"{m.group(1)}\"")
     # — structure (presence, not judgment) —
-    if not re.search(r"^\s*(hi|hey|tgif|hello)[, ]+[A-Z][a-z]+!", body, re.M | re.I):
+    # GREETING PRESENCE IS FIRST-CONTACT ONLY (2026-07-21). Opening a cold email with no greeting
+    # is a real defect; opening a REPLY with no greeting is how people write in a live thread.
+    # you does both. His reply to Brian de Haaff opened "TGIF, Brian!", his reply to Mark
+    # Bishop opened "Good eye. FIS was a contract stint…", and the second one is correct, so a
+    # warn that fires on it is telling him his own good writing is wrong. Note this suppresses only
+    # the PRESENCE warn; the own-line format warn below still applies whenever a greeting IS there,
+    # because a joined greeting reads the same in any message.
+    if not _IN_THREAD and not re.search(r"^\s*(hi|hey|tgif|hello)[, ]+[A-Z][a-z]+!", body, re.M | re.I):
         warns.append("no 'Hi/Hey, First!' greeting line found")
-    if OWNER_SITE.lower() not in low:
-        fails.append(f"missing {OWNER_SITE} sign-off")
-    # — signature block format: TWO blank lines before your name, then the website URL on the
-    #   line DIRECTLY under it (no blank line between). —
-    if not re.search(r"\n\n\n" + re.escape(OWNER_FIRST) + r"\b", body):
-        fails.append(f"signature: need two blank lines before '{OWNER_FIRST}' (blank, blank, name)")
-    if not re.search(r"\n" + re.escape(OWNER_FIRST) + r"\n(https?://)?(www\.)?" + re.escape(OWNER_SITE), body):
-        fails.append(f"signature: website must sit on the line directly under '{OWNER_FIRST}' (no blank line between)")
+    # IN-THREAD REPLIES DO NOT GET A SIGNATURE (you 2026-07-21): "I'm debating including my
+    # signature name and website address when replying. That makes it seem impersonal since we
+    # already have active thread?" He is right, and his own unassisted writing proves it — his
+    # in-thread reply to Brian de Haaff was "TGIF, Brian! Thanks for accepting. I'm definitely not
+    # at the VP level yet 🤣... maybe someday!" with no name and no URL. The signature earns its
+    # place on FIRST contact, where the recipient may not know who he is or how to find him. Three
+    # messages deep it reads like closing a business letter. This check was built for email and was
+    # over-applied to DM replies — it hard-failed a real DM reply of his until the block was added.
+    # (_IN_THREAD is computed in main() above, at the point --type is normalized.)
+    # — signature block format (you 2026-07-19): TWO blank lines before his name,
+    #   then the website URL on the line DIRECTLY under it (no blank line between).
+    #   Sign-off token is his real name — "you", the diminutive "Mike", or the surname
+    #   "Estoy"; he picks the register (a warm post-chat thank-you gets "Mike", a cold-boss email
+    #   gets "you", a note to somebody who has called him by his surname since high school
+    #   gets "Estoy" — added 2026-07-26 with a warm-lane note).
+    #
+    # ⛔ THE SIGNATURE IS RUNG-AWARE AS OF 2026-07-26. It used to demand the full block on every
+    # first contact, which hard-failed his REAL warm practice. Measured: the 2026-07-21 Trina
+    # earlier note and a later warm-lane note were both sent, both welcomed, and both
+    # end on a bare first name with no URL. A gate that fails copy he actually sent is wrong about
+    # the copy, not the other way round ([[the rule is wrong, not the message]], the same principle
+    # test_style.py's LiveCorpusRegressionTests enforces on the word list).
+    #
+    # The distinction is the RUNG, not the channel. A cold boss does not know who he is or how to
+    # find him, so the full block earns its place. A warm 1st-degree contact already knows both,
+    # and a portfolio URL under a note to a friend reads like a pitch. So: warm lane accepts EITHER
+    # shape, cold lane still requires the full block. This LOOSENS nothing for cold outreach.
+    # ⚠️ Derived from the configured identity, never hardcoded. The main pipeline can name one
+    # person; a kit cannot, and a hardcoded name here silently fails every signature check
+    # for everyone else while reporting a formatting error they cannot fix.
+    _parts = [p for p in re.split(r"\s+", OWNER_NAME.strip()) if p]
+    _NAME = "(?:" + "|".join(re.escape(x) for x in dict.fromkeys(
+        _parts + [OWNER_FIRST])) + ")" if _parts else r"(?:\w+)"
+    _WARM_LANE = (rung or "").strip().lower() in WARM_RUNGS
+    if not _IN_THREAD:
+        _full_block = bool(re.search(r"\n\n\n" + _NAME + r"\n(https?://)?(www\.)?" + re.escape(OWNER_SITE),
+                                     body))
+        # Warm shape, measured from his REAL sends rather than assumed. The 2026-07-21 Trina note
+        # is `…unicorns.\n\nMike\nhttps://www.<your site>\n` — ONE blank line, name, URL
+        # directly under. The 2026-07-26 Esther note ends on a bare `Estoy` with no URL. So the
+        # warm lane varies on BOTH axes (one-or-two blank lines, URL present or not) and the only
+        # invariant is: a sign-off name alone on its line, optionally followed by the URL line,
+        # with nothing after it.
+        # ⚠️ An earlier read of this said his warm notes carry no URL. That was wrong, taken from a
+        # truncated blockquote in outreach_log.md rather than from the bytes. Measure the file.
+        _warm_sig = bool(re.search(
+            r"\n\n+" + _NAME + r"[ \t]*(?:\n(?:https?://)?(?:www\.)?" + re.escape(OWNER_SITE) + r"[ \t]*)?\s*\Z",
+            body))
+        if _WARM_LANE:
+            # A sign-off is still REQUIRED. Only the URL and the second blank line are optional.
+            if not (_full_block or _warm_sig):
+                fails.append("signature: a warm-lane first contact still needs a sign-off — either "
+                             "a bare your sign-off name after a blank line, or the full block "
+                             f"(two blank lines, name, {OWNER_SITE} directly under it)")
+        else:
+            if OWNER_SITE not in low:
+                fails.append(f"missing {OWNER_SITE} sign-off")
+            if not re.search(r"\n\n\n" + _NAME + r"\b", body):
+                fails.append("signature: need two blank lines before your name (blank, blank, name)")
+            if not _full_block:
+                fails.append("signature: website must sit on the line directly under your name (no blank line between)")
+    elif re.search(r"\n" + _NAME + r"\n(https?://)?(www\.)?" + re.escape(OWNER_SITE), body):
+        # Present on a reply is not an error he must fix, but it is worth seeing: it is the beat
+        # that makes a live thread read as correspondence rather than conversation.
+        warns.append("signature present on an in-thread reply — usually reads formal; his own "
+                     "in-thread replies carry no name/URL")
     # — paragraph spacing: paragraphs separated by a blank line (no single-newline-joined blocks) —
     if re.search(r"[a-z0-9][.!?]\n(?=[A-Z])", body):
         warns.append("paragraph spacing: a paragraph break has no blank line (single newline mid-body)")
-    # — GREETING ON ITS OWN LINE. It must sit alone on its line with a blank line before the body:
-    #   "Hi, First!\n\nYou brought…", never "Hi, First! You brought…". Fires only when a greeting is
-    #   present, so a no-greeting body keeps its single "greeting missing" warn. —
+    # — GREETING ON ITS OWN LINE (you 2026-07-20, memory→durable migration). The greeting must
+    #   sit alone on its line with a blank line before the body: "Hi, Astrid!\n\nYou brought…", never
+    #   "Hi, Astrid! You brought…". Fires ONLY when a greeting is present, so a no-greeting body keeps
+    #   its single "greeting missing" warn rather than double-penalizing. —
+    # EMAIL/FIRST-CONTACT ONLY (you 2026-07-29). He joins the greeting to the first beat on
+    # every LinkedIn short message — "Hi, Riché! I really like…", three in a row (Jason, Malte,
+    # Riché). The own-line rule was written for email bodies (the dense-block concern); an in-thread
+    # or short DM joins the greeting by his consistent practice, so suppress the warn there. The
+    # rule still holds for a cold-boss email.
     _GREET = r"^[ \t]*(?:hi|hey|tgif|hello)[, ]+[A-Za-z'’-]+!"
-    if re.search(_GREET + r"[ \t]*[^\s]", body, re.M | re.I) or \
-       re.search(_GREET + r"[ \t]*\n(?!\n)", body, re.M | re.I):
+    if not _IN_THREAD and (re.search(_GREET + r"[ \t]*[^\s]", body, re.M | re.I) or
+                           re.search(_GREET + r"[ \t]*\n(?!\n)", body, re.M | re.I)):
         warns.append("greeting must sit on its own line with a blank line before the body "
                      "(Hi, First!\\n\\n…), not joined to the first beat")
-    # — DENSE BLOCK. Break ONE BEAT PER PARAGRAPH (hook/praise · proof · identity · ask) with a blank
-    #   line between beats, never one wall of text. Strip the signature, then flag a content region
-    #   that is effectively one run-on paragraph. —
-    _sig = re.search(r"\n\n\n" + re.escape(OWNER_FIRST) + r"\b", body)
+    # — DENSE BLOCK (you 2026-07-20, memory→durable migration). Outreach (email AND LinkedIn/DM)
+    #   breaks ONE BEAT PER PARAGRAPH with a blank line between beats (hook/praise · proof · identity ·
+    #   ask), never a single wall of text — he DELETED staged drafts that were one dense paragraph.
+    #   Strip the signature, then flag a content region that is effectively one run-on paragraph. —
+    _sig = re.search(r"\n\n\n(?:you|Mike)\b", body)
     _content = body[:_sig.start()] if _sig else body
     _paras = [p for p in re.split(r"\n[ \t]*\n", _content) if p.strip()]
     _sentences = len(re.findall(r"[.!?](?:\s|$)", _content))
-    if len(_paras) <= 2 and _sentences >= 3:
+    # The wall-of-text rule stays universal (he reformatted a WorqFlow LinkedIn REPLY himself to
+    # show the pattern), but the trigger was calibrated on outreach, which carries four beats by
+    # design. A short in-thread reply carries one, so the shape it is being told to adopt does not
+    # exist: his own two-sentence reply to Brian de Haaff tripped this. Floor the in-thread case at
+    # a body long enough to HAVE separable beats; a long in-thread message mashed into one
+    # paragraph is still a wall of text and still warns. (2026-07-21)
+    _cwords = len(re.findall(r"\S+", _content))
+    if len(_paras) <= 2 and _sentences >= 3 and (_cwords >= 60 or not _IN_THREAD):
         warns.append("dense block — the body reads as one paragraph; break it one beat per paragraph "
                      "(hook/praise · proof · identity · ask) with a blank line between beats")
     # — repeated multi-word content phrase (an AI tell: same phrase in nearby sentences, e.g. "builder PM" twice) —
@@ -323,47 +823,92 @@ def main():
                      if c > 1 and any(len(x) >= 4 and x not in _stop for x in g.split())})
     if _dupes:
         warns.append("repeated phrase(s) across the body (AI tell — vary it): " + ", ".join(_dupes[:6]))
-    # — sentence-level CADENCE (your hooks should stay SHORT; one vivid phrase carries the beat, not a
-    #   nested clause or a comma-stacked run-on). This is the gap that lets a "clunky but clean" draft
-    #   score 🟢: the word/format gates never measured per-sentence length or clause density. Short
-    #   outreach hooks top out around ~28 words / ≤2 commas; the drafts you reject tend to run 32-33
-    #   words — so >30 words, or 3+ commas in a longish sentence, WARNs. WARN, never FAIL: a legitimate
-    #   "and X and Y" run-on and a tightened 24-word draft both stay clean. Reports the FIRST offender;
-    #   re-lint after you tighten. Model each beat on a named sample (python3 scripts/voice_samples.py). —
+    # — sentence-level CADENCE (his hooks are SHORT; one vivid phrase carries the beat, not a nested
+    #   clause or a comma-stacked run-on). This is the gap that let a "clunky but clean" draft score
+    #   🟢: the word/format gates never measured per-sentence length or clause density. Calibrated on
+    #   his real corpus — his outreach hooks top out ~28 words / ≤2 commas (writing-samples.md Sample
+    #   4b), and the clunky drafts he rejected ran 32-33 words — so >30 words, or 3+ commas in a
+    #   longish sentence, WARNs. WARN, never FAIL: his legitimate "and X and Y" run-on (Sample 5) and
+    #   the tightened draft (24 words) both stay clean. Reports the FIRST offender; re-lint after you
+    #   tighten. —
     for _cs in re.split(r"(?<=[.!?])\s+", _content):
         _cs = _cs.strip()
         if not _cs:
             continue
         _csw = len(re.findall(r"\S+", _cs))
         if _csw > 30:
-            warns.append(f"clunky sentence ({_csw} words) — your sentences run short; tighten it and "
-                         f"let one vivid phrase carry the beat (writing-samples.md)")
+            warns.append(f"clunky sentence ({_csw} words) — his run short; tighten it and let one "
+                         f"vivid phrase carry the beat (writing-samples.md Sample 4/5/6)")
             break
         if _cs.count(",") >= 3 and _csw >= 26:
             warns.append(f"comma-stacked hook ({_cs.count(',')} commas) — swap the nested clause for "
-                         f"one tight phrase (writing-samples.md)")
+                         f"one tight phrase (writing-samples.md Sample 4)")
             break
     # — generic-praise heuristic (Andy A2: praise must be a RESEARCHED SPECIFIC boss accomplishment,
     #   not product/mission-level). Flag a "you built/created <X>" sentence that has NO specific detail
     #   (no number and no second named/proper thing) — the generic shortcut. WARN (judgment-heavy);
-    #   the hard gate is mail-draft.sh --praise-source. —
-    # ⛔ COLD RUNGS ONLY. A warm or referred ask is a favor asked of someone you know: it has no
-    # boss, no researched accomplishment and no praise beat, so "your praise may be generic" is
-    # noise there. Nagging about a missing beat that the rung does not call for is how a check
-    # teaches people to stop reading it.
-    for _m in (() if IS_WARM else re.finditer(r"(?:^|[.!?]\s+)(you (?:built|created|made|led|shaped)\b[^.!?]*)", body, re.I)):
-        _sent = _m.group(1)
-        _stopcap = {"you","the","this","that","your","their","our","and","for","with","from","they","she","him","her"}
-        _caps = [c for c in re.findall(r"\b[A-Z][a-zA-Z]{2,}", _sent) if c.lower() not in _stopcap]
-        if not re.search(r"\d", _sent) and len(_caps) < 2:   # <2 named things + no number = generic
-            warns.append("praise may be generic — a 'you built/led …' line with no specific "
-                         "detail (no number, no second named thing). The method wants a RESEARCHED "
-                         "specific accomplishment of theirs, mirrored by one of yours")
-            break
+    #   the hard gate is mail-draft.sh --praise-source.
+    #   FIRST-CONTACT ONLY (2026-07-21). A2 governs the PRAISE BEAT of a cold boss-hunt: the thing
+    #   that earns a stranger's attention in the first ten seconds. A live thread has no praise beat
+    #   to research, and the mechanism this points at (mail-draft --praise-source) is not supplied on
+    #   a post-contact send at all, so the advice has nowhere to land. "You led that rollout" in a
+    #   reply to a hiring manager is conversation, not a failed A2. —
+    if not _IN_THREAD:
+        for _m in re.finditer(r"(?:^|[.!?]\s+)(you (?:built|created|made|led|shaped)\b[^.!?]*)", body, re.I):
+            _sent = _m.group(1)
+            _stopcap = {"you","the","this","that","your","their","our","and","for","with","from","they","she","him","her"}
+            _caps = [c for c in re.findall(r"\b[A-Z][a-zA-Z]{2,}", _sent) if c.lower() not in _stopcap]
+            if not re.search(r"\d", _sent) and len(_caps) < 2:   # <2 named things + no number = generic
+                warns.append("praise may be generic — a 'you built/led …' line with no specific detail (no number, no second named thing). Andy A2 wants a RESEARCHED specific boss accomplishment + a you mirror")
+                break
     # — length (a boss-hunt note is short) —
     words = len(re.findall(r"\S+", body))
     if words > 200:
         warns.append(f"long body ({words} words) — boss-hunt notes run ~120-160")
+
+    # An exemption must never be silent. If a banned word was let through because it sat inside
+    # someone else's attributed words, SAY SO — the linter cannot verify that an attribution is
+    # truthful, so that judgment stays with the human reading this line.
+    for _w, _snip in exempted_banned(body):
+        warns.append(f'banned word "{_w}" ALLOWED inside an attributed quote: …{_snip[:70]}… '
+                     f"(verify the attribution is real; the linter cannot)")
+
+    # — Andy's 7 ingredients + the O-A-K test (OUTREACH only; a thank-you/reply/follow-up has no
+    #   "why you chose them" or one-of-a-kind anchor by nature, so this would false-fail it) —
+    if mtype == "outreach":
+        _if, _iw = check_ingredients(body, rung)
+        if _if:
+            # A manual invocation carries no --type (documents/email-body-checklist.md says to run
+            # `check_outreach.py <body.txt>` bare), so an in-thread reply linted by hand collects
+            # first-contact ingredient fails it can never satisfy. Point at the flag instead of
+            # leaving the reader to argue with a gate that is measuring the wrong genre.
+            _if.append("↑ if this is an in-thread reply/thank-you/follow-up, re-run with "
+                       "--type reply|follow-up|thank-you|bump. The ingredient/O-A-K block is a "
+                       "FIRST-CONTACT check and does not apply here.")
+        fails.extend(_if); warns.extend(_iw)
+    else:
+        warns.append(f"message type '{mtype}': ingredient/O-A-K check skipped (not an intro); "
+                     "AI-tells, honesty, and signature checks still applied")
+
+    # — The invitation note is rung 1-2 and its ask is ACCEPTANCE. A role pitch in it asks for
+    #   something the format cannot deliver, and July's 45 sends are the evidence (see the
+    #   _INVITATION_ASK block above for the funnel). Hard fail, because a connection request
+    #   cannot be unsent and the ruling exists to stop the pitch version recurring. —
+    if mtype == "invitation":
+        _body_len = len(body.strip())
+        if _body_len > _INVITATION_MAX:
+            fails.append(
+                f"invitation note is {_body_len} chars, over LinkedIn's {_INVITATION_MAX} cap. "
+                "LinkedIn truncates silently, mid-sentence, and the send still counts.")
+        for _pat, _why in _INVITATION_ASK:
+            _m = _pat.search(body)
+            if _m:
+                fails.append(
+                    f'invitation note carries a rung 3-4 ask ({_why}): "{_m.group(0)}". '
+                    "An invitation can only deliver ACCEPTANCE, so the ask is rung 1-2: connect "
+                    "and share networks, nothing more. Ruled 2026-07-27 off 45 July sends that "
+                    "carried the pitch and converted 7. Work the ones who accept at the warm rungs, "
+                    "where the reply rate is 17.1%.")
 
     name = os.path.basename(path)
     if fails:
@@ -374,8 +919,6 @@ def main():
         sys.exit(1)
     print(f"🟢 check_outreach clean — {name}" + (f"  ({len(warns)} advisory)" if warns else ""))
     for w in warns: print(f"   ⚠️  {w}")
-    if not RETIRED and not RETIRED_PATTERNS:
-        print("   ⚠️  kit_config RETIRED lists are empty — the honesty-figure scrub checked nothing.")
     sys.exit(0)
 
 if __name__ == "__main__":

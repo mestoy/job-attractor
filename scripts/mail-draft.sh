@@ -15,7 +15,7 @@ eval "$(python3 "$HERE/kit_config.py" --sh 2>/dev/null || true)"
 KIT_OWNER_NAME="${KIT_OWNER_NAME:-Your Name}"
 KIT_RESUME_EXAMPLE="${KIT_RESUME_EXAMPLE:-$KIT_OWNER_NAME - Resume - <Company>.pdf}"
 KIT_RULES_DOC="${KIT_RULES_DOC:-documents/WORKFLOW-RULES.md}"
-TO="" BCC="" SUBJECT="" BODYFILE="" ATTACH="" FORCE="" PRAISE_SOURCE="" LACIVITA_CHECK="" PRAISE_PHRASING="" COMPANY="" SEGMENT="" WARM_RUNG="" RUNG="" RUNG_EXPLICIT="" TARGETS="" POST_CONTACT="" NO_RESUME="" MTYPE="outreach"
+TO="" BCC="" SUBJECT="" BODYFILE="" ATTACH="" FORCE="" PRAISE_SOURCE="" LACIVITA_CHECK="" PRAISE_PHRASING="" COMPANY="" SEGMENT="" WARM_RUNG="" RUNG="" RUNG_EXPLICIT="" TARGETS="" POST_CONTACT="" NO_RESUME="" MTYPE="outreach" BOSS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --to) TO="$2"; shift 2;;
@@ -30,6 +30,7 @@ while [ $# -gt 0 ]; do
     --segment) SEGMENT="$2"; shift 2;;                # REQUIRED on cold sends: one of your SEGMENTS slugs (kit_config.SEGMENTS). Andy's hot-zone test.
     --warm) WARM_RUNG="1"; shift;;                    # BACK-COMPAT alias for `--rung warm` (see the profile switch below)
     --rung) RUNG="$2"; RUNG_EXPLICIT=1; shift 2;;     # cold-boss|cold-stranger|warm|referred|event|thank-you|reply|follow-up
+    --boss) BOSS="$2"; shift 2;;                      # REQUIRED on cold-boss: the person, checked against the boss registry
     --targets) TARGETS="$2"; shift 2;;                # warm/referred: comma-separated companies NAMED in the ask (dedup'd instead of --company)
     --no-resume) NO_RESUME="1"; shift;;               # explicit opt-out of the mandatory résumé attachment
     --force) FORCE="1"; shift;;
@@ -253,7 +254,7 @@ try:
             b = re.findall(r"\*\*([^*]+)\*\*", line)
             if b:
                 known.update(x.strip() for x in b)
-            else:                                   # plain "- MeridianLink, Alkami, Zapier"
+            else:                                   # plain "- SomeCo, Otherco, Thirdco"
                 known.update(x.strip() for x in re.split(r"[,;]", line.lstrip("-* ").strip()))
     stores_read += 1
 except OSError:
@@ -340,6 +341,23 @@ PYBODY
   [ -n "$PRAISE_PHRASING" ] || { echo "⛔ BLOCKED: missing --praise-phrasing. The praise beat must be a Stage-2 phrasing YOU picked (Stage 1 concept → Stage 2 phrasing). Never author-then-present-as-final. Pass the approved phrasing text." >&2; exit 4; }
   if ! grep -qF -- "$PRAISE_PHRASING" "$BODYFILE"; then
     echo "⛔ BLOCKED: --praise-phrasing text does not appear verbatim in the body. The body's praise beat must be the phrasing approved at Stage 2 (skipping or altering it is an unapproved edit). Reconcile them." >&2; exit 4;
+  fi
+  # ── BOSS REGISTRY ──────────────────────────────────────────────────────────────────────────
+  # A cold-boss send names the person you researched, and that person must already have a fresh
+  # registry record. Sends with no recipient identity cannot be attributed to anyone, and the
+  # research behind them becomes unrecoverable.
+  #
+  # ⛔ SCOPED TO cold-boss ALONE, deliberately. Binding this to the shared cold branch would catch
+  # cold-stranger, which by definition has no boss. A gate written for one rung binds every rung
+  # that falls through to it, and that has been a recurring defect in this pipeline.
+  if [ "$RUNG" = "cold-boss" ] && [ -f "$HERE/boss_registry.py" ]; then
+    if [ -z "$BOSS" ]; then
+      echo "⛔ BLOCKED: missing --boss on a cold-boss send. Name the person you researched." >&2
+      exit 4
+    fi
+    if ! python3 "$HERE/boss_registry.py" check --company "$COMPANY" --person "$BOSS"; then
+      exit 4
+    fi
   fi
   fi   # end cold-rung-only proofs
   # SEGMENT gate: the method tests segments to find the hot-zone (5/segment, then compare reply

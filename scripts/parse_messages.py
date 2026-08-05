@@ -89,8 +89,27 @@ def find_messages(explicit=None):
         return cand, list(csv.DictReader(fh))
 
 
+def _iso(raw):
+    """The date half of a LinkedIn message stamp ('2026-07-10 15:02:57 UTC'), or None."""
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", str(raw or ""))
+    return m.group(0) if m else None
+
+
 def tally(rows):
-    """{contact name: {total, he_sent, they_sent}} — drafts excluded, owner excluded."""
+    """{contact name: {total, he_sent, they_sent, last_inbound, last_outbound}}.
+
+    Drafts excluded, owner excluded.
+
+    ⚖️ THE DATES ARE THE POINT. This file has always carried a per message DATE column and this
+    function used to throw it away, so the store held volume with no time in it. Nothing could ask
+    "did they ever write back, and how long ago" — the two halves of the live-thread signal.
+    `last_inbound` is the most recent message FROM the other person, which is the reply half; its
+    absence means they never wrote back at all.
+
+    ⛔ These are inputs to `closeness.thread_state`, never to a closeness TIER. Deriving a tier
+    from thread volume is what once recorded a decades-long friendship as a weak tie on the
+    strength of one unanswered message.
+    """
     owner = _owner_names(rows)
     out = {}
     for r in rows:
@@ -103,12 +122,18 @@ def tally(rows):
         other = to if frm == owner else frm
         if not other or other == owner:
             continue
-        e = out.setdefault(other, {"total": 0, "he_sent": 0, "they_sent": 0})
+        e = out.setdefault(other, {"total": 0, "he_sent": 0, "they_sent": 0,
+                                   "last_inbound": None, "last_outbound": None})
         e["total"] += 1
+        when = _iso(r.get("DATE"))
         if frm == owner:
             e["he_sent"] += 1
+            if when and (e["last_outbound"] is None or when > e["last_outbound"]):
+                e["last_outbound"] = when
         else:
             e["they_sent"] += 1
+            if when and (e["last_inbound"] is None or when > e["last_inbound"]):
+                e["last_inbound"] = when
     return out, owner
 
 

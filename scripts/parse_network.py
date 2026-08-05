@@ -233,9 +233,9 @@ def blocked_companies():
         # WIDENED (adversarial re-test). An earlier pattern demanded a single capitalized name
         # followed immediately by "(" or "—" and missed four real shapes, any of which would
         # surface a BLOCKED employer as a networking target on the next export:
-        #   "- MeridianLink, Alkami, Zapier"                        (comma list, no detail)
-        #   "- Recurring-layoff passes: Splice, Confluent, Elastic" (prose lead-in, names after ":")
-        #   "- Abnormal Security / Abnormal AI (blocked ...)"       (slash aliases)
+        #   "- SomeCo, Otherco, Thirdco"                            (comma list, no detail)
+        #   "- Recurring-layoff passes: SomeCo, Otherco, Thirdco"   (prose lead-in, names after ":")
+        #   "- Example Security / Example AI (blocked ...)"         (slash aliases)
         #   "- 1Password (blocked ...)"                             (digit-leading name)
         for line in open(p, encoding="utf-8", errors="ignore"):
             if not re.match(r"\s*-\s+", line):
@@ -244,8 +244,8 @@ def blocked_companies():
             # A prose lead-in ends in ":" and the names follow it. Distinguish from a real
             # entry like "- Acme (blocked 2026-01-01): reason" by requiring no "(" in the head.
             head, sep, rest = body.partition(":")
-            # A SHORT prose lead-in must not lose its FIRST name: "Recurring-layoff passes: Splice,
-            # Confluent, Elastic" loses Splice if a `len(head.split()) > 3` guard drops the lead-in,
+            # A SHORT prose lead-in must not lose its FIRST name: "Recurring-layoff passes: SomeCo,
+            # Otherco, Thirdco" loses SomeCo if a `len(head.split()) > 3` guard drops the lead-in,
             # and a BLOCKED company slipping off the blocked-name set means its contact re-surfaces on
             # the warm-network list (a safety filter failing open). A real entry ("Acme (blocked):
             # reason") carries "(" in the head; a prose lead-in does not. When the head has no "(",
@@ -257,7 +257,7 @@ def blocked_companies():
             # brand: "New/Mode" (newmode.net) is ONE company, and splitting it invents a bogus
             # blocked entry called "new" — which would silently exclude any company whose name
             # starts with that token. Spaced slashes are the alias separator used in this file
-            # ("Abnormal Security / Abnormal AI", "GoFundMe / Classy").
+            # ("Example Security / Example AI", "SomeCo / Otherco").
             for part in re.split(r",|\s+/\s+", body):
                 part = part.strip(" .*\t")
                 # A company name here: proper-noun or digit-leading, at most four words, and not a
@@ -624,3 +624,95 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def _register_contacts(rows, source_name, as_of, quiet=False):
+    """Persist name + slug + title + company + connect date for each connection. Returns counts.
+
+    PROVENANCE IS THE EXPORT, NOT TODAY. `as_of` is the date in the export's own filename and
+    `as_of_source` is `export:<file>`, the same family the existing contact rows already carry.
+    Stamping these `live:` would claim the pipeline saw the person today and would outrank a real
+    observation under SOURCE_PRECEDENCE, which is the "guess that beats the truth" failure
+    `state.append()` refuses undated writes to prevent.
+
+    RE-RUNNING THE SAME EXPORT WRITES NOTHING. Every row already on file under this key, date and
+    source with the same payload is a match, and a match is skipped, so a second parse of the same
+    CSV neither duplicates a row nor flips a newer observation back to export-era values.
+    """
+    try:
+        import state
+    except Exception as e:                       # a store that cannot import must not stop the parse
+        if not quiet:
+            print(f"   ⚠️  contact store not registered (state.py unavailable: {e})")
+        return 0, 0
+    if not as_of:
+        if not quiet:
+            print(f"   ⚠️  contact store not registered: no date in `{source_name}`, and an undated "
+                  f"row is refused by state.append() on purpose.")
+        return 0, 0
+
+    iso, src = as_of.isoformat(), f"export:{source_name}"
+
+    # ONE STORE READ FOR THE WHOLE PASS. `state.register()` calls `current()`, which calls
+    # `_read_raw()`, which re-parses all 1,525 JSON lines EVERY call. At 1,433 connections that is
+    # 2.2M line parses against a store that also grows as we append to it, i.e. quadratic in the
+    # thing we are looping over. Memoize the raw read for the duration of the pass and hand each
+    # newly written record back into the same list, so a person who appears twice in the export
+    # still unions their aliases correctly. Restored in `finally`: this is a private hook and it
+    # must not stay patched for anything that imports this module.
+    original_read_raw = state._read_raw
+    cached, bad = original_read_raw("contact")
+    next_seq = max([r.get("_seq", 0) for r in cached] or [0]) + 1
+
+    def _cached_read_raw(kind):
+        if kind == "contact":
+            return cached, bad
+        return original_read_raw(kind)
+
+    # What is already on file from THIS export, so a re-run is a no-op.
+    seen = set()
+    for r in cached:
+        if r.get("as_of") == iso and r.get("as_of_source") == src:
+            p = r.get("payload") or {}
+            seen.add((r.get("key"),) + tuple(str(p.get(f) or "") for f in _REGISTERED_FIELDS))
+
+    written = failed = 0
+    state._read_raw = _cached_read_raw
+    try:
+        for r in rows:
+            try:
+                url = (r.get("URL") or "").strip()
+                if not url:
+                    continue                      # no slug, nothing durable to add
+                name = f"{r.get('First Name', '')} {r.get('Last Name', '')}".strip()
+                if not name:
+                    continue
+                d = connected_on(r.get("Connected On"))
+                fields = {"linkedin": url,
+                          "title": (r.get("Position") or "").strip(),
+                          "company": (r.get("Company") or "").strip(),
+                          "connected_on": d.isoformat() if d else ""}
+                key = state.key_for("contact", name)
+                sig = (key,) + tuple(str(fields.get(f) or "") for f in _REGISTERED_FIELDS)
+                if sig in seen:
+                    continue
+                rec = state.register("contact", name, as_of=iso, as_of_source=src,
+                                     source_file=source_name, run="parse_network", **fields)
+                rec = dict(rec)
+                rec["_seq"] = next_seq
+                next_seq += 1
+                cached.append(rec)
+                seen.add(sig)
+                written += 1
+            except Exception:
+                # FAIL SOFT PER ROW. One unparseable name is a lost slug; an exception here would
+                # be a lost run, and the markdown is already on disk by this point.
+                failed += 1
+    finally:
+        state._read_raw = original_read_raw
+
+    if not quiet:
+        note = f", {failed} skipped on error" if failed else ""
+        print(f"   contact store: {written} of {len(rows)} rows registered with a LinkedIn slug "
+              f"(as_of {iso}, source {src}{note})")
+    return written, failed

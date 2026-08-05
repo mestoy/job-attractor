@@ -59,6 +59,20 @@ NON_PM = r"\b(engineer|scientist|analyst|architect|intern|marketing|sales|accoun
          r"recruiter|designer|consultant|specialist|coordinator|operations manager)\b"
 
 
+_NOT_A_COMPANY = re.compile(
+    r"(candidate experience|company overview|^opportunities with\b|^careers?\b|"
+    r"^job openings?\b|^open (roles|positions)\b|^learn more\b|^click here\b|"
+    r"^apply (now|here)\b|^view all\b|^see all\b|^search jobs?\b)", re.I)
+
+
+def is_company_shaped(company):
+    """False when the `company` field is scraped page text rather than an employer name."""
+    c = (company or "").strip()
+    if len(c) < 2 or not re.search(r"[A-Za-z]", c):
+        return False
+    return not _NOT_A_COMPANY.search(c)
+
+
 def load_prior():
     """Every company name with any prior record in the repo."""
     names = set()
@@ -71,6 +85,23 @@ def load_prior():
                 continue
             if c:
                 names.add(c.strip().lower())
+    # DURABLE STORE, ADDED TO `names` ONLY.
+    #
+    # ⛔ THE BLOB BELOW STAYS A FULL-TEXT READ, AND THAT IS DELIBERATE. It would be natural to move
+    # every board reader onto the state store; doing it here would be a regression. `blobs` is
+    # searched with `lc in txt`: the question it answers is "has this company been mentioned
+    # ANYWHERE in this file", prose and reasons included, not "is it a row in a table". Swapping a
+    # whole-file text search for the store's company keys would make dedup NARROWER, and a narrower
+    # dedup re-surfaces a company that was already screened and ruled on. Widen `names`, leave the
+    # text search alone.
+    try:
+        import state as _state
+        for _rec in _state.from_source("company", "green-board"):
+            _n = ((_rec.get("payload") or {}).get("name") or "").strip()
+            if _n:
+                names.add(_n.lower())
+    except Exception:
+        pass
     blobs = {}
     for f in ("documents/outreach-queue.md", "documents/outreach-queue-archive.md",
               "outreach_log.md", "prospect_queue.md", "job_search_tracker.csv",
@@ -119,6 +150,15 @@ def canon(name):
     return re.sub(r"[^a-z0-9]+", "", n)
 
 
+# Three-letter canon keys that are common English function words, not companies. Without this the
+# widened parser (comma/colon tail-harvest) would turn a reason-phrase word into a blocked key and
+# wrongly hide any company whose name canonizes to it. Kept deliberately small: only pure noise words,
+# never a plausible short brand (UKG, OKX, FIS, CNA, JLL stay in the pool of real 3-letter names).
+STOP3 = {"all", "and", "not", "new", "the", "for", "was", "are", "its", "our", "out", "you",
+         "has", "per", "pre", "non", "two", "via", "ice", "who", "why", "how", "inc", "llc",
+         "ltd", "usa", "www", "com", "org"}
+
+
 def blocked_keys_from_list(path=None):
     """Every blocked company as a canon() key, parsed from documents/blocked-employers-list.md.
 
@@ -139,7 +179,7 @@ def blocked_keys_from_list(path=None):
         return set()
     # ⬆️ WIDENED. The original read only a bullet's leading name plus its **bold** spans,
     # and the file writes blocked names in three more shapes that were all silently missed:
-    #   - COMMA LIST as the head:      "- MeridianLink, Alkami, Zapier"
+    #   - COMMA LIST as the head:      "- SomeCo, Otherco, Thirdco"
     #   - MIDDOT LIST, colon or not:   "- **Filter 2, defense:** Scale AI · C3.ai"
     #                                  "- Notable Health (13 of 16 SF) · OpenEvidence (8 SF)"
     #   - MARKDOWN TABLE ROW:          "| Rad AI | All 3 product seats SF-only | 1 |"
@@ -159,7 +199,14 @@ def blocked_keys_from_list(path=None):
             return
         for part in cand.split("/") if "/" not in canon(cand) else [cand]:
             k = canon(part)
-            if 3 < len(k) <= 40:
+            # ⬇️ FLOOR is len>=3, not >3. A `3 < len(k)` floor silently drops every three-letter
+            # company from the blocked set, so a blocked three-letter name keeps surfacing in the
+            # ranker's banked_topup even though it was blocked. Longer names are never affected,
+            # which is why the bug hides. Three-letter names are a real class (UKG, OKX, 8x8, CNA,
+            # JLL, FIS). STOP3 guards the handful of common function words that the comma/colon
+            # tail-harvest would otherwise turn into keys that wrongly hide a real company (a false
+            # BLOCK hides a good target, the costlier error).
+            if 2 < len(k) <= 40 and k not in STOP3:
                 keys.add(k)
 
     # ⛔ A LINE THAT SAYS A COMPANY IS *NOT* BLOCKED MUST NOT BLOCK IT. The file carries explicit

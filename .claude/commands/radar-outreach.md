@@ -33,12 +33,15 @@ Check the company's real ATS/careers board (authoritative source, not stale aggr
 - **No live role, or just closed** → radar outreach is the right play (continue).
 - **A strong role IS live and the candidate is eligible** → say so: `/apply` is the better primary path. Radar outreach can still supplement it (apply, then connect).
 
-## Step 3: Identify the Target — the PRODUCT LEAD, NOT the CEO
+## Step 3: Identify the Target — the LIKELY BOSS (derived, not a title ladder)
 
-Reach the person who owns product hiring, not the founder. A CEO-blessed candidate can read as **the founder's pick** — the opposite of a clean entry into a flat, high-trust team, and it disrespects the pipeline and future teammates.
+Reach the person who would actually MANAGE this role. Derive that from how the company is built; do not read it off a title ladder (revoked 2026-07-26, `outreach-target-product-lead-not-ceo`).
 
-- Prefer, in order: **CPO → VP Product → Director/Head of Product** (the most senior product leader who owns PM hiring but is **not** the CEO). For a relationship-first, no-pitch curiosity note, a **peer PM** is also valid.
-- Only fall back to the founder/CEO if **no** product leader is identifiable.
+- **Real product org** → usually the seated product leader (CPO / VP / Head / Director of Product). Same answer as the old ladder, reached for the right reason.
+- **No product function** → the founder, CEO, or COO IS the likely boss. This is a first-class answer, not a fallback: a 🌾 greenfield target has no product lead by definition.
+- For a relationship-first, no-pitch curiosity note, a **peer PM** is also valid.
+- Never HR, never a recruiter for cold outreach.
+- ⚖️ **Founder ordering (owner ruling, 2026-07-26):** if SEVERAL plausible bosses exist, the founder or CEO is the LAST choice among them. If a founder is the only one you can find, target them without hesitation. This orders the plausible set; it does not restore the title ladder. Where several are plausible, prefer the one inside the normal pipeline: a CEO-blessed candidate can read as the founder's pick. Show this weighing rather than doing it silently.
 - **Only use a real, verifiable LinkedIn profile** (via WebSearch). Never fabricate a name. If the match is partial/uncertain, say so explicitly rather than presenting it as confirmed.
 
 ## Step 4: Draft the Radar Message (candidate's voice)
@@ -67,7 +70,7 @@ Present drafts as a starting point and expect the candidate to edit them into th
 After the candidate sends, append a row to `job_search_tracker.csv`:
 - `status`: `contacted`
 - `channel`: e.g. `LinkedIn radar outreach` or `Email radar outreach`
-- `contact_person`: name + title + **verified** profile URL (note "product lead, not CEO")
+- `contact_person`: name + title + **verified** profile URL (note WHY they are the likely boss)
 - `fit_rating` + `notes`: the screen summary (culture/leadership/news) and a reminder to **watch the company's board for a role to (re)open**
 - `cv_file`: none (no live posting to tailor against)
 
@@ -76,7 +79,7 @@ After the candidate sends, append a row to `job_search_tracker.csv`:
 ## Rules
 
 1. **Screen before outreach.** Never reach out to a company that fails the culture/leadership/news screen.
-2. **Target the product lead, not the CEO/founder** (pipeline + teammate respect).
+2. **Target the LIKELY BOSS**, whoever would actually manage the role. The founder is valid when the founder IS the boss; the pipeline/teammate concern is a tiebreaker, not a veto.
 3. **Only verifiable profiles/addresses.** Never fabricate a name; flag inferred emails as inferred.
 4. **Radar/future framing,** decoupled from any posting — not "your posting closed."
 5. **Voice and deal-breakers come from the candidate's profile files** (`documents/PROFILE.md`, `01`–`04`), so this skill works for any candidate who has run `/setup`.

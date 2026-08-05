@@ -1,6 +1,6 @@
 ---
 name: job-attractor-pipeline
-description: The recurring boss-hunt pipeline. On each run, discover new company matches, screen them against YOUR rules, pick and verify the boss, deep-dive public sources for fit, write a "why this match" dossier, and prepare a LaCivita-style, YOUR-voice outreach email plus a prefilled draft for review. Semi-autonomous with a human gate: it prepares, YOU approve and send.
+description: 'The recurring boss-hunt pipeline. On each run, discover new company matches, screen them against YOUR rules, pick and verify the boss, deep-dive public sources for fit, write a "why this match" dossier, and prepare a LaCivita-style, YOUR-voice outreach email plus a prefilled draft for review. Semi-autonomous with a human gate: it prepares, YOU approve and send.'
 ---
 
 # Job Attractor Pipeline skill (generic starter)
@@ -46,6 +46,7 @@ Automate the funnel (discover → screen → research → draft) and **stop at a
 
 ## Safety & quality gates (all must hold)
 - Human gate before send / connect / apply / email-open. Public information only; never infer identity; omit when unsure. Verify the boss's current role. Apply YOUR honesty guardrails (`PROFILE.md`). Escalate ambiguous screens to you rather than guessing.
+- **Upstream defects get filed, not patched:** when a SHIPPED script or rule is broken, follow docs/partner-feedback-protocol.md (append to documents/partner-feedback.md, tell the operator); never silently edit shipped scripts.
 
 ## Ready-to-send takes priority (added 2026-07-17)
 **Ready-to-send packages are the FIRST decision option.** Whenever one or more outreach packages are ready to send (person vetted + email pre-filled + résumé tailored), present SEND as the first choice, ahead of serving new scorecards, queuing a new person, or anything else. Finishing a ready package outranks preparing a new one; list all ready sends first if there are several.

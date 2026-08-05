@@ -114,6 +114,26 @@ def _known_targets():
                     targets.setdefault(company, set()).update(aliases)
         except Exception:
             pass
+    # DURABLE STORE, ADDED ALONGSIDE. The loop above scans the leading cells for something that looks
+    # like a company, which across a board's several table shapes lands on the right cell only
+    # sometimes, and its `^[A-Z]` guard rejects a lowercase brand outright. The store names the
+    # company column by header across every shape. Same widening intent as the resolver already has:
+    # a company it does not know resolves to "" and classifies OTHER.
+    #
+    # ⛔ EXACT DISPLAY NAMES ONLY, NO ALIAS DERIVATION, and that restraint is the point. This
+    # resolver GRANTS BUILD AUTHORIZATION, and the comments above record what happened the last time
+    # its alias set widened: a bare English word became an alias for a company, so any prompt
+    # containing that word plus a build verb wrote a signed, valid BUILD ruling for a company the
+    # human never ruled on. Authorize strictly: a real company name is specific enough to be safe, a
+    # name fragment is not.
+    try:
+        import state as _state
+        for _rec in _state.from_source("company", "green-board"):
+            _name = ((_rec.get("payload") or {}).get("name") or "").strip()
+            if 2 <= len(_name) <= 34:
+                targets.setdefault(_name, set()).add(_name.lower())
+    except Exception:
+        pass
     return targets
 
 
@@ -129,6 +149,41 @@ def _company_from(text):
                 if len(a) > best_len:
                     best, best_len = company, len(a)
     return best
+
+
+
+# ── PORTED (2026-08-05): method parity with the main pipeline. ──
+# Deliberately LOOSER than BUILD_INTENT and used for NOTHING but the lost-ruling warning below.
+# It must never gate or authorize: over-matching here is harmless (a spurious warning), whereas
+# over-matching BUILD_INTENT would manufacture authorizations, which is the one thing that must
+# not happen. Bare verbs only — no object required — because a MISSING object is the exact defect
+# it is meant to surface.
+LOOSE_BUILD_HINT = re.compile(
+    r"\b(?:build|draft|write|prep(?:are)?|pre-?fill|stage|compose|go\s+ahead|proceed)\b", re.I
+)
+
+
+# Words that must NEVER resolve to a company on their own, however they got capitalized in a board
+# cell. Two families: ordinary English that shows up sentence-initially in prose columns, and
+# generic business/pipeline vocabulary that appears in nearly every row. A bare first name has to
+# clear this list AND be >= 4 chars to become an alias.
+_ALIAS_STOPWORDS = {
+    "the", "this", "that", "then", "they", "them", "there", "these", "those", "with", "from",
+    "have", "has", "been", "was", "were", "will", "would", "could", "should", "also", "only",
+    "just", "both", "each", "same", "than", "when", "what", "which", "while", "after", "before",
+    "here", "into", "over", "under", "still", "note", "and", "but", "for", "not", "now", "new",
+    # short function words: length is no longer a filter, so these must be named explicitly
+    "our", "its", "his", "her", "who", "why", "how", "all", "any", "one", "two", "use", "see",
+    "get", "let", "out", "off", "top", "key", "big", "low", "end", "via", "per", "yes", "was",
+    "are", "has", "had", "did", "can", "may", "own", "few", "far", "due", "you", "him", "she",
+    "the", "why", "not", "add", "set", "run", "way", "day", "job", "ask", "say", "put", "yet",
+    # generic pipeline/business vocabulary
+    "product", "board", "green", "remote", "series", "founder", "team", "health", "data", "open",
+    "email", "outreach", "message", "draft", "build", "send", "sent", "role", "roles", "company",
+    "boss", "culture", "radar", "live", "verified", "blocked", "screen", "screened", "target",
+    "targets", "lane", "hiring", "manager", "director", "principal", "senior", "staff", "chief",
+    "head", "vice", "president", "officer", "engineer", "engineering", "design", "growth",
+}
 
 
 def main():

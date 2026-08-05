@@ -14,7 +14,7 @@ Verdict: NEW  (safe to proceed)  |  ALREADY-SEEN (with where + inferred status)
 Scoped deliberately: exact-normalized + a small alias map (no heavy fuzzy matching,
 which would cause false "duplicate" hits and make us miss real new companies).
 """
-import sys, os, re, csv, glob
+import sys, os, re, csv, glob, json
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -87,6 +87,21 @@ def norm_lite(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+# Ordinary industry vocabulary that must NEVER become a bare single-token dedup needle. Every one
+# of these appears in dozens of real company names, so as a needle it matches everything and the
+# 🔴 it produces is noise that looks like evidence. The full-name needle still catches real records.
+GENERIC_TOKENS = {
+    "health", "healthcare", "financial", "finance", "global", "credit", "insurance", "capital",
+    "partners", "group", "systems", "solutions", "technology", "technologies", "digital", "data",
+    "labs", "software", "services", "network", "networks", "platform", "medical", "clinical",
+    "security", "payments", "banking", "analytics", "intelligence", "consulting", "ventures",
+    "holdings", "national", "american", "united", "general", "advanced", "innovation", "innovations",
+    "management", "resources", "enterprise", "enterprises", "international", "associates", "company",
+    "corporation", "industries", "products", "science", "sciences", "research", "energy", "insight",
+    "insights", "commerce", "market", "markets", "media", "mobile", "cloud", "online", "direct",
+}
+
+
 def variants(name: str):
     n = norm(name)
     if not n:
@@ -112,11 +127,25 @@ def variants(name: str):
     # word by definition, so there IS no distinctive token, do not invent one. Second: never emit
     # a bare token that norm() itself would strip. The full-name needle still matches a genuine
     # record, so nothing real is lost.
+    # THIRD GUARD: the two guards above are necessary and still not sufficient. A short generic
+    # word can also be merely-not-a-legal-suffix and merely 4+ chars long, so it slips past both:
+    #     "Blue River Co"   -> "blue"      matched an unrelated "Blue ___" company
+    #     "WAI Global"      -> "global"    matched every "___ Global" company
+    #     "Nym Health"      -> "health"    matched every health company on the boards
+    #     "GM Financial"    -> "financial" matched an unrelated "___ Financial" company
+    # `norm(cand)` passes all of these, because they are ordinary industry nouns, not legal
+    # suffixes. A false 🔴 is the dangerous direction — it reads exactly like a completed screen
+    # and silently kills a real candidate before anyone looks at it.
+    #
+    # The needle's ONLY job is to catch a concatenated brand name buried in prose ("TigerData").
+    # That needs a genuinely distinctive token: take the FIRST token (an English company name puts
+    # the brand first — "Acme Labs", "Ocrolus Inc"), require >= 6 chars, and reject ordinary
+    # industry vocabulary. The FULL-NAME needle is unaffected and still matches genuine records.
     _fellback = not norm(name)
     toks = [t for t in n.split() if len(t) >= 4]
     if toks and not _fellback:
         cand = toks[0]
-        if norm(cand):          # a token norm() keeps is truly distinctive
+        if len(cand) >= 6 and cand not in GENERIC_TOKENS and norm(cand):
             out.add(cand)
     # aliases
     for grp in ALIASES:
@@ -219,13 +248,29 @@ def search_file(path: str, needles: set):
             is_staged = ("staged" in _low_line
                          and ("draft" in _low_line or "not yet sent" in _low_line
                               or line.lstrip().startswith("<!--")))
+            # A WARM-ASK NAMING IS NOT CONTACT. A connector-ask template names a few TARGET
+            # companies to a warm contact ("Rather than send you a long list, I picked three: …").
+            # The company is the SUBJECT of the ask, not the recipient — nobody there has been
+            # contacted. Those lines live in outreach_log.md, a send-gate store, so every named
+            # company was being 🔴 do-not-send'd for a COLD outreach it had never received.
+            #
+            # Safe because a REAL prior contact always names the company in the block HEADER
+            # ("## <date> · SomeCo · <boss>"), which still matches strong. A warm ask's header
+            # names the CONTACT instead, so the company appears only in the `Targets named:`
+            # metadata and inside the quoted body — both demoted to 🟡 WEAK here.
+            is_warm_ask_naming = (
+                "targets named" in _low_line
+                or (line.lstrip().startswith(">")
+                    and ("picked three" in _low_line
+                         or "relationship at one of them" in _low_line))
+            )
             low = " " + norm(line) + " "
             low_lite = " " + norm_lite(line) + " "
             for nd in needles:
                 # WORD-BOUNDARY match only (padded low handles start/end) — no loose substring,
                 # which would match a short name inside a common word (e.g. "ably" in "reliably").
                 if (" " + nd + " ") in low or (" " + nd + " ") in low_lite:
-                    is_strong = (not is_staged) and _strong(path, line, nd)
+                    is_strong = (not is_staged) and (not is_warm_ask_naming) and _strong(path, line, nd)
                     (strong if is_strong else weak).append((i, line.strip()[:160]))
                     break
     return strong, weak
@@ -241,6 +286,107 @@ SEND_GATE_STORES = {
     "job_search_tracker.csv",
     "documents/correspondence-log.md",
 }
+
+def blocked_key_hit(company: str):
+    """EXACT canon-key match against the parsed blocked list. Returns the key, or None.
+
+    ⛔ THE DEFECT THIS CLOSES. Aggregators emit space-stripped brand names, and norm() PRESERVES
+    spaces (`[^a-z0-9 ]`). So the needle and the record never met:
+
+        "Some Co Networks" -> norm 'some co networks'   (the blocked-list record)
+        "Somesconetworks"  -> norm 'somesconetworks'    (what a sweep row actually says)
+
+    check_dup returned 🟢 NEW for the space-stripped form while returning 🔴 for the spaced form of
+    the same company. Dedup is step 0 of every screen, which makes this the one gate whose failure
+    admits a vetoed company to the whole pipeline.
+
+    ⚖️ WHY EQUALITY AND NOT A LOOSER SUBSTRING TEST. The obvious fix — strip spaces from both sides
+    and keep the existing `in` test — is unsafe, because space-stripped text has no word
+    boundaries: a real blocked short name can be a substring of an unrelated ordinary word.
+    canon() keys are compared for EQUALITY, so they are collision-free at any length.
+
+    This REUSES screen_sweep.canon + blocked_keys_from_list rather than forking them — one
+    canonical core, several consumers; never fork the core. The fuzzy needle machinery above is
+    deliberately left untouched; this is an ADDITIONAL precise check, not a replacement.
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from screen_sweep import canon, blocked_keys_from_list
+    except Exception:
+        # FAIL CLOSED-ISH: a broken import must not silently downgrade the blocked check to
+        # "no hit". Returning the sentinel makes the failure visible in the verdict instead.
+        return "__import_failed__"
+    k = canon(company)
+    return k if k and k in blocked_keys_from_list() else None
+
+
+def _blocked_entry_lines(key):
+    """The blocked-list line(s) whose leading name canon()s to `key`, for the verdict printout.
+
+    Best-effort only: the verdict above does not depend on finding the line, so a miss here just
+    means you read the file yourself rather than getting a quoted excerpt.
+    """
+    try:
+        from screen_sweep import canon
+        path = os.path.join(REPO, "documents/blocked-employers-list.md")
+        out = []
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            for i, line in enumerate(f, 1):
+                ls = line.lstrip()
+                if not ls.startswith(("- ", "* ")):
+                    continue
+                head = re.split(r"[(:—–·|]", ls[2:].replace("**", ""))[0]
+                if canon(head) == key:
+                    out.append((i, ls.rstrip()[:150]))
+        return out
+    except Exception:
+        return []
+
+
+SENDLOG = "documents/send-log.jsonl"
+# Statuses that mean the message REACHED the person. Everything else in the send log (staged,
+# drafted, bounced, blocked, failed) means it did not, and must stay 🟡 — a bounce in particular
+# is the case where a RETRY is correct, so promoting it to 🔴 would block the very send it should
+# enable.
+SENDLOG_DELIVERED = {"sent", "delivered", "replied", "submitted"}
+
+
+def sendlog_hits(needles: set):
+    """Precise, JSON-aware search of the authoritative send log. Returns (strong, weak) line lists.
+
+    ⛔ WHY THIS EXISTS. documents/send-log.jsonl is the store the rung ladder is computed from, and
+    if it is not in STORES, the dedup gate cannot see what has actually been sent — only the prose
+    logs, which can disagree: a build tool may still say STAGED (which search_file deliberately
+    demotes to 🟡) after the send log already says "status": "sent". Net effect: a contact who
+    received a message yesterday can come back as a 🟡 prose mention today.
+
+    Parsed as JSON rather than swept with the fuzzy line matcher on purpose: the generic matcher
+    cannot tell a delivered row from a bounced one, and those two need opposite verdicts.
+    """
+    full = os.path.join(REPO, SENDLOG)
+    strong, weak = [], []
+    if not os.path.exists(full):
+        return strong, weak
+    with open(full, encoding="utf-8", errors="ignore") as f:
+        for i, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            hay = " ".join(str(row.get(k, "")) for k in ("company", "to", "boss", "person", "subject"))
+            low = " " + norm(hay) + " "
+            low_lite = " " + norm_lite(hay) + " "
+            if not any((" " + nd + " ") in low or (" " + nd + " ") in low_lite for nd in needles):
+                continue
+            status = str(row.get("status", "")).strip().lower()
+            excerpt = (f"{row.get('date','?')} · {row.get('company','?')} · to {row.get('to','?')} "
+                       f"· rung {row.get('rung','?')} · status {status or '?'}")
+            (strong if status in SENDLOG_DELIVERED else weak).append((i, excerpt[:160]))
+    return strong, weak
+
 
 def main():
     args = [a for a in sys.argv[1:] if a != "--send-gate"]
@@ -285,9 +431,66 @@ def main():
             if len(hits) > 3:
                 print(f"       … +{len(hits)-3} more line(s)")
 
+    # The authoritative record of what actually went out (see sendlog_hits). Merged into the
+    # same verdict buckets so it prints through the normal dump(), and included under
+    # --send-gate because "already delivered to this person" is precisely a do-not-send fact.
+    sl_strong, sl_weak = sendlog_hits(needles)
+    if sl_strong:
+        strong_found[SENDLOG] = ("DELIVERED per the send log (already contacted)", sl_strong)
+    elif sl_weak:
+        weak_found[SENDLOG] = ("in the send log, NOT delivered (staged/bounced/failed)", sl_weak)
+
+    # ⛔ PRECISE BLOCKED-LIST CHECK, independent of the fuzzy needles above. Runs BEFORE the
+    # needle verdicts so a blocked company reports as blocked even when a space-stripped form
+    # would defeat norm(). See blocked_key_hit() for the defect and why this is an equality
+    # test rather than a looser substring match.
+    bk = blocked_key_hit(company)
+    if bk == "__import_failed__":
+        print("\n  ⚠️  blocked-list key check UNAVAILABLE (screen_sweep import failed).")
+        print("      Treat a 🟢 below as UNVERIFIED against the blocked list and check it by hand.")
+    elif bk:
+        print(f"\n  VERDICT: 🔴 BLOCKED — '{company}' canon-matches a blocked-list entry (key: {bk}).")
+        print("  Do NOT screen, surface, or pitch. Read the entry before doing anything else:")
+        for ln, txt in _blocked_entry_lines(bk)[:3]:
+            print(f"       documents/blocked-employers-list.md L{ln}: {txt}")
+        sys.exit(1)
+
+    # ⛔ A LOUDER VERDICT MUST NEVER HIDE A QUIETER ONE. This used to dump(strong_found) and exit,
+    # so weak_found printed ONLY when there were no strong hits at all — which meant a real prior
+    # record could sit in weak_found (e.g. a surname collision produced the strong hit, while the
+    # actual match was a weaker one) and never print. The 🔴 read as if the gate had worked even
+    # though it showed the wrong evidence. The verdict still exits 1 on strong hits; weak hits now
+    # print underneath instead of being swallowed.
+    #
+    # ── PREFIX-COLLISION WARNING ───────────────────────────────────────────────────────────────
+    # variants() emits the full normalized name PLUS its most distinctive token, so a two-word
+    # company hands the search its own first word as a needle. That is right for finding a brand
+    # name buried in prose, and wrong when the first word IS ITSELF A DIFFERENT REAL COMPANY (two
+    # companies sharing a first word can produce a hard 🔴 on the wrong one's block).
+    #
+    # The gate is NOT weakened here on purpose. A send gate that leaks is worse than one that
+    # over-warns, and this file already carries fixed FALSE-🔴 bugs whose lesson was the opposite
+    # direction. So: keep the verdict, ADD the fact that the full name never appeared.
+    _full = norm(company)
+    if _full and strong_found:
+        _hit_lines = [txt for _status, hits in strong_found.values() for _ln, txt in hits]
+        _full_seen = any(_full in norm(ln) for ln in _hit_lines)
+        if not _full_seen:
+            _tokens = sorted(nd for nd in needles if nd != _full and nd and _full.startswith(nd))
+            if _tokens:
+                print(f"\n  ⚠️  PREFIX COLLISION LIKELY — the full name {company!r} appears in NONE of")
+                print(f"      the matched lines. The match came from the shorter needle(s) {_tokens},")
+                print(f"      which may be a DIFFERENT company that merely shares a first word.")
+                print(f"      Read the lines below before treating this as a block on your target.")
+
     if strong_found:
         print("\n  VERDICT: 🔴 ALREADY-SEEN — do NOT re-screen/re-pitch without checking these:")
         dump(strong_found)
+        if weak_found:
+            print("\n  ALSO — 🟡 weaker mentions, printed because a 🔴 must not mask them.")
+            print("  A 🔴 can come from a name COLLISION, so read these before concluding the")
+            print("  🔴 above is about your actual target:")
+            dump(weak_found)
         sys.exit(1)
     if weak_found:
         print("\n  VERDICT: 🟡 POSSIBLE — prose mention only (no core-store entry/company-column match).")

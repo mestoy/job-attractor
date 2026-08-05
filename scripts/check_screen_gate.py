@@ -47,11 +47,59 @@ CULTURE_DEEP = [r"wlb", r"work[- ]life", r"sub[- ]rating", r"senior leadership",
 # Ownership — a PE-ownership signal must be adjudicated, not just mentioned.
 try:
     from kit_config import (INDUSTRY_VETO, INDUSTRY_CLEARED, REMOTE_DISQUAL, REMOTE_CONFIRM,
-                            POLITICS_DISQUAL, POLITICS_CLEAR, PE_FLAG, PE_CLEARED, RULES_DOC)
+                            POLITICS_DISQUAL, POLITICS_CLEAR, PE_FLAG, PE_CLEARED, RULES_DOC,
+                            VETO_EMPLOYERS, NOT_A_COMPANY)
 except Exception:  # standalone fallback: screens disabled, and it says so at runtime
     INDUSTRY_VETO = INDUSTRY_CLEARED = REMOTE_DISQUAL = REMOTE_CONFIRM = []
     POLITICS_DISQUAL = POLITICS_CLEAR = PE_FLAG = PE_CLEARED = []
+    VETO_EMPLOYERS = NOT_A_COMPANY = []
     RULES_DOC = "documents/WORKFLOW-RULES.md"
+
+
+def _squash(s):
+    """Lowercase and drop everything that is not a letter or digit."""
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+# Multi-word veto names, PRE-SQUASHED. A curated list can only catch the spelling someone typed,
+# and scrapers do not preserve spacing: a veto list carried a two-word law-enforcement vendor while
+# a sweep stored the same name with the space dropped, so an explicitly blocked company sat in the
+# passes list on a whitespace difference alone.
+#
+# ⚠️ SCOPED TO MULTI-WORD NAMES ON PURPOSE. Squashing discards word boundaries, so applying it to a
+# single-word pattern would make `\bcircle\b` match "CircleCI". Spacing variance is only a failure
+# mode for names that HAVE a space, so only those are squashed.
+_MULTIWORD_VETO = sorted({
+    _squash(re.sub(r"\\b|\(\?[!=][^)]*\)|[\\^$*+?.()\[\]{}|]", " ", p))
+    for p in VETO_EMPLOYERS
+    if " " in re.sub(r"\\b|\(\?[!=][^)]*\)|[\\^$*+?.()\[\]{}|]", " ", p).strip()
+})
+_MULTIWORD_VETO = [v for v in _MULTIWORD_VETO if len(v) >= 8]
+
+
+def veto_hits(name, text=""):
+    """Every veto term matching a company NAME (and optional descriptive TEXT).
+
+    Three passes, because each catches what the others structurally cannot:
+      1. INDUSTRY_VETO over name+text — catches a company that DESCRIBES itself ("defense")
+      2. VETO_EMPLOYERS over name+text — catches a company that is merely NAMED
+      3. squashed multi-word — catches a named company whose spacing a scraper dropped
+
+    Returns a sorted list of the matched terms. Empty means no veto fired; it NEVER means
+    "screened". A veto list is a floor under the per-company screen, never a substitute for it.
+    """
+    low = f"{name or ''} {text or ''}".lower()
+    hits = {re.search(v, low).group(0) for v in INDUSTRY_VETO if re.search(v, low)}
+    hits |= {re.search(v, low).group(0) for v in VETO_EMPLOYERS if re.search(v, low)}
+    squashed = _squash(f"{name or ''} {text or ''}")
+    hits |= {v for v in _MULTIWORD_VETO if v in squashed}
+    return sorted(hits)
+
+
+def is_artifact(name):
+    """True when a pool row is a page title or ATS boilerplate rather than a company."""
+    low = (name or "").strip().lower()
+    return any(re.search(p, low) for p in NOT_A_COMPANY)
 
 def main():
     if len(sys.argv) < 2:

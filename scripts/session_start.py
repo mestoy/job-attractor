@@ -78,6 +78,21 @@ def section(title):
 def unfinished():
     items, today = [], date.today().isoformat()
 
+    # A PENDING KIT UPDATE IS ASKED ABOUT BEFORE ANY OTHER WORK, and it is a CHOICE, not an order.
+    # Applying takes a few minutes, and sometimes the right answer is "not in this session, I need
+    # to work on what I already have". So it goes FIRST in the list (you decide before investing a
+    # session) and offers three answers: now, at the end of this session, or skip.
+    # Offline and non-fatal by construction — see scripts/kit_update.py.
+    try:
+        import kit_update
+        _upd = kit_update.pending_notice(os.environ.get("CLAUDE_SESSION_ID", ""))
+        if _upd:
+            items.append(("🔄", _upd[0], _upd[1]))
+    except Exception:
+        # Same rule as every other block here: a briefing that crashes blocks the session from
+        # opening, which costs more than a missing line.
+        pass
+
     # ONE follow-up parser, shared with check_followups.py. This block used to carry its own regex,
     # which read a single LINE and so knew nothing about completion markers, `FOLLOWUP-DUE: none`,
     # or the warm-only policy. It disagreed with the real checker, and the banner is what you read
@@ -101,8 +116,27 @@ def unfinished():
         items.append(("🔴", f"{len(draft_flags)} message(s) marked DRAFT, confirm whether sent",
                       [d.strip()[:70] for d in draft_flags[:3]]))
 
-    # Real inbound replies that may still be unanswered.
-    replies = re.findall(r"^##[^\n]*(?:📥|INBOUND)[^\n]*$", corr, re.M)
+    # Stale `drafted` send-log rows (2026-07-27). mail-draft.sh writes status "drafted" on every
+    # row because it creates a visible mail draft and cannot know whether Send was pressed. The
+    # flip to "sent" is manual, so a missed flip leaves a real send invisible to rung_ladder.
+    # Reader lives in pair_brief, which the pair's decision table also reads: one store, one parser.
+    try:
+        import pair_brief
+        _stale = pair_brief.stale_drafted(repo=REPO)
+        if _stale:
+            items.append(("🔴", f"{len(_stale)} send-log row(s) still 'drafted', confirm whether sent",
+                          _stale[:3]))
+    except Exception:
+        pass  # DEGRADES GRACEFULLY: a briefing that crashes blocks the session from opening.
+
+    # Real inbound replies that may still be unanswered. Raw scan: this line answers "what is on
+    # record", a different question from the pair's P1 ("what is still owed an answer",
+    # pair_brief.open_inbound).
+    try:
+        import pair_brief
+        replies = pair_brief.inbound_rows(repo=REPO)
+    except Exception:
+        replies = re.findall(r"^##[^\n]*(?:📥|INBOUND)[^\n]*$", corr, re.M)
     if replies:
         items.append(("🟡", f"{len(replies)} inbound message(s) on record",
                       [r.strip()[:70] for r in replies[-2:]]))
@@ -129,6 +163,53 @@ def unfinished():
     except Exception:
         pass  # DEGRADES GRACEFULLY: a briefing that crashes blocks the session from opening.
 
+    # CLOSENESS COVERAGE in the briefing — the PRIMARY prompt surface for the levelling loop.
+    # The warm rungs (5-7) run on stated relationships (documents/contact-closeness.json), and
+    # check_preview REFUSES warm-shaped asks the store does not sanction. So a missing or thin
+    # store is unfinished work with a next step, not background noise.
+    try:
+        import closeness as _cl
+        _store = _cl.load()
+        if _store is None:
+            items.append(("🟠", "no closeness store yet — warm rungs stay LOCKED until you level "
+                                "your network",
+                          ["download your LinkedIn export: Settings → Data privacy → Get a copy "
+                           "of your data",
+                           "drop the .zip in Downloads, then run /level-network"]))
+        else:
+            import level_contacts as _lc
+            _todo = _lc.pending()
+            if _todo:
+                items.append(("🟡", f"{len(_todo)} contact(s) still unlevelled "
+                                    f"({len(_store)} in the closeness store)",
+                              ["run /level-network — it resumes exactly where you left off"]))
+            # Staleness against the newest export ON DISK, recomputed live — the stamp is a
+            # convenience, the two sources are the authority.
+            _swept = (_lc.load_raw() or {}).get("_last_swept_export")
+            try:
+                from parse_network import find_export as _fe
+                _p, _ = _fe()
+                _newest = os.path.basename(str(_p).split("::")[0]) if _p else None
+            except Exception:
+                _newest = None
+            if _newest and _swept and _newest != _swept:
+                items.append(("🟠", f"a newer export is on disk ({_newest}) than the last "
+                                    f"levelling sweep ({_swept})",
+                              ["run /level-network — it only asks about the delta"]))
+    except Exception:
+        pass  # DEGRADES GRACEFULLY: a briefing that crashes blocks the session from opening.
+
+    # UPSTREAM FEEDBACK not yet sent to the kit maintainer. Read-only, no gh call — send_feedback.py
+    # owns the single parser (its FEEDBACK/status:unsent header regex) and the actual send.
+    try:
+        import send_feedback
+        _fb = send_feedback.unsent(repo=REPO)
+        if _fb:
+            items.append(("🟠", f"{len(_fb)} upstream-feedback entr(ies) not yet sent to the kit maintainer",
+                          [e["slug"] for e in _fb[:3]] + ["send: python3 scripts/send_feedback.py"]))
+    except Exception:
+        pass  # DEGRADES GRACEFULLY: a briefing that crashes blocks the session from opening.
+
     states = sorted(glob.glob(os.path.join(REPO, "documents", "session-state-*.md")))
     if states:
         newest = os.path.basename(states[-1])
@@ -138,8 +219,18 @@ def unfinished():
 
 # ── B. TODAY'S 3-3-3 ─────────────────────────────────────────────────────────────────────────
 def sends_today():
-    log = rd("outreach_log.md")
-    return len(re.findall(r"^##\s*" + re.escape(date.today().isoformat()), log, re.M))
+    """Delegates to pair_brief, the ONE counter.
+
+    The pair's decision table branches on this exact number, so a second copy here would let the
+    briefing and the picker disagree about whether the day's loop is closed. Falls back to the local
+    regex only if the import fails, because a briefing must degrade rather than crash.
+    """
+    try:
+        import pair_brief
+        return pair_brief.sends_today(repo=REPO)
+    except Exception:
+        log = rd("outreach_log.md")
+        return len(re.findall(r"^##\s*" + re.escape(date.today().isoformat()), log, re.M))
 
 
 def deal_breaker_blocked():
@@ -226,6 +317,21 @@ def main():
     print("  JOB ATTRACTOR — LaCivita flow.  3 companies · 3 people · 3 messages.")
     print("=" * 72)
 
+    # 📰 WHAT CHANGED IN THE KIT, at the very top and before the work.
+    # The kit updates itself, so scripts and rules move underneath you without being asked. A
+    # silent update is indistinguishable from a bug: the briefing prints something new, the ranker
+    # orders people differently, and "it broke" is the only explanation available. This line is the
+    # difference between an update you can reason about and one you have to reverse-engineer.
+    # DEGRADES GRACEFULLY, like every other block here: a briefing that crashes blocks the session.
+    try:
+        import release_notes
+        _rn = release_notes.banner()
+        if _rn:
+            print()
+            print(_rn)
+    except Exception:
+        pass
+
     items = unfinished()
     section("A. UNFINISHED WORK")
     if items:
@@ -239,6 +345,18 @@ def main():
     section(f"B. TODAY'S 3-3-3  ({date.today().isoformat()})")
     n = sends_today()
     print(f"  messages sent today: {n} / 3" + ("   ✅ loop closed" if n >= 3 else "   ⬅ not yet done"))
+    # TWO COUNTERS, ONE NUMBER. This line counts `## <date>` write-ups in outreach_log.md;
+    # consistency-check [13] and the pair's stamp count delivered send-log rows. Neither is broken,
+    # they answer different questions, and which one IS the 3-3-3 is YOUR ruling. Printing the
+    # disagreement is what stops it being invisible.
+    try:
+        import pair_brief
+        _gap = pair_brief.counter_gap(repo=REPO)
+        if _gap:
+            print(f"  ⚠️ counters disagree: {_gap[0]} write-up(s) in outreach_log, {_gap[1]} "
+                  f"delivered row(s) in send-log. The stamp uses the send-log count.")
+    except Exception:
+        pass  # DEGRADES GRACEFULLY: a briefing that crashes blocks the session from opening.
 
     blocked, done = deal_breaker_blocked(), contacted()
     # THE 3 COMPANIES ARE THE TOP OF A CRITERIA-RANKED 10 (design ruling: with only 3-3-3 to spend a
@@ -267,8 +385,12 @@ def main():
             print(f"    • {co:<28} {src}")
 
     # THE 3 PEOPLE ARE THE TOP OF A RANKED 10 too (design ruling): rank the warm network by "who can
-    # help first" (relationship + role), LaCivita's method, deal-breaker vetoes only. Re-run after
-    # each pick to re-rank the rest. Falls back to the old first-3 picker if the ranker errors.
+    # help first" — scoring v2 (2026-07-26) reads LIKELY-BOSS-NESS + RELATIONSHIP DISTANCE, the
+    # boss-hunt method's own two axes, deal-breaker vetoes only. Re-run after each pick to re-rank
+    # the rest. Falls back to the old first-3 picker if the ranker errors.
+    # Scores are FLOATS under v2 (distance is +0.5/yr, capped), so the width below is :>5, not :>3.
+    # A too-narrow field does not truncate in Python, it just stops aligning — the column silently
+    # ragged is how a "44.5" reads as noise next to a "40".
     ppl_ranked = False
     try:
         import rank_criteria
@@ -277,15 +399,55 @@ def main():
             ppl_ranked = True
             print("\n  TOP 10 PEOPLE — who can help first (pick 3 to reach):")
             for i, c in enumerate(rpeople, 1):
+                # 🔬 THE EVIDENCE TIER SHOWS PER ROW. The blanket disclaimer below is not a per-row
+                # state: a whole top ten can be employers no source could place, and the list still
+                # reads like a clean ranking.
+                _ev = rank_criteria.contact_signals.EV_LABEL.get(
+                    c.get("evtier", rank_criteria.contact_signals.EV_UNLOOKED), "")
                 print(f"    {i:2}. {c['name']:<22} {rank_criteria.PERSON_BADGE[c['cat']]:<16} "
-                      f"score {c['pts']:>3}  · {c['title'][:26]:<26} @ {c['company'][:22]}")
-            print("    (relationship+role, deal-breakers only, culture waits · re-ranks after each pick)")
-    except Exception:
-            # RECENT-CONNECTION LANE. Recent connections never surfaced. Two reasons: nothing scored, and search-era contacts carry a deliberate -2
-            # because a two-week-old connection is not a warm rung — warm-network.md's own legend says a search-era contact
-            # must not receive a warm-rung ask. So the answer is not to promote them into the warm list, which would
-            # re-create that defect. It is to give them their OWN lane at the correct rung, where
-            # they are visible and correctly labelled instead of invisible or mis-rung'd.
+                      f"score {c['pts']:>5}  · {c['title'][:26]:<26} @ {c['company'][:22]}")
+                print(f"        {_ev}")
+                # ⛔ A ROLE THAT HAS ENDED PRINTS ON THE ROW ITSELF.
+                # `contact_signals.role_tell` knows when a stored title was verified dead, and the
+                # ranker puts that string in the row's reasons. This block used to render ONLY the
+                # name and score, so the warning existed in the data and never reached the screen.
+                # Cost when that happened upstream: a contact ranked #1 on a title they had left
+                # SIX YEARS earlier, and the day's target was picked on it.
+                # ⚠️ ROLE ENDED only, never the "title unverified" tell: that one fires on nearly
+                # every row, and rank_criteria deliberately says it ONCE for that reason. A warning
+                # printed ten times is a warning nobody reads.
+                # ⚖️ The general lesson: a signal is not shipped when the function returns it. It is
+                # shipped when the surface that drives the decision prints it. When wiring a new
+                # signal, check EVERY renderer that shows that object.
+                _ended = next((str(r) for r in c.get("reasons", []) if "ROLE ENDED" in str(r)), "")
+                if _ended:
+                    print(f"        {_ended[:150]}")
+            print("    (likely-boss + relationship distance, scoring v2 2026-07-26; deal-breakers "
+                  "only, culture waits · re-ranks after each pick)")
+            # 🕰 The unverified-title count, said ONCE, mirroring rank_criteria's own summary line.
+            # A connections export records a title as it stood on the CONNECT date, so a row can be
+            # years stale and still read as current.
+            _stale = sum(1 for c in rpeople
+                         if any("title unverified" in str(r) for r in c.get("reasons", [])))
+            if _stale:
+                print(f"    🕰 {_stale} of {len(rpeople)} titles were never verified; the export "
+                      f"froze them at the CONNECT date. Open the profile before building.")
+            # The age of the learned weights, so a session can SEE whether the ordering it is
+            # reading was computed off a log that has since moved. Guarded because a briefing must
+            # never block a session: an unreadable weights store loses this line, not the picks.
+            try:
+                print(rank_criteria._weights_age_line())
+            except Exception:
+                pass
+
+            # RECENT-CONNECTION LANE. Recent connections never surfaced. Two reasons: nothing
+            # scored, and search-era contacts carry a deliberate penalty, because a two-week-old
+            # connection is not a warm rung — warm-network.md's own legend says a search-era
+            # contact must not receive a warm-rung ask. So the answer is not to promote them into
+            # the warm list, which would re-create that defect. It is to give them their OWN lane
+            # at the correct rung, where they are visible and correctly labelled instead of
+            # invisible or mis-rung'd. (Fixed 2026-07-27: this lane had been mis-ported INTO the
+            # exception handler below, where it was dead code on every successful ranking.)
             try:
                 _recent = [c for c in rank_criteria.rank_people(400)[0]
                            if c.get("distance") == "search-era"][:5]
@@ -297,7 +459,6 @@ def main():
                     print(f"      · {c['name']:<22} {c['title'][:26]:<26} @ {c['company'][:22]}")
                 print("    (met during the search, so ask about THEIR work, never for an intro)")
     except Exception:
-        ppl_ranked = False
         ppl_ranked = False
     ppl = [] if ppl_ranked else pick_people()
     if ppl:
@@ -320,25 +481,66 @@ def main():
     print("=" * 72)
 
 
-def as_hook():
+# THE PAIR INSTRUCTION. Kept as a module constant so check_pair's block message, the consistency
+# step and the tests all read the SAME string instead of three paraphrases of it.
+#
+# ⛔ NO BUILD VOCABULARY IN THE PICKER'S QUESTION OR HEADER. record_decision.classify_answer reads
+# those two fields as BUILD CONTEXT, so a question phrased "draft the next step?" plus a "yes"
+# would be promoted into a MAC-signed BUILD row: an authorization nobody gave, in the one store
+# that exists to make authorization unforgeable. This picker is an audit-trail row and nothing more.
+PAIR_INSTRUCTION = (
+    "\n\nTHE PAIR. Open by showing the ladder summary above, then present the next-step picker: "
+    "option 1 is the METHOD's derived default, NAMED as the method's, with its read in the "
+    "description. The question and header must carry the literal marker NEXT-STEP and the LADDER "
+    "stamp line, verbatim, or check_pair.py blocks the question. Recompute both with "
+    "`python3 scripts/pair_brief.py` every time; never carry a ladder summary forward from an "
+    "earlier message. The same pair is owed again whenever a piece of work reaches a stopping "
+    "point, INCLUDING a status report, which is a finished task wearing a different hat. "
+    "Phrase the question and header as 'next move' or 'what now' and keep build/draft/send "
+    "vocabulary OUT of them.\n"
+)
+
+
+def pair_block(full=True):
+    """The pair's own section of the briefing. Never raises: the caller is a session-open hook."""
+    try:
+        import pair_brief
+        return "\n\n" + pair_brief.render(full=full)
+    except Exception as e:
+        return (f"\n\n[pair_brief] unavailable ({type(e).__name__}). Run "
+                "`python3 scripts/rung_ladder.py` by hand and still show the pair.")
+
+
+def as_hook(pair_only=False):
     """SessionStart hook mode: emit the briefing as additionalContext so it lands in model context.
 
     The runtime supports SessionStart with matchers startup / resume / clear / compact, and
     `hookSpecificOutput.additionalContext` is documented as "Text injected into model context."
     Plain stdout would only reach the transcript; the whole point is that the agent BEGINS the
     method rather than waiting to be told to.
+
+    `--pair-only` is the COMPACT variant wired to the `compact` matcher. Compaction is one of the
+    mechanisms by which a standing instruction silently stops applying: it happens unannounced,
+    mid-work, precisely when the method context has just been summarized away. Re-injecting the
+    whole briefing there would be noise; re-injecting the pair instruction plus a fresh stamp is
+    the direct fix.
     """
     import io
     import json
     from contextlib import redirect_stdout
-    buf = io.StringIO()
-    try:
-        with redirect_stdout(buf):
-            main()
-        brief = buf.getvalue()
-    except Exception as e:
-        brief = (f"[session_start] briefing unavailable ({type(e).__name__}). "
-                 "Run the method manually: 3 companies, 3 people, 3 messages.")
+    if pair_only:
+        brief = "COMPACTION RE-INJECTION: the standing pair rule, plus today's live numbers."
+        brief += pair_block(full=False)
+    else:
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                main()
+            brief = buf.getvalue()
+        except Exception as e:
+            brief = (f"[session_start] briefing unavailable ({type(e).__name__}). "
+                     "Run the method manually: 3 companies, 3 people, 3 messages.")
+        brief += pair_block(full=True)
     instruction = (
         "\n\nThis is the Job Attractor pipeline. Its operating method is Andrew LaCivita's: "
         "3 companies, 3 people, 3 messages per day, on a never-ending loop. "
@@ -346,17 +548,17 @@ def as_hook():
         "which is wanted. Do NOT draft or send anything before a choice is made. Pick each target's "
         f"RUNG first because the rung sets both the screen depth and the message shape — the rules "
         f"live in {RULES_DOC}. Re-read {RULES_DOC} from the file at every gate, never from memory.\n"
-    )
+    ) if not pair_only else ""
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "SessionStart",
-        "additionalContext": brief + instruction,
+        "additionalContext": brief + instruction + PAIR_INSTRUCTION,
     }}))
 
 
 if __name__ == "__main__":
     try:
         if "--hook" in sys.argv:
-            as_hook()
+            as_hook(pair_only="--pair-only" in sys.argv)
         else:
             main()
     except Exception as e:

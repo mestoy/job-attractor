@@ -41,6 +41,8 @@ OWNER_FIRST = OWNER_NAME.split()[0] if OWNER_NAME.split() else "You"
 # The site URL exactly as it should appear on the résumé (verify_resume checks for this string).
 OWNER_SITE_URL = _env("JOBKIT_OWNER_SITE_URL", f"https://www.{OWNER_SITE}")
 
+MAINTAINER_EMAIL = _env("JOBKIT_MAINTAINER_EMAIL", "")  # where mailto-fallback feedback reaches the kit maintainer; set via env, blank = GitHub issues URL only
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. DELIVERABLE NAMING — the recipient SEES the attachment filename, so it must be
 #    "<Your Name> - Resume - <Company>.pdf", never an internal source name.
@@ -164,6 +166,24 @@ INDUSTRY_VETO = [
     r"sportsbook", r"\bigaming\b", r"\bcasino\b", r"\bgambling\b", r"\bsports bett",
     r"\bcrypto\b", r"\bweb3\b", r"\bdefi\b", r"\bnft\b",
     r"merchant cash advance", r"\bmca\b", r"factor rate", r"revenue[- ]based financing",
+    # ── PREDATORY-LENDING AND DTC-Rx TERMS. Added after a veto list gained REACH — once the
+    # RESOLVED employer INDUSTRY text fed this list instead of only the company NAME, the very
+    # first batch surfaced two companies that were deal-breakers under rules already held, and
+    # that this list had no words for: a "buy-now-pay-later" lender and a "ketamine telehealth"
+    # provider. The rules were right; the patterns were narrower than the rules. If your own
+    # deal-breakers are written down anywhere in prose, check that this list can actually SAY them.
+    r"buy[- ]now[,]?[- ]pay[- ]later", r"\bbnpl\b", r"pay in 4", r"lease[- ]to[- ]own",
+    r"rent[- ]to[- ]own", r"\bsubprime\b", r"payday (loan|lend)", r"earned wage access",
+    # ⚠️ NARROWED THE SAME DAY IT WAS WRITTEN, and the reason generalises. The first version listed
+    # bare `\btelehealth\b` and `\btelemedicine\b`. That is far broader than the actual rule,
+    # which is direct-to-consumer PRESCRIPTION marketing, and healthtech generally sits INSIDE a
+    # regulated-workflow target lane. A bare telehealth veto would have quietly emptied a whole
+    # target lane to catch one company that `\bketamine\b` already catches.
+    # ⛔ OVER-BLOCKING IS INVISIBLE: a vetoed row just never appears, and nothing tells you why.
+    # Write the narrowest pattern that says your rule, never the broadest one that contains it.
+    r"direct[- ]to[- ]consumer (rx|pharmac|prescri|telehealth)",
+    r"telehealth[^.]{0,40}\b(prescri|\brx\b|pharmac)", r"\bketamine\b",
+    r"\bcompounding pharmac",
 ]
 INDUSTRY_CLEARED = [
     r"industry:?\s*cleared", r"industry cleared", r"not a deal[- ]breaker industry",
@@ -232,6 +252,43 @@ SEGMENTS = {
 }
 SEGMENT_SLUGS = list(SEGMENTS.keys())
 
+# ⭐ INDUSTRY patterns per segment — a DIFFERENT question from SEGMENTS above.
+# SEGMENTS holds the job TITLES you search for. This holds the words that say what a COMPANY does,
+# and it is what decides whether a contact can plausibly be your boss. `contact_signals.py` reads
+# it; the people ranker gates its likely-boss bands on the answer.
+#
+# Keys should be your segment slugs; values are regex fragments joined with |.
+#
+# ⚖️ BE CONSERVATIVE, and the asymmetry is not the obvious one. A false positive proposes a
+# hire-me ask to someone who cannot grant it. A miss only demotes to "who do you know", which is
+# safe to send to anyone. So match on distinctive domain nouns and never on generic business
+# words: "payments" is a signal, while "solutions", "technology", "partners", "group" are not.
+#
+# ⚠️ SHIPS EMPTY ON PURPOSE. With no patterns the read falls back to the sourced employer cache
+# and otherwise returns "unknown", which KEEPS the band and flags it. That is the safe default.
+# Populate it when you know your lanes.
+SEGMENT_INDUSTRY_PATTERNS = {
+    # "segment-a": r"payments?|paytech|fintech|billing|invoicing|merchant acquir|checkout",
+    # "segment-b": r"applied ai|machine learning|\bllm\b|generative ai|computer vision",
+}
+
+# ⭐ OFF-SEGMENT vocabulary — businesses that plainly cannot hire someone into your lanes.
+#
+# 🔴 THIS EXISTS BECAUSE ABSENCE OF A MATCH IS NOT EVIDENCE OF BEING OFF-SEGMENT, and conflating
+# the two shipped a real defect. Most real companies do not carry their industry in their name, so
+# a bare "no segment matched" test demoted a Head of Product at a well-known payments company
+# exactly as it demoted an artist-management sole trader. The read is TRI-STATE, and only a
+# POSITIVE match here demotes anyone:
+#     "relevant" — a segment matched          "off" — a business matched THIS list
+#     "unknown"  — neither, so keep the band and flag it for a human to verify
+#
+# ⚠️ Also ships empty. An empty list means nothing is ever demoted, which is the safe direction.
+OFF_SEGMENT_PATTERNS = [
+    # r"public relations", r"artist manage", r"talent agency", r"life coach",
+    # r"real estate", r"realty", r"restaurant", r"catering", r"salon",
+    # r"landscap", r"plumbing", r"roofing", r"staffing", r"recruit(?:ing|ment)",
+]
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. COMPANY ALIASES — rebrands and trading names, so dedup does not treat one company
 #    as two. Each set is one entity. Add the ones you actually run into.
@@ -247,6 +304,19 @@ COMPANY_ALIASES = [
 # Set to [] to switch the nudge off.
 METHOD_TERMS = ["lacivita", "andy"]
 
+# ⛔ THIS PATH MUST MATCH WHERE THE FILE ACTUALLY SHIPS. It said `documents/WORKFLOW-RULES.md` from
+# the first release until 2026-08-03, and the installer puts the rulebook at the kit ROOT, so the
+# path resolved to nothing in every partner install ever made.
+#
+# WHY THAT WAS EXPENSIVE AND SILENT: the session-start briefing tells the agent *"Re-read {RULES_DOC}
+# from the file at every gate, never from memory."* Reading a missing file raises nothing and returns
+# nothing, so the one mechanism built to stop rule drift was a no-op, and it reported no problem
+# while being one. `kit_doctor.py` now FAILS on a dangling RULES_DOC so this cannot recur quietly.
+# ⚠️ THIS VALUE WAS WRONGLY "FIXED" AND RESTORED TWICE ON 2026-08-03. It is CORRECT as written.
+# install.sh seeds documents/WORKFLOW-RULES.md from the root copy at install time, and
+# documents/ is git-ignored, so the path being absent in an UNINSTALLED kit is the normal
+# pre-install state, NOT a dangling pointer. It was twice changed to "WORKFLOW-RULES.md" by
+# someone reading a file listing instead of running the installer. Do not "fix" it again.
 RULES_DOC = "documents/WORKFLOW-RULES.md"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -257,6 +327,22 @@ RULES_DOC = "documents/WORKFLOW-RULES.md"
 # ─────────────────────────────────────────────────────────────────────────────
 LEDGER_PATH = _env("JOBKIT_LEDGER_PATH", os.path.join("documents", "decision-ledger.jsonl"))
 LEDGER_KEYFILE = _env("JOBKIT_LEDGER_KEYFILE", "~/.jobsearch-ledger-key")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7b. THE BACKFILL WINDOW — how far back backfill_linkedin_sends.py reaches when it
+#     pulls LinkedIn messages into the send log, and therefore into the rung ladder.
+#
+#     ⚠️ THIS IS A JUDGMENT CALL, NOT A DEFAULT TO ACCEPT. A LinkedIn export goes back
+#     years, and messages from an EARLIER search were sent to different people, for
+#     different roles, under different conditions. Folding them into the ladder moves
+#     the reply rate you read every session while telling you nothing about the search
+#     you are running now. Set this to the date THIS search began.
+#
+#     Ships DELIBERATELY BLANK. Blank means the script refuses to run rather than
+#     guessing a window on your behalf, because guessing wrong here silently rewrites
+#     the numbers you make decisions from.
+# ─────────────────────────────────────────────────────────────────────────────
+BACKFILL_SINCE = _env("JOBKIT_BACKFILL_SINCE", "")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 8. NETWORK EXCLUSIONS — personal history, ship EMPTY (an empty list is a no-op).
@@ -327,6 +413,17 @@ NETWORK_EXPORT_ZIP_GLOBS = [
 # ─────────────────────────────────────────────────────────────────────────────
 # ⚠️ EXAMPLE public classifications — edit to YOUR employers, and keep it consistent
 #    with INDUSTRY_VETO above (if you do not veto gambling, drop the gambling names).
+# NOT_A_COMPANY — pool rows that are a PAGE TITLE or ATS boilerplate rather than an employer.
+# A scraper reads whatever the careers page put in the heading, so a pool accumulates rows like
+# "Company Overview" and "Job Opportunities" that no screen can ever clear and no veto can ever
+# catch. They are not companies, so they must be dropped as ARTIFACTS, not screened as employers.
+NOT_A_COMPANY = [
+    r"^company overview$", r"^your job$", r"^opportunities\b", r"\bcareers? (site|page)$",
+    r"\bcandidate experience page$", r"\bjob opportunities$", r"\bcareer site$",
+    r"\bcorporate openings\b", r"\btalent acquisition team$", r"\bglobal career site$",
+    r"^company$", r"^overview$", r"^jobs?$",
+]
+
 VETO_EMPLOYERS = [
     r"\bcoinbase\b", r"\bkraken\b", r"\bbinance\b",                       # crypto exchanges
     r"\bpalantir\b", r"\banduril\b", r"\blockheed\b", r"\braytheon\b",    # defense primes

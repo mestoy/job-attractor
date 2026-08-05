@@ -16,6 +16,7 @@ Usage:  python3 scripts/doctor.py
 Exit:   0 = ready (warnings are fine) · 1 = something blocking is unconfigured
 """
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -117,7 +118,46 @@ if os.path.exists(os.path.join(ROOT, ".claude", "settings.json")):
     try:
         cfg = json.loads(_read(".claude", "settings.json") or "{}")
         n = sum(len(v) for v in (cfg.get("hooks") or {}).values())
-        ok(f"hooks wired ({n} hook group(s))")
+
+        # 🔴 A STALE settings.json USED TO REPORT GREEN, and that was the worst failure this
+        # check could have. Counting hook GROUPS says nothing about WHICH hooks are wired. A
+        # months-old file with 7 groups and no `check_pair.py` in it passed as "✅ hooks wired"
+        # while the blocking PAIR gate was absent entirely. Anyone who hand-edited one permission
+        # keeps their old file forever (the installer only refreshes a byte-identical copy), so
+        # this is the normal state of a long-lived install, not an edge case.
+        # ⚖️ The fix is a COMPARISON, never a count: every script the shipped example wires must
+        # appear in the live file. A health check that cannot say WHICH gate is missing is a
+        # health check that certifies its own blind spot.
+        def _scripts(obj):
+            found = set()
+            for groups in (obj.get("hooks") or {}).values():
+                for g in groups or []:
+                    for h in (g.get("hooks") or []) if isinstance(g, dict) else []:
+                        for m in re.finditer(r"scripts/([A-Za-z0-9_.-]+\.(?:py|sh))",
+                                             str(h.get("command") or "")):
+                            found.add(m.group(1))
+            return found
+
+        live = _scripts(cfg)
+        try:
+            want = _scripts(json.loads(_read(".claude", "settings.example.json") or "{}"))
+        except Exception:
+            want = set()
+        missing = sorted(want - live)
+        if missing:
+            blocking(f"settings.json is STALE — {len(missing)} shipped hook script(s) are not "
+                     f"wired: {', '.join(missing)}",
+                     "cp .claude/settings.example.json .claude/settings.json   "
+                     "(back up first if you customised it)")
+        else:
+            ok(f"hooks wired ({n} hook group(s), {len(live)} script(s), current with the example)")
+
+        # A hook naming a script that is not on disk fires and fails, which reads as a broken
+        # session rather than a missing file.
+        gone = sorted(x for x in live if not os.path.exists(os.path.join(ROOT, "scripts", x)))
+        if gone:
+            blocking(f"{len(gone)} wired hook(s) point at a script that does not exist: "
+                     f"{', '.join(gone)}", "re-run `bash install.sh .`")
     except Exception:
         advisory("settings.json present but not valid JSON",
                  "cp .claude/settings.example.json .claude/settings.json")
@@ -142,8 +182,38 @@ for exe, what, fix in [
     else:
         advisory(f"{exe} missing — {what} is off", fix)
 
-# ── 5. updates ───────────────────────────────────────────────────────────────────────────
-print("\n[5] staying current")
+# ── 5. network & closeness ───────────────────────────────────────────────────────────────
+# ADVISORY, NEVER BLOCKING. The kit works without these — it just cannot reach the warm rungs
+# (5-7), because a warm ask needs a stated relationship and nothing can state one but you.
+# The message says exactly that, so a fresh install reads as "next step", not "broken".
+print("\n[5] network & closeness (the warm rungs run on this)")
+try:
+    import glob as _glob
+    _exports = _glob.glob(os.path.join(ROOT, "documents", "linkedin-exports", "Connections-*.csv"))
+    if _exports:
+        ok(f"LinkedIn export ingested ({len(_exports)} on file, emails stripped)")
+    else:
+        advisory("no LinkedIn export ingested yet — the network surfaces are empty",
+                 "LinkedIn → Settings → Data privacy → Get a copy of your data; "
+                 "drop the .zip in Downloads, then run /level-network")
+    if os.path.exists(os.path.join(ROOT, "documents", "contact-closeness.json")):
+        try:
+            _cc = json.loads(_read("documents", "contact-closeness.json") or "{}")
+            _rows = {k: v for k, v in (_cc.get("contacts") or {}).items() if isinstance(v, dict)}
+            _lv = sum(1 for r in _rows.values() if r.get("closeness"))
+            ok(f"closeness store present — {_lv}/{len(_rows)} rows levelled",
+               "" if _lv == len(_rows) else "finish anytime: /level-network (it resumes)")
+        except Exception:
+            advisory("closeness store present but unreadable",
+                     "a .bak sits beside it; re-run /level-network")
+    else:
+        advisory("closeness store absent — warm rungs (5-7) stay locked; cold rungs still work",
+                 "run /level-network in Claude Code (needs the export above)")
+except Exception:
+    line("ℹ️ ", "network check skipped (unexpected error) — the rest of the kit is unaffected")
+
+# ── 6. updates ───────────────────────────────────────────────────────────────────────────
+print("\n[6] staying current")
 if os.path.isdir(os.path.join(ROOT, ".git")):
     try:
         r = subprocess.run(["git", "remote", "get-url", "origin"], cwd=ROOT,

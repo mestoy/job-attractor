@@ -45,6 +45,14 @@ add discovery-board.md        "# Discovery Board\n\nCompanies surfaced but not y
 add correspondence-log.md     "# Correspondence Log\n\nVerbatim record of every message sent and received.\n"
 add outreach-decision-log.md  "# Outreach Decision Log\n\nWhat you decided to build or skip, and why.\n"
 add green-board.md            "# Green Board\n\nVetted, build-ready companies (the 6-gate bar). A row here is NOT build-approval.\n"
+# The SEND LOG is the store the 10-rung ladder (scripts/rung_ladder.py) and the PAIR gate read on
+# every turn. Seed it EMPTY so the store exists from day one: it is JSONL, so a zero-byte file is a
+# valid, empty log, and the first thing a new partner is told to run should not have to cope with a
+# store that was never created. CREATE-IF-ABSENT, never truncate: install.sh is re-run by the
+# updater, and clobbering a real send log would erase the whole outreach history.
+[ -f "$TARGET/documents/send-log.jsonl" ] || : > "$TARGET/documents/send-log.jsonl"
+add BUG-LOG.md            "# 🐞 Bug Log\n\nThe durable record of defects you find in YOUR pipeline. \`pair_brief.py\` READS this file, so an OPEN row surfaces on its own as the LAST picker option, and never as the default.\n\n## ⛔ The pacing rule\n\nBugs and tests never interrupt the 3-3-3 unless you ask for them. The daily unit is 3 messages sent, and deskwork that displaces a send is deskwork. A bug that BLOCKS a send is not bug work, it is the send.\n\n## How a row works\n\n- \`- [ ]\` OPEN, \`- [x]\` FIXED. Only OPEN rows are counted.\n- Severity: 🔴 costs real work, 🟡 wrong output contained, 🟢 cosmetic.\n- Every row names where it was found, what it COST, and the fix. A row with no cost line is a preference, not a bug.\n- Never delete a fixed row. The record that a defect existed is what stops it reappearing.\n\n## OPEN\n\n## FIXED\n"
+add partner-feedback.md       "# Partner Feedback (upstream)\n\nAppend-only. Entries here are defects in the SHIPPED kit that only the maintainer can fix. Format + rules: documents/partner-feedback-protocol.md. Send with: python3 scripts/send_feedback.py\n"
 addroot() { [ -f "$TARGET/$1" ] || printf '%b' "$2" > "$TARGET/$1"; }
 addroot outreach_log.md       "# Outreach Log\n\nOne block per send. For WARM contacts only, arm a follow-up: FOLLOWUP-DUE: YYYY-MM-DD | channel:email | status:armed  (a cold non-reply gets a new target, not a chase)\n\nFor a COLD send, record the decline explicitly: FOLLOWUP-DUE: none\nThe token must be PRESENT. Omitting it entirely makes the send look like an un-armed one and reds the consistency check forever; 'none' records that you decided not to chase.\n"
 addroot prospect_queue.md     "# Prospect Queue\n\nCompanies awaiting review.\n"
@@ -97,7 +105,7 @@ fi
 _ref=0
 for _d in HARD-INVARIANTS.md ENFORCEMENT-REGISTER.md workflow-checklist.md apply-checklist.md \
           culture-screen-checklist.md boss-research-checklist.md email-body-checklist.md \
-          resume-build-checklist.md HANDOFF.md MIGRATION-2026-07.md; do
+          resume-build-checklist.md HANDOFF.md MIGRATION-2026-07.md partner-feedback-protocol.md; do
   [ -f "$TARGET/partner-docs/$_d" ] || continue
   [ -f "$TARGET/documents/$_d" ] || continue          # not installed yet: the seeding above owns it
   cmp -s "$TARGET/partner-docs/$_d" "$TARGET/documents/$_d" && continue
@@ -143,3 +151,7 @@ printf '     2) Then start: /matrix-hunt   (or /apply <job posting>)\n\n'
 printf '  Something not working? Run: python3 scripts/doctor.py\n'
 printf '  It changes nothing and tells you exactly what is missing.\n\n'
 printf '  Back up your private work anytime with: bash scripts/backup.sh. Nothing is ever sent without you.\n\n'
+
+# Closing note: how fresh is the network data the warm rungs run on? Degrade-silent (|| true —
+# this file runs under set -e and an install must never fail on an informational check).
+command -v python3 >/dev/null 2>&1 && python3 "$TARGET/scripts/check_network_freshness.py" 2>/dev/null || true

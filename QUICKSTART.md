@@ -20,7 +20,27 @@ Open the folder in **Claude Code** and type:
 It interviews you and writes all of it: your profile, your identity, your deal-breakers, and the
 enforcement hooks. **You never open a config file.**
 
-## 3. Start
+⚠️ **Run `/setup` all the way to the end.** The last step wires the enforcement hooks, and every
+gate in this pipeline is one of them. Stopping early leaves you with no gates at all and nothing
+on screen says so. If you are unsure, run `python3 scripts/doctor.py`: it names any hook that is
+missing.
+
+## 3. Two things with a lead time, do them TODAY
+
+Both of these unlock large parts of the pipeline and both take longer than you expect, so start
+them before you need them.
+
+**Request your LinkedIn data export.** LinkedIn → Settings → Data privacy → Get a copy of your
+data. **It can take a day to arrive.** Until it does, the warm rungs of the ladder stay locked and
+you can only work cold contacts, which convert several times worse. When the .zip lands in
+Downloads, run `/level-network`.
+
+**Fill in `documents/writing-samples.md`.** It ships empty and it is a 15 minute copy and paste
+from your own sent mail. Outreach drafting reads it to write in YOUR voice; with it empty you get a
+generic register, which is the one thing that makes a message look automated. The file explains what
+to collect.
+
+## 4. Start
 
 ```
 /matrix-hunt            find and screen companies that fit you

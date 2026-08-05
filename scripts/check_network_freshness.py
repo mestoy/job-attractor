@@ -20,6 +20,7 @@ Usage:  scripts/check_network_freshness.py [--warn-days 7] [--fail-days 14] [--q
 Exit:   0 = current · 1 = behind, re-parse will fix it · 2 = the export itself is stale, human needed
         3 = usage / unreadable
 """
+import json
 import os
 import re
 import sys
@@ -94,12 +95,56 @@ def newest_export_connection():
         return None, None
 
 
+def _store_coverage():
+    """LIVE closeness-store coverage, computed from the two sources every time.
+
+    The two sources are the export on disk (the contact universe) and the store's own contents
+    (who has an answer). A `_last_swept_export` stamp may exist in the store — it is surfaced as
+    provenance, but every NUMBER here is recomputed, so this check can never claim a freshness the
+    sources do not support. Returns {} keys defaulted when either source is missing."""
+    out = {"store_present": False, "store_rows": 0, "store_stated": 0, "store_unswept": None,
+           "store_last_swept_export": None}
+    try:
+        raw = json.load(open(os.path.join(REPO, "documents", "contact-closeness.json"),
+                             encoding="utf-8"))
+    except Exception:
+        return out
+    out["store_present"] = True
+    contacts = {k: v for k, v in (raw.get("contacts") or {}).items() if isinstance(v, dict)}
+    out["store_rows"] = len(contacts)
+    out["store_last_swept_export"] = raw.get("_last_swept_export")
+    sys.path.insert(0, HERE)
+    try:
+        import closeness
+        out["store_stated"] = sum(
+            1 for r in contacts.values()
+            if r.get("closeness") and str(r.get("source") or "") not in closeness.INFERRED_SOURCES)
+        # Unswept = export contacts with NO recorded closeness at all, matched on the normalized
+        # entity like every other consumer of this store.
+        from parse_network import find_export, parse_rows
+        _p, text = find_export()
+        if text:
+            levelled = {closeness.normalize_name(k) for k, r in contacts.items()
+                        if r.get("closeness")}
+            names = {closeness.normalize_name(
+                f"{(r.get('First Name') or '').strip()} {(r.get('Last Name') or '').strip()}")
+                for r in parse_rows(text)}
+            names.discard("")
+            out["store_unswept"] = len(names - levelled)
+    except Exception:
+        pass
+    return out
+
+
 def scan(today=None):
-    """Pure scan. Returns a dict; prints nothing. consistency-check step [18] calls this."""
+    """Pure scan. Returns a dict; prints nothing. consistency-check step [18] calls this.
+
+    Store-coverage keys are ADDITIVE (2026-07-27): existing consumers (session_start, the
+    consistency check) keep reading the original keys unchanged."""
     today = today or date.today()
     newest = newest_connection()
     exp_newest, exp_path = newest_export_connection()
-    return {
+    out = {
         "today": today,
         "newest_connection": newest,
         "data_lag_days": (today - newest).days if newest else None,
@@ -109,6 +154,8 @@ def scan(today=None):
         "parse_is_behind_export": bool(newest and exp_newest and exp_newest > newest),
         "source": recorded_source(),
     }
+    out.update(_store_coverage())
+    return out
 
 
 def main():
@@ -132,10 +179,16 @@ def main():
 
     s = scan()
     if s["newest_connection"] is None:
-        # No data at all is a fresh install, not a failure. Say so and pass, matching the
-        # degrade-gracefully contract every other check in this repo honors.
+        # No data at all is a fresh install, so the EXIT stays 0 — but on this kit that silence
+        # WAS the defect: nothing ever told the operator to produce the one input the warm rungs
+        # run on. Pass quietly in code, prompt loudly in text.
         if not quiet:
-            print("⚪ no warm-network data yet — nothing to age-check")
+            print("🟠 NO network data yet — the pipeline is running blind on relationships.")
+            print("   The warm rungs (5-7) stay locked until you level your network. Three steps:")
+            print("   1. LinkedIn → Settings → Data privacy → 'Get a copy of your data' → request it")
+            print("   2. Drop the .zip in your Downloads folder")
+            print("   3. In Claude Code run: /level-network  (ingests it, infers what it can, then")
+            print("      asks you about the rest in short batches — stop and resume any time)")
         return 0
 
     lag = s["data_lag_days"]
@@ -143,6 +196,15 @@ def main():
     if s["export_newest_connection"]:
         lines.append(f"newest in export on disk:  {s['export_newest_connection']} "
                      f"({s['export_lag_days']}d ago) · {os.path.basename(s['export_path'] or '')}")
+    # Closeness coverage, recomputed live from the two sources (see _store_coverage).
+    if s["store_present"]:
+        cov = (f"closeness store: {s['store_rows']} rows · {s['store_stated']} stated by you"
+               + (f" · {s['store_unswept']} unswept" if s["store_unswept"] is not None else ""))
+        lines.append(cov)
+        if s["store_unswept"]:
+            lines.append("   level the rest: /level-network (resumes where you left off)")
+    else:
+        lines.append("closeness store: ABSENT — warm rungs locked; run /level-network to create it")
 
     # A re-parse can only help when disk actually holds something newer than the parse.
     if s["parse_is_behind_export"]:

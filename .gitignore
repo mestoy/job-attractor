@@ -17,3 +17,12 @@ node_modules/
 *.tmp
 bun.lockb
 .DS_Store
+
+# Files the PARTNER edits. Tracking any of these recreates the defect that took kit_config.py out of
+# tracking: git refuses to overwrite a locally-modified tracked file, so `git pull --ff-only` aborts
+# on every future update and the updater misreports it as a network problem. Added 2026-08-03 after
+# a `git add -A` was about to track all four.
+job_search_tracker.csv
+outreach_log.md
+prospect_queue.md
+bun.lock

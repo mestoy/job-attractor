@@ -1,3 +1,8 @@
+---
+name: boss-hunt-response-playbook
+description: What to do after a boss-hunt email goes out — LaCivita's 8 reply scenarios (interest, referral, no-opening, brush-off, silence) with drafted responses in your voice, plus the follow-up cadence and logging steps. Load when a boss replies or the silence window closes.
+---
+
 # Skill: Boss-Hunt Response Playbook (handling replies)
 
 **When:** a boss replies to an outreach email (or the ~7–10 day silence window closes). This is the standing asset for *what to do next* — LaCivita's 8-scenario reply playbook (Boss-Hunting Bible), in the candidate's voice.

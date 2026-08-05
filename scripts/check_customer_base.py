@@ -8,12 +8,12 @@ vendor rarely writes "police" in a product-manager posting. screen_sweep.py says
 comments, and its only defense is a hand-curated name list that grows AFTER a miss. This script
 closes that loop by reading what the company says about its OWN customers on its OWN site.
 
-Two real illustrations of the class of miss this catches (public companies, quoted here only as
-examples — swap in whatever you keep re-encountering):
+Two illustrations of the class of miss this catches (invented names, real pattern — swap in
+whatever you keep re-encountering):
   * a cyber-risk vendor whose /industries/government page states that "law enforcement" needs its
-    visibility (e.g. Bitsight, bitsight.com/industries/government);
+    visibility (call it SomeCo, someco.example/industries/government);
   * a voice-fraud vendor whose public-sector whitepaper names "law enforcement ... call centers"
-    (e.g. Pindrop) — and whose copy lives at a slug the fixed path list would never guess.
+    (call it Otherco) — and whose copy lives at a slug the fixed path list would never guess.
 Both would clear a live-role check, a comp band and a boss-identification pass before anyone read a
 page that took one fetch to load. This runs FIRST so the cheapest disqualifier stops running LAST.
 
@@ -25,7 +25,7 @@ What this buys is that the CHEAPEST disqualifier stops running LAST.
 ⚠️ CALIBRATION — do not make this blunter. Selling to "government" is NOT the veto; selling to
 POLICING is. A contact-center vendor with a government page serving citizen services (DMV, benefits,
 311-style lines) and zero police/dispatch/corrections terms is a legitimate PASS and a deliberate
-negative-control fixture (e.g. Five9). Edit LE_TERMS / DEFENSE_TERMS below to match the exclusions in
+negative-control fixture (a vendor whose site names no LE customers). Edit LE_TERMS / DEFENSE_TERMS below to match the exclusions in
 YOUR rules doc — narrow them or widen them, but keep "government" and "policing" distinct.
 
 Usage:
