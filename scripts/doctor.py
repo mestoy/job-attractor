@@ -85,6 +85,28 @@ try:
     else:
         ok(f"industry veto list: {len(veto)} pattern(s)")
 
+    # 🔴 DOCTOR READ kit_config DIRECTLY AND CERTIFIED THE VETO LIST HEALTHY WHILE THE MODULE THAT
+    # USES IT COULD NOT LOAD IT AT ALL (found 2026-08-05). check_screen_gate imports ~11 names as
+    # ONE tuple, so a single name missing from a long-lived kit_config.py zeroes every screening
+    # list there while the list still reads fine from here. A real kit had 22 live veto patterns
+    # and a completely dead screen at the same time, and this section printed a green checkmark.
+    # ⚖️ Ask the CONSUMER, never the config. A config value nothing can import is not configured.
+    try:
+        import check_screen_gate as _csg
+        if getattr(_csg, "CONFIG_ERROR", None):
+            blocking("the screening gate cannot load your config, so EVERY screen passes "
+                     f"silently ({_csg.CONFIG_ERROR})",
+                     "your scripts/kit_config.py predates a name the code needs — copy the "
+                     "missing name(s) from scripts/kit_config.example.py, keeping your values")
+        elif not list(getattr(_csg, "INDUSTRY_VETO", []) or []):
+            blocking("the screening gate loaded an EMPTY industry veto — it passes everything",
+                     "add your deal-breaker industries to INDUSTRY_VETO in scripts/kit_config.py")
+        else:
+            ok(f"screening gate reads {len(_csg.INDUSTRY_VETO)} veto pattern(s) from your config")
+    except Exception as _e:
+        advisory(f"could not check the screening gate ({type(_e).__name__})",
+                 "run `python3 scripts/check_screen_gate.py -` and read the error")
+
     # Honesty lists SHIP EMPTY on purpose. Empty is correct until you have a corrected claim.
     retired = list(getattr(KC, "RETIRED", []) or [])
     if retired:
@@ -212,8 +234,64 @@ try:
 except Exception:
     line("ℹ️ ", "network check skipped (unexpected error) — the rest of the kit is unaffected")
 
-# ── 6. updates ───────────────────────────────────────────────────────────────────────────
-print("\n[6] staying current")
+# ── 6. your inputs ───────────────────────────────────────────────────────────────────────
+# THREE FILES SEED CORRECTLY AND THEN DEGRADE IN SILENCE, and until 2026-08-05 nothing checked
+# any of them. install.sh copies every partner-docs/*.md into documents/ when missing, so they
+# are PRESENT. Present and unfilled is the problem:
+#   • employer-criteria-matrix.md — rank_criteria.py returns "" and ranks with NO personal
+#     weighting, then cites a file that says nothing.
+#   • kit_config.SEGMENTS — ships POPULATED with segment-a/b/c. mail-draft.sh validates against
+#     that closed list, so a cold send is ACCEPTED and logged under a placeholder lane. The
+#     hot-zone comparison (send ~5 per segment, compare reply rates) then compares noise.
+#     ⚠️ Worse than a block, because a block would have told you.
+#   • writing-samples.md — check_outreach.py has no gate on it, so generic-voiced outreach
+#     ships with zero warning.
+# ⚖️ The test is a BYTE COMPARISON against the shipped copy in partner-docs/, never a marker
+# string: it is the same test install.sh uses to decide whether to refresh, it cannot drift as
+# the templates are reworded, and it answers the only question that matters — did you change it.
+# ⚖️ ADVISORY, never blocking. On a fresh install unfilled is the CORRECT state, so this reads
+# as the next step rather than a fault, the same way section [5] does.
+print("\n[6] your inputs (these degrade silently — nothing else reports them)")
+import filecmp as _filecmp
+
+for _doc, _what in [
+    ("employer-criteria-matrix.md",
+     "ranking runs with no personal weighting, and cites a file that says nothing"),
+    ("writing-samples.md",
+     "outreach gets written in a generic voice and no linter catches it"),
+    ("segments.md", "the lanes you test are not yours"),
+]:
+    _live = os.path.join(ROOT, "documents", _doc)
+    _ship = os.path.join(ROOT, "partner-docs", _doc)
+    if not os.path.exists(_live):
+        advisory(f"documents/{_doc} is missing — {_what}",
+                 "run `bash install.sh .` to seed it from partner-docs/")
+    elif os.path.exists(_ship) and _filecmp.cmp(_live, _ship, shallow=False):
+        advisory(f"documents/{_doc} is still the shipped template — {_what}",
+                 f"open documents/{_doc} and fill in the top few rows")
+    else:
+        ok(f"{_doc} has your edits")
+
+# The segment slugs live in kit_config, not in a doc, and they are the ones that reach a SEND.
+try:
+    _segs = list(getattr(KC, "SEGMENTS", {}) or {})
+    _placeholder = [s for s in _segs if re.fullmatch(r"segment-[a-z]", str(s))]
+    if _placeholder:
+        advisory(f"kit_config.SEGMENTS still ships placeholder slug(s): {', '.join(_placeholder)} "
+                 "— mail-draft.sh will ACCEPT these on a cold send and log it under a lane that "
+                 "means nothing, so your reply-rate comparison comes out as noise",
+                 "edit SEGMENTS in scripts/kit_config.py and documents/segments.md to your own "
+                 "lanes (3 to 5, each backed by something on your verifiable record)")
+    elif _segs:
+        ok(f"segment slugs are yours: {', '.join(str(s) for s in _segs)}")
+    else:
+        advisory("kit_config.SEGMENTS is empty — cold sends will be blocked for a missing segment",
+                 "define 3 to 5 lanes in scripts/kit_config.py")
+except NameError:
+    line("ℹ️ ", "segment check skipped (kit_config did not load — see [1])")
+
+# ── 7. updates ───────────────────────────────────────────────────────────────────────────
+print("\n[7] staying current")
 if os.path.isdir(os.path.join(ROOT, ".git")):
     try:
         # 🔴 THIS USED TO CHECK ONLY THAT `origin` HAD A URL, and that is the blind spot that cost

@@ -49,11 +49,38 @@ try:
     from kit_config import (INDUSTRY_VETO, INDUSTRY_CLEARED, REMOTE_DISQUAL, REMOTE_CONFIRM,
                             POLITICS_DISQUAL, POLITICS_CLEAR, PE_FLAG, PE_CLEARED, RULES_DOC,
                             VETO_EMPLOYERS, NOT_A_COMPANY)
-except Exception:  # standalone fallback: screens disabled, and it says so at runtime
+    CONFIG_ERROR = None
+except Exception as _e:  # standalone fallback: screens disabled
+    # 🔴 THIS FALLBACK USED TO BE SILENT, AND ITS OWN COMMENT CLAIMED "it says so at runtime"
+    # while nothing anywhere said so (found 2026-08-05). The comment 14 lines above warns that an
+    # empty veto list "passes everything silently, which is the failure mode this whole gate exists
+    # to prevent" — and this handler was producing precisely that.
+    #
+    # HOW IT FIRES, and it is not exotic. The import is ONE tuple, so a SINGLE name missing from
+    # kit_config.py zeroes EVERY list at once: industry veto, blocked employers, politics, PE, and
+    # the remote disqualifiers. A defense contractor then passes the mechanical screen clean.
+    #
+    # WHO IT HITS: not a fresh clone, which copies kit_config.example.py and has every name. It hits
+    # a LONG-LIVED install. kit_config.py is gitignored, so no update ever adds a newly-required
+    # name to it, and the config quietly falls behind the code that reads it. The occasion: a kit
+    # deployed for weeks was missing NOT_A_COMPANY, so all 22 of its veto patterns were dead and
+    # `doctor.py` still reported the veto list healthy, because doctor reads kit_config directly
+    # and never asks whether THIS module's import of it succeeded.
+    #
+    # ⚖️ It stays a fallback rather than a hard exit, because standalone use is real. What changes
+    # is that it is now LOUD, and CONFIG_ERROR lets doctor.py ask the question directly.
+    CONFIG_ERROR = f"{type(_e).__name__}: {_e}"
     INDUSTRY_VETO = INDUSTRY_CLEARED = REMOTE_DISQUAL = REMOTE_CONFIRM = []
     POLITICS_DISQUAL = POLITICS_CLEAR = PE_FLAG = PE_CLEARED = []
     VETO_EMPLOYERS = NOT_A_COMPANY = []
     RULES_DOC = "documents/WORKFLOW-RULES.md"
+    print(
+        "🔴 check_screen_gate: kit_config did not load, so EVERY screening list is EMPTY and this\n"
+        f"   gate now passes everything silently. Cause: {CONFIG_ERROR}\n"
+        "   fix: your scripts/kit_config.py predates a name the code needs. Copy the missing name(s)\n"
+        "   from scripts/kit_config.example.py into it (keep your own values for the rest).",
+        file=sys.stderr,
+    )
 
 
 def _squash(s):
