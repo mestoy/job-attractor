@@ -81,6 +81,34 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(HERE)
 STATE_DIR = os.path.join(REPO, "documents", "state")
 
+
+def _import_sibling(modname):
+    """Import a same-directory sibling module, immune to a STALE `sys.modules` entry.
+
+    BUG (2026-08-09): Python's import system caches modules by BARE NAME and never by path. A
+    process that loads a COPY of a sibling from a different directory (a test sandbox, a fixture)
+    leaves `sys.modules[modname]` pointing at that copy, and every later plain `import modname`
+    anywhere in the SAME process silently reuses the wrong object, even after the copy's directory
+    has been deleted. Found when a screening module loaded from a sandbox rebound the shared names
+    process-wide and a blocked-list lookup started answering False for everything.
+
+    ⚖️ A blocked list that goes quiet is the worst failure this pipeline has, because it reports
+    success. So: never trust a cached module by name alone. Check its `__file__` sits in THIS
+    directory and reload from the correct path when it does not, which self-heals `sys.modules`
+    for every other bare importer in the process rather than only this call site.
+    """
+    expected = os.path.join(HERE, modname + ".py")
+    mod = sys.modules.get(modname)
+    if mod is not None and os.path.abspath(getattr(mod, "__file__", "") or "") == os.path.abspath(expected):
+        return mod
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(modname, expected)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[modname] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 # One store per data class. Adding a fifth is a one-line change here plus a key normalizer below,
 # which is the whole point of building this class-agnostic on day one rather than shipping a
 # company-shaped thing and generalizing it under deadline later.
@@ -110,10 +138,8 @@ def _canon_company(name):
     "Acme", and what collapsed three spellings of one health insurer that were taking two slots in a
     top-10 you pick three companies from.
     """
-    sys.path.insert(0, HERE)
     try:
-        from screen_sweep import canon
-        return canon(name)
+        return _import_sibling("screen_sweep").canon(name)
     except Exception:
         # Degrade to the same shape rather than to nothing. A weaker key still groups exact
         # duplicates; returning the raw string would make every variant its own key.
@@ -651,10 +677,25 @@ def _count_sources(rows):
 # ── CLI ──────────────────────────────────────────────────────────────────────────────────────
 
 def _fmt_rec(rec):
+    """Render one record for `state.py current|history`.
+
+    ⛔ BUG-101 (reported by a partner install 2026-08-06, FIXED 2026-08-09). This line read
+    `rec['source_line'] if rec.get('source_line') != '' else ''` and crashed with
+    `KeyError: 'source_line'` on any record written WITHOUT that key, which is every row
+    `boss_registry.py` used to write. The guard looks like it handles the missing case and does the
+    opposite: `.get()` returns `None` when the key is absent, `None != ''` is True, so the truthy
+    branch hard-indexes the key that is not there.
+
+    ⚠️ IT WAS REPORTED AS ALREADY FIXED AND IT WAS NOT. The partner's patch notes marked it retired
+    on the strength of an upstream fix that never landed, and the local patch was deleted on that
+    basis. Reproduced in three trees on 2026-08-09. Do not retire a patch on a claim that a fix
+    shipped; run the crashing path against the tree that is supposed to carry it.
+    """
     p = rec.get("payload") or {}
     bits = " · ".join(f"{a}={b!r}" for a, b in list(p.items())[:6])
+    line = rec.get("source_line")
     return (f"{rec.get('as_of')}  [{rec.get('as_of_source')}]  {rec.get('source_file') or '—'}"
-            f"{':' + str(rec['source_line']) if rec.get('source_line') != '' else ''}\n      {bits}")
+            f"{':' + str(line) if line not in (None, '') else ''}\n      {bits}")
 
 
 def main(argv=None):

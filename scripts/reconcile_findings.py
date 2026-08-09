@@ -51,13 +51,16 @@ BLOCKED = os.path.join(REPO, "documents", "blocked-employers-list.md")
 
 sys.path.insert(0, HERE)
 try:
-    from screen_sweep import canon, blocked_keys_from_list
+    from screen_sweep import canon, blocked_keys_from_list, _import_sibling
 except Exception:  # pragma: no cover - a broken import must not strand captured findings
     def canon(name):
         return re.sub(r"[^a-z0-9]+", "", (name or "").lower())
 
     def blocked_keys_from_list(path=None):
         return set()
+
+    def _import_sibling(modname):
+        raise ImportError(f"screen_sweep is unavailable, so {modname} cannot be loaded safely")
 
 # The hard filters, numbered as your discovery brief numbers them. Used only to give the
 # blocked-list section a human heading; an unknown number still records, under "other".
@@ -160,6 +163,27 @@ def _write_blocked(drops, dry):
     if not dry:
         with open(BLOCKED, "a", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
+        # 🔴 AND MIRROR IT INTO THE REGISTRY, or the block does not take effect once a registry
+        # exists. Every reader of the blocked set comes through `screen_sweep.blocked_keys_from_list()`,
+        # which serves from `documents/employers.jsonl` whenever that registry is available. Writing
+        # the prose row alone leaves the ranker offering a company that was just dropped, until
+        # somebody re-runs `seed_employers.py`. Proven by appending a test row to a live list and
+        # asking: `is_blocked()` answered False on a company already written into the blocked file.
+        # ⚖️ The prose list is still written FIRST and stays the source both writers derive from.
+        # ⛔ Never fatal, and a NO-OP for anyone who has not seeded a registry. `available()` is
+        # False without the file, so this does nothing and prints nothing. A registry that will not
+        # accept the mirror must not lose the DROP that was already durably written above; it
+        # degrades to the old behavior, loudly.
+        try:
+            employers = _import_sibling("employers")
+            if employers.available():
+                n = employers.declare_blocked(drops)
+                if n:
+                    print(f"   📌 {n} entity(ies) declared blocked in documents/employers.jsonl")
+        except Exception as e:
+            print(f"   ⚠️  registry NOT updated ({e}) — the prose row landed, but the ranker will "
+                  f"keep offering these until `python3 scripts/seed_employers.py` is run",
+                  file=sys.stderr)
     return len(drops)
 
 

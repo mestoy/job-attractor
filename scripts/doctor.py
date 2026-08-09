@@ -132,10 +132,10 @@ def main():
         blocking(f"could not load scripts/kit_config.py ({type(e).__name__}: {e})",
                  "re-run `bash install.sh .` from the kit folder")
 
-    # 🔴 THE SAME TUPLE TRAP, ON THE RESUME SIDE (harvested from Matthew 2026-08-09, found by him
-    # live in his own install 2026-08-06). `verify_resume.py` imports ten names from kit_config as
+    # 🔴 THE SAME TUPLE TRAP, ON THE RESUME SIDE (ported 2026-08-09, found live on a partner's own
+    # install 2026-08-06). `verify_resume.py` imports ten names from kit_config as
     # ONE tuple. A kit sync added `EXPIRED_CREDENTIALS` and `CREDENTIAL_EXPIRY_OK` to it; until they
-    # were added to his kit_config the import raised, the except-branch substituted placeholders,
+    # were added to that kit_config the import raised, the except-branch substituted placeholders,
     # and every resume was verified against 0 retired claims and a placeholder address, reporting
     # CLEAN for that reason.
     # ⚖️ SECTION [1] ABOVE CERTIFIED IDENTITY HEALTHY THE WHOLE TIME, because it asks kit_config

@@ -25,9 +25,40 @@ import json, os, re, sys, collections
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _import_sibling(modname):
+    """Import a same-directory sibling module, immune to a STALE `sys.modules` entry.
+
+    ⛔ THIS FILE IS THE ONE THAT CAUSED THE BUG IT NOW GUARDS AGAINST (2026-08-09). Its own
+    `sys.path.insert(0, HERE)` at module scope is harmless when it runs from its install, and
+    poisonous when a COPY of it is loaded from somewhere else: `HERE` then points at the copy's
+    directory, and its bare `import kit_config` caches that copy under the SHARED name. Python's
+    import system caches by bare name and never by path, so every later plain `import kit_config`
+    in the same process silently reuses the wrong object, even after the copy's directory is gone.
+
+    ⚖️ The consequence is worth stating plainly, because it is the reason this is defended rather
+    than documented: a screening module resolving the wrong config can make a blocked-list lookup
+    answer False for everything, and a blocked list that goes quiet reports success. So: check a
+    cached module's `__file__` sits in THIS directory, and reload from the correct path when it
+    does not, which self-heals `sys.modules` for every other bare importer in the process.
+    """
+    expected = os.path.join(HERE, modname + ".py")
+    mod = sys.modules.get(modname)
+    if mod is not None and os.path.abspath(getattr(mod, "__file__", "") or "") == os.path.abspath(expected):
+        return mod
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(modname, expected)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[modname] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 try:
-    from kit_config import COMP_FLOOR, INDUSTRY_VETO
+    _kc = _import_sibling("kit_config")
+    COMP_FLOOR, INDUSTRY_VETO = _kc.COMP_FLOOR, _kc.INDUSTRY_VETO
 except Exception:  # standalone fallback — 0 disables comp filtering, [] disables the keyword veto
     COMP_FLOOR, INDUSTRY_VETO = 0, []
 
@@ -55,8 +86,55 @@ INDUSTRY_NAME_VETO = {
 MGMT_TITLE = r"\b(group product manager|director of product management|head of product management|" \
              r"vp,? product|vice president,? product|senior director|sr\.? director|manager,? product manag)"
 # Not a product-management seat at all (the aggregator's matcher over-catches).
+# ⚠️ RETAINED AS THE FALLBACK ONLY. See SEAT_TITLE below for why this is no longer the primary path.
 NON_PM = r"\b(engineer|scientist|analyst|architect|intern|marketing|sales|account executive|" \
          r"recruiter|designer|consultant|specialist|coordinator|operations manager)\b"
+
+# ── SEAT_TITLE — BUG-105 (reported from a partner install, ruled 2026-08-09) ──────────────────
+# NON_PM is a NEGATIVE exclude list and it encodes an assumption: that you are hunting PRODUCT
+# seats. It names analyst, architect, consultant, specialist and coordinator as "not a product
+# seat". If those are YOUR target seats, this screener was throwing your real matches away before
+# any other gate ran, and throwing them away SILENTLY, because the filter had no counter. Measured
+# on a real install: 5 of 9 target titles dropped, two whole segments returning nothing while the
+# sweep reported success.
+#
+# ⚖️ SET `SEAT_TITLE` IN kit_config.py TO DECLARE YOUR OWN SEATS. When it is set, this screener
+# keeps a posting whose title matches it (or MGMT_TITLE) and drops the rest WITH A REPORTED COUNT.
+# When it is empty, the older NON_PM behavior runs unchanged, so an install that has not declared
+# its seats is never handed a stricter filter it did not ask for.
+#
+# ⚠️ THE DIRECTION OF FAILURE FLIPS with that setting, which is the whole reason the count prints.
+# A negative list KEEPS a title phrasing nobody anticipated. A positive list DROPS it. For a
+# discovery sweep the silent drop is worse, because the match never reaches your board and nothing
+# tells you. A high "not a target seat" count means widen SEAT_TITLE, not that the market is quiet.
+#
+# Per-name guard, never a tuple import: a tuple import of one absent name raises for the WHOLE
+# tuple, the mechanism that blanked every résumé guardrail in BUG-100.
+try:
+    SEAT_TITLE = getattr(_import_sibling("kit_config"), "SEAT_TITLE", "")
+    SEAT_TITLE = SEAT_TITLE if isinstance(SEAT_TITLE, str) and SEAT_TITLE.strip() else ""
+except Exception:
+    SEAT_TITLE = ""
+
+
+def classify_title(p, t, ic, mgmt):
+    """Sort one POSTING into ic/mgmt, or return a drop reason string.
+
+    Returning the reason rather than printing it is the point: the caller counts drops, which is the
+    half of BUG-105 that kept it invisible.
+    """
+    if SEAT_TITLE:
+        if re.search(MGMT_TITLE, t, re.I):
+            mgmt.append(p)
+            return None
+        if re.search(SEAT_TITLE, t, re.I):
+            ic.append(p)
+            return None
+        return "not a target seat"
+    if re.search(NON_PM, t, re.I) and not re.search(r"product manager|product lead", t, re.I):
+        return "non-PM title"
+    (mgmt if re.search(MGMT_TITLE, t, re.I) else ic).append(p)
+    return None
 
 
 _NOT_A_COMPANY = re.compile(
@@ -190,6 +268,36 @@ def blocked_keys_from_list(path=None):
     ⬆️ HOISTED alongside canon(), same reason. Returns an empty set when the list is
     missing, so a fresh install banks rather than crashing.
     """
+    # ── THE REGISTRY IS THE AUTHORITY WHEN IT EXISTS, AND ONLY THEN ──────────────────────────
+    #
+    # ⚖️ Every reader of the blocked set comes through this function: `check_dup.blocked_key_hit`,
+    # `rank_criteria._BlockedText.__contains__`, `reconcile_findings`, and this module itself. So
+    # this is the one place that has to change for all of them to stop guessing.
+    #
+    # 📊 WHAT CHANGES ONCE YOU SEED ONE. Parsing prose derives identity by guessing at text, and on
+    # the install where it was measured that guessing returned 2,774 identities for 1,257 companies:
+    # 328 keys built out of salary figures and 713 lowercase sentence fragments. Worse than the
+    # noise, a company whose NAME appears inside a DIFFERENT company's blocked REASON reads as
+    # blocked itself, so a good target vanishes from the pool with nothing printed. The registry
+    # declares identity instead, and an EXACT lookup of `canon(name)` against declared keys and
+    # aliases takes reasons out of the match surface entirely.
+    #
+    # ⛔ NOBODY GETS A BEHAVIOR CHANGE UNTIL THEY SEED A REGISTRY. `employers.available()` is False
+    # with no `documents/employers.jsonl`, and this function then does exactly what it did before.
+    #
+    # ⛔ AN EXPLICIT `path` STILL PARSES THAT FILE. Tests and fixtures pass a path on purpose, and
+    # silently redirecting them to the live registry would make a fixture measure production state.
+    # Only the live, no-argument call is served from the registry.
+    if path is None:
+        try:
+            _employers = _import_sibling("employers")
+            if _employers.available():
+                return _employers.blocked_keys()
+        except Exception as e:                       # pragma: no cover - degraded path
+            # Loud, and it falls back to the OLD behavior rather than to an empty set. An empty
+            # blocked set silently passes every company, which is the direction that costs most.
+            print(f"[!] employer registry unreadable ({e}); falling back to parsing the prose list",
+                  file=sys.stderr)
     path = path or os.path.join(REPO, "documents/blocked-employers-list.md")
     # ⛔ realpath, because the raw path STRING is not a file identity. Two different strings can
     # name the same file, and caching under both would parse it twice for no gain.
@@ -308,16 +416,70 @@ def bank(keep, boss_hunt, greenfield, src):
     if dropped_blocked:
         print(f"\n   ⛔ {len(dropped_blocked)} name-variant(s) of BLOCKED companies caught by "
               f"normalization: {', '.join(dropped_blocked[:6])}")
-    lines = [f"# Banked candidates — {date.today().isoformat()}", "",
+    # ── BUG-098 (fixed 2026-08-09): THIS FILE HAS TWO WRITERS AND THIS ONE USED TO TRUNCATE. ──
+    # `reconcile_findings._write_banked()` opens the SAME path in APPEND mode to promote SURVIVOR
+    # rows. This function opened it `"w"`. So a sweep running after a reconcile on the same day
+    # destroyed every survivor the reconcile had promoted, while the reconcile's `.reconciled`
+    # sidecar still certified the run as consumed. The sidecar answered "was this run reconciled"
+    # when the question that matters is "are its survivors still in the pool".
+    #
+    # ⚖️ THE FIX IS MERGE, NOT COORDINATION. Both writers have a legitimate claim on the day's file,
+    # and a rule that says "run the reconcile last" is a rule a human has to remember, which is what
+    # already failed. Nothing overwrites now, so the hazard is gone structurally, not by ordering.
+    #
+    # ⛔ FOREIGN CONTENT IS PRESERVED VERBATIM and this writer's block is delimited, so a re-run
+    # replaces exactly its own output. Do NOT merge the two name lists into one: the writers grant
+    # DIFFERENT things (this one, mechanical gates only; the reconcile, a screened SURVIVOR verdict)
+    # and each block's prose is the provenance of the names under it.
+    #
+    # The markers are `>` lines on purpose: `rank_criteria.banked_topup()` skips lines starting with
+    # `#`, `>`, `|` or `-`, so they are invisible to the reader without touching it. A bare HTML
+    # comment line would NOT be skipped and would be split on '·' into a junk company name.
+    BEGIN, END = "> <!-- screen_sweep:begin -->", "> <!-- screen_sweep:end -->"
+    foreign, existing_keys = [], set()
+    if os.path.exists(out):
+        inside = False
+        for line in open(out, encoding="utf-8", errors="ignore").read().splitlines():
+            if line.strip() == BEGIN:
+                inside = True
+                continue
+            if line.strip() == END:
+                inside = False
+                continue
+            if inside:
+                continue
+            foreign.append(line)
+            # Same parse rule as banked_topup(), so "already present" means present TO THE READER.
+            if line.strip() and not line.lstrip().startswith(("#", ">", "|", "-")):
+                for chunk in line.split("·"):
+                    k = canon(chunk.strip().strip("*~ ").strip())
+                    if k:
+                        existing_keys.add(k)
+        while foreign and not foreign[-1].strip():
+            foreign.pop()
+
+    fresh = [n for n in names if canon(n) not in existing_keys]
+    block = [BEGIN,
              f"> Written by `screen_sweep.py --bank` from `{os.path.basename(src)}`.",
              "> Passed the MECHANICAL gates only (dedup, blocked-list, industry, title, comp floor).",
              "> **STILL OWED on every name here: remote verification, PE ownership, culture, boss.**",
              "> A name in this file means *worth screening*, never *worth sending*.", "",
-             "## Passes", ""]
-    for i in range(0, len(names), 6):
-        lines.append(" · ".join(names[i:i + 6]) + " ·")
+             f"## Passes (mechanical sweep, {date.today().isoformat()})", ""]
+    for i in range(0, len(fresh), 6):
+        block.append(" · ".join(fresh[i:i + 6]) + " ·")
+    block += ["", END]
+
+    if foreign:
+        lines = foreign + [""] + block
+    else:
+        lines = [f"# Banked candidates — {date.today().isoformat()}", ""] + block
     open(out, "w", encoding="utf-8").write("\n".join(lines) + "\n")
-    print(f"\n🏦 banked {len(names)} companies → {os.path.relpath(out, REPO)}")
+    carried = len(names) - len(fresh)
+    print(f"\n🏦 banked {len(fresh)} companies → {os.path.relpath(out, REPO)}")
+    if carried:
+        print(f"   {carried} already in today's file (another writer banked them); not duplicated")
+    if foreign:
+        print(f"   {len(foreign)} line(s) from the other writer preserved (BUG-098: this used to truncate)")
     print("   the ranker reads documents/banked-candidates-*.md; re-run rank_criteria.py to see them")
 
 
@@ -341,6 +503,9 @@ def main():
             by_company.setdefault(c, []).append(r)
 
     keep, boss_hunt, greenfield, dropped = [], [], [], []
+    # BUG-105: the title filter had no counter, so a taxonomy that was wrong for its user
+    # looked like a quiet market. Counted here and reported at the end of the run.
+    seat_drops = {}
     for company, posts in by_company.items():
         lc = company.lower()
         if lc in prior_names:
@@ -365,9 +530,10 @@ def main():
         ic, mgmt = [], []
         for p in posts:
             t = (p.get("title") or "")
-            if re.search(NON_PM, t, re.I) and not re.search(r"product manager|product lead", t, re.I):
+            why = classify_title(p, t, ic, mgmt)
+            if why:
+                seat_drops[why] = seat_drops.get(why, 0) + 1
                 continue
-            (mgmt if re.search(MGMT_TITLE, t, re.I) else ic).append(p)
         if not ic and not mgmt:
             # NO product role posted is NOT a drop. A company hiring but with no product function is
             # a 0-to-1 "your first product hire" GREENFIELD target for a builder-PM who creates the
@@ -401,6 +567,19 @@ def main():
             print(f"      {r['url']}")
 
     print(f"swept {len(rows)} postings · {len(by_company)} companies")
+    # ── BUG-105: SAY OUT LOUD WHAT THE TITLE FILTER THREW AWAY. ──────────────────────────────
+    # This filter dropped 5 of 9 of a real user's target titles for weeks and reported success,
+    # because it counted nothing. A seat taxonomy that is wrong for its user is indistinguishable
+    # from a quiet market unless the run says which one it is.
+    if seat_drops:
+        mode = "SEAT_TITLE (your declared seats)" if SEAT_TITLE else "NON_PM (no seats declared)"
+        total = sum(seat_drops.values())
+        print(f"   🪑 {total} posting(s) dropped on TITLE, filter = {mode}")
+        for why, n in sorted(seat_drops.items(), key=lambda kv: -kv[1]):
+            print(f"      {n:4}  {why}")
+        if SEAT_TITLE:
+            print("      if that number looks high, widen SEAT_TITLE in scripts/kit_config.py "
+                  "before concluding the market went quiet")
     show(keep, "🟢 CANDIDATES — IC product seat, mechanical gates passed (still owe: remote-verify, PE, culture, boss)")
     show(boss_hunt, "🟠 BOSS-HUNT LEADS — only people-management seats open, so the ROLE is a mismatch but the org is hiring product")
     show(greenfield, "🌾 GREENFIELD — hiring but NO product role posted; a 0-to-1 'your first product hire' target (no product org is NOT a drop)")

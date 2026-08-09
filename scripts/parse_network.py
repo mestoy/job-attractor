@@ -35,7 +35,12 @@ import sys
 import zipfile
 from datetime import date, datetime
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# ⛔ BUG-102 (reported by a partner install, FIXED 2026-08-09). This read
+# `REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))` and ignored
+# CLAUDE_PROJECT_DIR, unlike every sibling (state.py, closeness.py, parse_messages.py, …). So this
+# script wrote into the REAL documents/ even when a sandbox had redirected the data root, which
+# means any test that exercised it mutated live data instead of the copy.
+REPO = os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:

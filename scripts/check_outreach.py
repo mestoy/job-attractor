@@ -797,7 +797,12 @@ def main():
     #   breaks ONE BEAT PER PARAGRAPH with a blank line between beats (hook/praise · proof · identity ·
     #   ask), never a single wall of text — he DELETED staged drafts that were one dense paragraph.
     #   Strip the signature, then flag a content region that is effectively one run-on paragraph. —
-    _sig = re.search(r"\n\n\n(?:you|Mike)\b", body)
+    # ⚠️ THE OWNER'S FIRST NAME COMES FROM kit_config, never from a literal (genericized
+    # 2026-08-09). This read `(?:you|Mike)`, the kit author's own name baked into a partner
+    # kit, so for anybody else the signature never matched, the whole sign-off counted as
+    # BODY, and the wall-of-text rule was measured against text that is not the message.
+    # This file already imports OWNER_FIRST and already uses it this way further up.
+    _sig = re.search(r"\n\n\n(?:you|" + re.escape(str(OWNER_FIRST)) + r")\b", body)
     _content = body[:_sig.start()] if _sig else body
     _paras = [p for p in re.split(r"\n[ \t]*\n", _content) if p.strip()]
     _sentences = len(re.findall(r"[.!?](?:\s|$)", _content))

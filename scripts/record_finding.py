@@ -56,10 +56,21 @@ _FALLBACK_LANES = ("payments", "applied-ai", "ai-enablement", "regulated-workflo
 
 
 def lanes():
-    """The closed segment vocabulary, read from documents/segments.md.
+    """The closed segment vocabulary: documents/segments.md UNIONED with kit_config.SEGMENT_SLUGS.
 
-    Parses the slug column of the segments table. Falls back to the hardcoded tuple when the file
-    is missing, so a fresh install records findings rather than refusing them.
+    Parses the slug column of the segments table. Falls back to the hardcoded tuple when neither
+    source has anything, so a fresh install records findings rather than refusing them.
+
+    ⛔ BUG-103 (reported by a partner install, FIXED 2026-08-09). This read segments.md ALONE, so on
+    any install where that file is still the shipped template, `--lane` rejected the user's REAL
+    segments. Those lanes are defined in `kit_config.SEGMENT_SLUGS`, which `mail-draft.sh`,
+    `screen_sweep.py` and `sweep_segments.sh` all already honor, so this was the only script in the
+    pipeline that did not know what your segments were. ⚠️ It failed in the direction that looks
+    like user error: the message named the lanes it WOULD take, and every one of them belonged to
+    somebody else.
+
+    ⚖️ UNION, NOT REPLACE. segments.md stays authoritative where it is filled in, and the config is
+    added rather than substituted, so an install that has both keeps working with either name.
     """
     path = os.path.join(REPO, "documents", "segments.md")
     found = set()
@@ -72,7 +83,31 @@ def lanes():
                 found.add(m.group(1))
     except Exception:
         pass
-    return tuple(sorted(found)) if found else _FALLBACK_LANES
+    # ⛔ THE FALLBACK IS THE BASE WHEN segments.md IS UNFILLED, and getting this wrong broke the
+    # kit's own suite for an hour on 2026-08-09. The first version of this union simply added the
+    # config slugs to `found`. On a FRESH install `segments.md` is still the shipped template, so
+    # `found` was empty until the config slugs arrived — and the config ships POPULATED WITH
+    # PLACEHOLDERS. That made `found` non-empty, the fallback never applied, and a brand-new kit
+    # rejected its own documented `payments` lane. 4 tests went red that had been green.
+    # ⚠️ Placeholder slugs are filtered for the same reason: a template value is not a declaration.
+    _PLACEHOLDERS = {"segment-a", "segment-b", "segment-c"}
+    # Per-name guard, never a tuple import: a tuple import of one absent name raises for the WHOLE
+    # tuple, which is how BUG-100 blanked every résumé guardrail at once.
+    declared = set()
+    try:
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if _here not in sys.path:
+            sys.path.insert(0, _here)
+        from kit_config import SEGMENT_SLUGS
+        declared = {s.strip() for s in SEGMENT_SLUGS
+                    if isinstance(s, str) and s.strip() and s.strip() not in _PLACEHOLDERS}
+    except Exception:
+        pass
+    if not found:
+        found = set(_FALLBACK_LANES)
+    found |= declared
+    found.add("off-segment")   # always available; it is the "not one of mine" verdict
+    return tuple(sorted(found))
 
 
 def _safe_run_id(raw):

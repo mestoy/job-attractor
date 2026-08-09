@@ -123,7 +123,7 @@ if ! git pull --ff-only "$KIT_REMOTE"; then
   # ancestor of upstream" is true when upstream rewrote history, AND it is equally true when YOU
   # have local commits upstream has never seen. The comment above reads the condition as case (a)
   # only, so a partner with their own work took the rewrite branch and `git reset --hard` deleted
-  # it. Matthew's clone carries exactly that: his own fixes to boss_registry.py, parse_network.py,
+  # it. A real partner clone carries exactly that: local fixes to boss_registry.py, parse_network.py,
   # record_finding.py and screen_sweep.py, plus commits 3c36a6a and 19c943a. It did not fire on
   # 2026-08-06 by luck, not by design.
   #

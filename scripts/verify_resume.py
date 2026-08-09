@@ -30,7 +30,7 @@ except Exception as _e:
     # 🔴 THAT IS NOT HYPOTHETICAL. A partner hit it: `EXPIRED_CREDENTIALS` and
     # `CREDENTIAL_EXPIRY_OK` arrived in a kit sync without landing in their config, and while they
     # were missing verify_resume saw **0 retired claims instead of 5** and passed a résumé because
-    # it had nothing to compare against. Diagnosed by Matthew 2026-08-06, harvested 2026-08-09.
+    # it had nothing to compare against. Diagnosed on a partner install 2026-08-06, ported 2026-08-09.
     # ⚖️ A weaker check that ANNOUNCES itself is a check; a weaker check that reports success is the
     # silent-all-clear shape this repo has now paid for four separate times. Main already carries
     # this pattern in its own verify_resume; this is that fix, ported.

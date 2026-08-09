@@ -300,13 +300,77 @@ class TestBuildGate(unittest.TestCase):
         self._row("acme corp", ruling="SKIP")
         self.assertFalse(check_preview._has_build_ruling(self._q("Draft the note to Acme Corp")))
 
-    def test_voice_patterns_are_case_sensitive_where_they_anchor_a_name(self):
-        """A blanket re.I on a pattern holding a [A-Z] anchor makes the anchor match lowercase, so
-        the anchor stops discriminating and ordinary prose satisfies it."""
-        pats = check_preview.VOICE_PATTERNS
-        self.assertTrue(any(p.search("Hi, Jane!") for p in pats))
-        self.assertFalse(any(p.search("hi, jane!") for p in pats),
-                         "a lowercase word satisfied a pattern that anchors a proper noun")
+    # ⛔ test_voice_patterns_are_case_sensitive_where_they_anchor_a_name WAS DELETED HERE
+    # (2026-08-09, BUG-104), together with `check_preview.VOICE_PATTERNS` itself. It asserted
+    # against a list that was built at import and read by NOTHING, so its verdict said nothing
+    # about behavior, and it asserted the KIT'S greeting vocabulary ("Hi, Jane!") rather than the
+    # rule it was named for, so it failed for every user whose outreach style differs from the
+    # default. That is the config knob working as intended being reported as a defect.
+    # Replaced by test_voice_marker_gate_fires_on_a_real_multiline_draft below, which exercises the
+    # mechanism that actually gates.
+
+    # ⛔ A TEST OVER A USER-CONFIGURABLE KNOB ASSERTS THE MECHANISM, NEVER THE SHIPPED EXAMPLE
+    # VALUES. `VOICE_MARKERS` is edited by every user who runs /setup, so a draft hardcoding the
+    # kit's placeholder site carries none of a real user's markers, the gate correctly stays quiet,
+    # and the test reports a gate-shaped hole that does not exist. It fails for every configured
+    # install, which is the knob working as intended being read as a defect. This is the same
+    # coupling that retired `test_voice_patterns_are_case_sensitive_where_they_anchor_a_name`
+    # (it hardcoded the kit's greeting vocabulary), so the fix has to be structural: read the ACTIVE
+    # list at test time and BUILD the fixture from it.
+    def _active_markers(self):
+        markers = [str(m) for m in (check_preview.VOICE_MARKERS or []) if str(m).strip()]
+        if not markers:
+            self.skipTest("VOICE_MARKERS is empty on this install, so detector (c) is disabled "
+                          "by configuration and there is no gate here to test")
+        return markers
+
+    @staticmethod
+    def _multiline_draft(marker):
+        """A draft shaped like a real email: several paragraphs and a signature block.
+
+        The SHAPE is the point, not the words. Only the marker is install-specific.
+        """
+        return ("Following up on the platform rebuild you mentioned last week.\n\n"
+                "The part I keep coming back to is how the team sequenced it without "
+                "freezing the roadmap.\n\n"
+                "Worth a short conversation if you have twenty minutes.\n\n"
+                "Best,\n"
+                "A Sender\n"
+                f"{marker}\n")
+
+    def test_voice_marker_gate_fires_on_a_real_multiline_draft(self):
+        """The gate must fire on a draft shaped like a real email, not only on a bare line.
+
+        🔴 THIS IS THE DEFECT BUG-104 WAS REALLY ABOUT. The retired pattern path compiled with no
+        flags, so a `$` anchored to end-of-STRING. Markers matched a bare "Jane," and went inert the
+        moment the draft had a second line, while the check reported clean. The surviving mechanism
+        is a substring test, which cannot fail that way, and this pins it across MANY lines.
+
+        The draft is assembled from whatever `VOICE_MARKERS` actually holds on this install, so the
+        assertion is "a configured marker still fires inside a multi-paragraph message", which is
+        true for the shipped example config and for every user who replaced it.
+        """
+        for marker in self._active_markers():
+            with self.subTest(marker=marker):
+                self.assertTrue(
+                    check_preview._carries_drafted_voice(
+                        self._q(self._multiline_draft(marker))),
+                    "a multi-line draft carrying a configured voice marker did not trip the "
+                    "gate; if this goes red the send path has a gate-shaped hole in it")
+
+    def test_voice_marker_gate_stays_quiet_on_an_ordinary_planning_question(self):
+        """The other half: a gate that fires on everything is as useless as one that never fires.
+
+        ⚠️ The text is CHECKED against the live markers rather than assumed clean. A user whose
+        marker is an ordinary word could otherwise make this fail for a reason that has nothing to
+        do with the rule being tested.
+        """
+        question = "Should we screen Acme Corp before or after the culture peek?"
+        for marker in (check_preview.VOICE_MARKERS or []):
+            if str(marker).strip() and str(marker).lower() in question.lower():
+                self.skipTest(f"a configured voice marker ({marker!r}) appears in the control "
+                              f"text, so this install needs a different neutral sentence")
+        self.assertFalse(check_preview._carries_drafted_voice(self._q(question)))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4715,3 +4779,141 @@ class TestStagedBlockCollapse(unittest.TestCase):
         self.assertIsNotNone(m, "mail-draft.sh no longer builds _STAG_KEY")
         shape = m.group(1).replace("${_LOG_CO}", "Globex").replace("${SUBJECT}", "S")
         self.assertEqual(shape, self.mod.staged_marker("Globex", "S"))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# employers.py — THE EMPLOYER ENTITY REGISTRY, wired in as an OPTIONAL UPGRADE.
+#
+# ⚖️ The whole port rests on one promise: an install with no `documents/employers.jsonl` behaves
+# EXACTLY as it did before the registry existed. `blocked_keys_from_list()` asks
+# `employers.available()` first and falls back to parsing prose whenever the answer is False, so
+# nobody gets a behavior change until they choose to seed a registry. Test 1 below is that promise
+# written down.
+#
+# 🔴 AND THE REASON TO SEED ONE. The prose parser derives identity by GUESSING at text, and the
+# guess has a measured failure class: a company whose name appears inside a DIFFERENT company's
+# blocked REASON gets harvested as an identity and blocked itself. A false block hides a good target
+# and prints nothing, which is the costlier direction. The registry replaces the guess with declared
+# identity and an EXACT lookup of canon(name) against declared keys and aliases, so reasons leave
+# the match surface entirely. `test_a_name_inside_another_companys_reason_is_not_blocked` is the
+# whole point of the port.
+# ─────────────────────────────────────────────────────────────────────────────
+class TestEmployerRegistryUpgradePath(unittest.TestCase):
+    # One bullet, two company names: `Acme Corp` is the blocked entity, `Zenith Labs` is only ever
+    # mentioned inside Acme's reason. The prose parser cannot tell those two positions apart.
+    BLOCKED_MD = (
+        "# Blocked employers\n\n"
+        "- **Acme Corp** (blocked 2026-01-04, filter 8): acquired by its parent, "
+        "Zenith Labs, in 2024\n"
+        "- **Globex Systems** (blocked 2026-01-05, filter 2)\n"
+    )
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.docs = os.path.join(self.tmp.name, "documents")
+        os.makedirs(self.docs, exist_ok=True)
+        self.blocked = os.path.join(self.docs, "blocked-employers-list.md")
+        with open(self.blocked, "w", encoding="utf-8") as fh:
+            fh.write(self.BLOCKED_MD)
+        self.registry = os.path.join(self.docs, "employers.jsonl")
+        # ⛔ THE TWO MODULES RESOLVE THE REPO DIFFERENTLY, and a test that assumed one rule for both
+        # measured nothing. `employers` honors CLAUDE_PROJECT_DIR (and binds it at import, so it has
+        # to be reloaded AFTER the variable is set); `screen_sweep` computes its REPO from its own
+        # file location and never reads the environment, so the sandbox is applied by patching the
+        # attribute. Both are restored on cleanup, along with the parser's stat cache, so no later
+        # test in this file inherits the sandbox.
+        self._prev = os.environ.get("CLAUDE_PROJECT_DIR")
+        os.environ["CLAUDE_PROJECT_DIR"] = self.tmp.name
+        self._real_repo = screen_sweep.REPO
+        screen_sweep.REPO = self.tmp.name
+        screen_sweep._BLOCKED_KEYS_CACHE.clear()
+        self.addCleanup(self._restore)
+        self.employers = importlib.reload(importlib.import_module("employers"))
+
+    def _restore(self):
+        if self._prev is None:
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        else:
+            os.environ["CLAUDE_PROJECT_DIR"] = self._prev
+        screen_sweep.REPO = self._real_repo
+        screen_sweep._BLOCKED_KEYS_CACHE.clear()
+        importlib.reload(importlib.import_module("employers"))
+
+    def _declare(self, *rows):
+        with open(self.registry, "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+        self.employers._CACHE.clear()
+
+    def _blocked_row(self, display, **extra):
+        row = {"key": screen_sweep.canon(display), "display": display, "aliases": [],
+               "status": "blocked"}
+        row.update(extra)
+        return row
+
+    # ── 1. THE COMPATIBILITY GUARANTEE ───────────────────────────────────────────────────────
+    def test_with_no_registry_the_prose_path_is_unchanged(self):
+        """No employers.jsonl means the live call parses prose, byte for byte as it always did."""
+        self.assertFalse(os.path.exists(self.registry))
+        self.assertEqual(screen_sweep.blocked_keys_from_list(),
+                         screen_sweep.blocked_keys_from_list(self.blocked))
+        self.assertIn(screen_sweep.canon("Acme Corp"), screen_sweep.blocked_keys_from_list())
+
+    def test_an_explicit_path_always_parses_that_file(self):
+        """Fixtures pass a path on purpose. Serving them from the live registry would make a test
+        measure production state, so only the no-argument call is upgraded."""
+        self._declare(self._blocked_row("Globex Systems"))
+        self.assertTrue(self.employers.available())
+        keys = screen_sweep.blocked_keys_from_list(self.blocked)
+        self.assertIn(screen_sweep.canon("Acme Corp"), keys,
+                      "an explicit path must still be parsed as prose")
+
+    # ── 2. THE REGISTRY ANSWERS ──────────────────────────────────────────────────────────────
+    def test_a_declared_key_is_blocked_and_an_undeclared_company_is_not(self):
+        self._declare(self._blocked_row("Acme Corp"))
+        self.assertTrue(self.employers.is_blocked("Acme Corp"))
+        self.assertTrue(self.employers.is_blocked("acme corp"))     # canon, not a string compare
+        self.assertFalse(self.employers.is_blocked("Initech"))
+        keys = screen_sweep.blocked_keys_from_list()
+        self.assertEqual(keys, frozenset({screen_sweep.canon("Acme Corp")}))
+
+    def test_an_alias_resolves_onto_the_declared_row(self):
+        self._declare(self._blocked_row("Acme Corp", aliases=["Acme Corporation"]))
+        self.assertTrue(self.employers.is_blocked("Acme Corporation"))
+
+    def test_a_cleared_entity_does_not_block(self):
+        self._declare(self._blocked_row("Acme Corp"),
+                      {"key": screen_sweep.canon("Globex Systems"), "display": "Globex Systems",
+                       "aliases": [], "status": "cleared"})
+        self.assertFalse(self.employers.is_blocked("Globex Systems"))
+
+    # ── 3. THE FALSE-BLOCK REGRESSION, the reason the port exists ────────────────────────────
+    def test_a_name_inside_another_companys_reason_is_not_blocked(self):
+        """`Zenith Labs` is named only inside Acme's blocked REASON. Prose harvests it as an
+        identity and blocks it; the registry never searches reasons, so it cannot."""
+        zenith = screen_sweep.canon("Zenith Labs")
+        self.assertIn(zenith, screen_sweep.blocked_keys_from_list(self.blocked),
+                      "fixture no longer reproduces the prose parser's false block")
+        self._declare(self._blocked_row("Acme Corp"), self._blocked_row("Globex Systems"))
+        self.assertNotIn(zenith, screen_sweep.blocked_keys_from_list())
+        self.assertFalse(self.employers.is_blocked("Zenith Labs"))
+
+    # ── 4. THE SWITCH ITSELF ─────────────────────────────────────────────────────────────────
+    def test_available_is_false_without_a_registry_and_true_with_one(self):
+        self.assertFalse(self.employers.available())
+        with open(self.registry, "w", encoding="utf-8") as fh:
+            fh.write("")
+        self.employers._CACHE.clear()
+        self.assertFalse(self.employers.available(), "an EMPTY registry is not an available one")
+        self._declare(self._blocked_row("Acme Corp"))
+        self.assertTrue(self.employers.available())
+
+    def test_declare_blocked_is_idempotent_and_visible_immediately(self):
+        """The reconcile mirror appends here. A store that grows on every retry is how a harmless
+        append becomes a corruption, and a write nobody can read back is not a block."""
+        self._declare(self._blocked_row("Acme Corp"))
+        n = self.employers.declare_blocked([{"company": "Initech", "filter": 8}])
+        self.assertEqual(n, 1)
+        self.assertTrue(self.employers.is_blocked("Initech"), "read-after-write, no re-seed needed")
+        self.assertEqual(self.employers.declare_blocked([{"company": "Initech", "filter": 8}]), 0)

@@ -24,11 +24,10 @@ import sys, os, re, json
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
-    from kit_config import (VOICE_MARKERS, VOICE_MARKER_PATTERNS, RULES_DOC,
+    from kit_config import (VOICE_MARKERS, RULES_DOC,
                             LEDGER_PATH, LEDGER_KEYFILE)
 except Exception:
     VOICE_MARKERS = ["yoursite.example"]
-    VOICE_MARKER_PATTERNS = [r"\b(hi|hey|tgif),\s+[A-Z][a-z]+!", r"\b(praise|phrasing|beat|angle|hook)\b"]
     RULES_DOC = "documents/WORKFLOW-RULES.md"
     LEDGER_PATH = os.path.join("documents", "decision-ledger.jsonl")
     LEDGER_KEYFILE = "~/.jobsearch-ledger-key"
@@ -61,13 +60,31 @@ LEDGER = os.path.join(
 # tics to VOICE_MARKERS in kit_config.py — the more of your voice is listed, the more reliably
 # this tells a drafted message apart from an ordinary question.
 #
-# Compiled with NO blanket flags, deliberately. The previous version applied `re.I` to any pattern
-# whose text happened to contain the word "praise", which is a coin flip dressed as a rule: a
-# blanket `re.I` on a pattern holding a `[A-Z]` anchor makes that anchor match LOWERCASE, so an
-# anchor meant to pin a proper noun matches any word at all and the check stops discriminating.
-# If you want part of a pattern case-insensitive, scope it INLINE in kit_config.py:
-#     r"(?i:warm-rung:)\s*([A-Z][\w'\-]+)"      <- marker loose, NAME still case-sensitive
-VOICE_PATTERNS = [re.compile(p) for p in VOICE_MARKER_PATTERNS]
+# ⛔ VOICE_PATTERNS WAS REMOVED HERE, 2026-08-09 (BUG-104). It read:
+#     VOICE_PATTERNS = [re.compile(p) for p in VOICE_MARKER_PATTERNS]
+# and it was DEAD CODE: defined, never referenced by anything, while a test in tests/test_gates.py
+# asserted against it. The live gate is `VOICE_MARKERS`, the substring check in
+# _carries_drafted_voice() below. Main removed this on 2026-07-20 and the partner tree did not, so
+# for three weeks only PARTNERS carried it. That drift is the real defect here.
+#
+# 🔴 THE SECOND HALF IS WORSE THAN THE DEAD CODE, and it is why the config knob went too.
+# `re.compile(p)` passed no flags, so a `$` in any user pattern anchored to end-of-STRING rather
+# than end-of-line. A partner's markers `"Jane,"` and `"Best,"` matched only when the entire input
+# WAS that line, so on every real multi-line draft both were inert and the check reported clean.
+# ⚖️ A GATE THAT PASSES BY NEVER FIRING IS THE WORST SHAPE, in the words of the partner who reported
+# it upstream. It is not a weak gate, it is a gate-shaped hole, and it reads green.
+#
+# ⚖️ WHY THE KNOB WAS RETIRED TOO rather than rewired with `re.M`. Once this list is gone nothing
+# reads `kit_config.VOICE_MARKER_PATTERNS`, and shipping a config setting that changes nothing is
+# the same silent-degrader class the kit already carries three of: it invites a user to tune their
+# voice detection and quietly does nothing with it. Deleting both leaves ONE mechanism, VOICE_MARKERS,
+# which is a plain substring list a person can reason about.
+#
+# ⛔ IF THE PATTERN PATH EVER COMES BACK: compile with `re.M`, and have its test assert the RULE
+# (an `[A-Z]` anchor must not be defeated by a blanket `re.I`) against whatever patterns the USER
+# configured, never against the kit's own greeting vocabulary. The old test asserted "Hi, Jane!",
+# which fails for every user whose outreach style differs from the default, which is the entire
+# purpose of the knob.
 
 def _build_rulings():
     """Companies with a VALID, MAC-authenticated BUILD ruling from the human.

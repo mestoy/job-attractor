@@ -157,14 +157,20 @@ PROOF_POINTS = [
     # r"\$40m", r"0-to-1", r"claims platform", r"the migration",  ← shapes, not real values
 ]
 #
-# These are compiled CASE-SENSITIVELY (check_preview.py applies no flags). Scope any
-# case-insensitive part inline with (?i:...) instead of asking for a blanket flag: a blanket
-# re.I on a pattern holding a [A-Z] anchor makes that anchor match lowercase too, so an anchor
-# written to pin a proper noun quietly matches any word and the check stops discriminating.
-VOICE_MARKER_PATTERNS = [
-    r"(?i:\b(hi|hey|tgif),)\s+[A-Z][a-z]+!",         # a greeting line: "Hi, Jane!", NAME stays [A-Z]
-    r"(?i:\b(praise|phrasing|beat|angle|hook)\b)",   # no [A-Z] anchor, so loose is fine here
-]
+# ⛔ VOICE_MARKER_PATTERNS WAS RETIRED HERE, 2026-08-09 (BUG-104). Do not re-add it.
+#
+# It fed `check_preview.VOICE_PATTERNS`, which was dead code: built at import and referenced by
+# nothing except a test. So this setting invited you to tune your voice detection and changed
+# nothing, which is worse than having no setting at all.
+#
+# 🔴 It also shipped a live trap. `check_preview` compiled these with `re.compile(p)` and no flags,
+# so a `$` anchored to end-of-STRING, not end-of-line. A partner who wrote line-anchored markers
+# ("Jane,", "Best,") found they matched only when the whole input WAS that line, so on every real
+# multi-line draft they were inert while the check reported clean.
+#
+# ⭐ THE LIVE MECHANISM IS `VOICE_MARKERS` ABOVE, a plain substring list. Add your own tics there.
+# It has no regex semantics to get wrong, which is the point: one mechanism a person can reason
+# about beats two where the second only looks like it works.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. SCREENING FILTERS — ship POPULATED. Edit to your deal-breakers; do NOT blank.
@@ -241,6 +247,28 @@ PE_CLEARED = [
 # Salary floor for the mechanical screen. A posting whose stated max is below this is dropped;
 # "not stated" is kept and flagged. Set to YOUR floor. 0 = no comp filtering (keeps everything).
 COMP_FLOOR = int(_env("JOBKIT_COMP_FLOOR", "150000"))
+
+# ⭐ SEAT_TITLE — the job titles YOU are hunting. A regex, matched case-insensitively.
+#
+# ⚠️ SHIPS EMPTY ON PURPOSE, and empty is a real setting rather than a missing one. Leave it empty
+# and `screen_sweep.py` keeps its older behavior: a NEGATIVE exclude list (`NON_PM`) that throws out
+# engineer, analyst, architect, consultant, specialist and similar as "not a product seat". Fill it
+# in and the screener flips to a POSITIVE include list built from your own words.
+#
+# 🔴 WHY THIS EXISTS (BUG-105). The screener assumed its user was hunting PRODUCT seats. On a real
+# install whose target seats were business analyst, functional consultant and solution architect,
+# 5 of 9 target titles were dropped before any other gate ran, and dropped SILENTLY, because the
+# filter kept no count. Two whole segments returned nothing while the sweep reported success. If the
+# kit's idea of a "real" job is not your idea of one, this is the setting that fixes it.
+#
+# ⚠️ THE DIRECTION OF FAILURE FLIPS when you set this, which is why the sweep now prints a
+# "dropped on TITLE" count. An exclude list KEEPS a phrasing nobody anticipated; an include list
+# DROPS it. If that count looks high, widen this pattern before concluding the market went quiet.
+#
+# Example for a healthcare product owner who also takes BA and Power Platform work:
+#   SEAT_TITLE = r"\b(product owner|business analyst|systems analyst|functional consultant|" \
+#                r"solution architect|program manager)\b"
+SEAT_TITLE = _env("JOBKIT_SEAT_TITLE", "")
 
 # ⭐ Your SEGMENTS — the hot-zone lanes you test (Andy LaCivita: send ~5 per segment, then compare
 # reply rates; five labels inside one lane produce no comparison). Each KEY is a segment slug that
