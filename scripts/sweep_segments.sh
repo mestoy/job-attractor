@@ -85,7 +85,7 @@ regulated_workflow=(
 )
 # ── added 2026-07-22 (you added ai-enablement + govtech as segments) ──
 # regulated_workflow is now RE-AIMED at insurance/legal/wealth — the health-benefits/care-delivery
-# corner screened 0/8 on culture (Progyny/Rightway/Pair Team). Govtech queries take the public-sector.
+# corner once screened 0 for 8 on culture. Govtech queries take the public-sector.
 ai_enablement=(
   "product manager AI enablement" "product manager AI adoption" "product operations manager"
   "director of product operations" "head of AI enablement" "product manager developer experience"
@@ -102,6 +102,49 @@ govtech=(
   "product manager government modernization" "product manager citizen services" "product manager elections"
   "product owner government" "product owner public sector" "director of product government"
 )
+
+# ── WE WORK REMOTELY ────────────────────────────────────────────────────────────────────────────
+# A second channel for the same sweep. The primary CLI indexes company ATSes, so it misses a board
+# that companies post to directly, and the remote-only boards are where a fully distributed company
+# advertises first. We Work Remotely publishes every category as public RSS, so this needs no login
+# and no HTML scraping. Absent CLI = skipped silently, so the sweep still runs without it.
+#
+# ⚠️ ONE FETCH PER SWEEP, not one per query. The whole product feed is a few dozen postings and
+# every query is answered from a cached copy ($WWR_CACHE). Asking the board a hundred times for the
+# same rows would be rude and slower, and the board's own terms ask for low volume.
+#
+# Rows come out of the CLI already carrying the sweep's field names (id, title, company, location,
+# workplaceType, date, salary, url, applyUrl), so segment and query are the only fields added here,
+# the same two `run` adds. Nothing is filtered for seniority or comp: screen_sweep.py owns those
+# gates for every source and filtering twice would hide rows from its report.
+WWR_CLI=".agents/skills/weworkremotely-search/cli/src/cli.ts"
+WWR_CACHE="$(mktemp -t wwr-feed)"
+WWR_SEEN="$(mktemp -t wwr-seen)"
+trap 'rm -f "$WWR_CACHE" "$WWR_SEEN"' EXIT
+
+run_wwr() {
+  local seg="$1"; shift
+  [ -f "$WWR_CLI" ] || return 0
+  for q in "$@"; do
+    bun run "$WWR_CLI" search -q "$q" --us-only --feed-cache "$WWR_CACHE" --format json 2>/dev/null \
+      | python3 -c "
+import json,sys
+seg,q,seen_path=sys.argv[1],sys.argv[2],sys.argv[3]
+try: d=json.load(sys.stdin)
+except Exception: raise SystemExit
+seen=set(open(seen_path,encoding='utf-8').read().split())
+out=[]
+for r in d.get('results',[]):
+    # One posting can answer several queries in the same sweep. Keep the first hit only, so a
+    # company does not take two slots in the ranker.
+    if r['id'] in seen: continue
+    seen.add(r['id']); out.append(r['id'])
+    r['segment']=seg; r['query']=q; print(json.dumps(r))
+open(seen_path,'a',encoding='utf-8').write(''.join(i+'\n' for i in out))
+" "$seg" "$q" "$WWR_SEEN" >> "$OUT"
+  done
+  echo "  · [wwr/$seg] done" >&2
+}
 
 run() {
   local seg="$1"; shift
@@ -122,17 +165,22 @@ for r in d.get('results',[]):
 
 : > "$OUT"
 case "$SEG" in
-  payments)           run payments "${payments[@]}" ;;
-  applied-ai)         run applied-ai "${applied_ai[@]}" ;;
-  ai-enablement)      run ai-enablement "${ai_enablement[@]}" ;;
-  regulated-workflow) run regulated-workflow "${regulated_workflow[@]}" ;;
-  govtech)            run govtech "${govtech[@]}" ;;
+  payments)           run payments "${payments[@]}"; run_wwr payments "${payments[@]}" ;;
+  applied-ai)         run applied-ai "${applied_ai[@]}"; run_wwr applied-ai "${applied_ai[@]}" ;;
+  ai-enablement)      run ai-enablement "${ai_enablement[@]}"; run_wwr ai-enablement "${ai_enablement[@]}" ;;
+  regulated-workflow) run regulated-workflow "${regulated_workflow[@]}"; run_wwr regulated-workflow "${regulated_workflow[@]}" ;;
+  govtech)            run govtech "${govtech[@]}"; run_wwr govtech "${govtech[@]}" ;;
   all)
     run payments "${payments[@]}"
     run applied-ai "${applied_ai[@]}"
     run ai-enablement "${ai_enablement[@]}"
     run regulated-workflow "${regulated_workflow[@]}"
     run govtech "${govtech[@]}"
+    run_wwr payments "${payments[@]}"
+    run_wwr applied-ai "${applied_ai[@]}"
+    run_wwr ai-enablement "${ai_enablement[@]}"
+    run_wwr regulated-workflow "${regulated_workflow[@]}"
+    run_wwr govtech "${govtech[@]}"
     ;;
   *) echo "unknown segment '$SEG' — one of: payments | applied-ai | ai-enablement | regulated-workflow | govtech | all" >&2; exit 2;;
 esac

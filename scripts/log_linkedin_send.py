@@ -49,7 +49,7 @@ import os
 import re
 import sys
 
-# ⚠️ HONOUR `CLAUDE_PROJECT_DIR` (fixed 2026-08-05). This used to derive REPO from `__file__`
+# ⚠️ HONOR `CLAUDE_PROJECT_DIR` (fixed 2026-08-05). This used to derive REPO from `__file__`
 # alone, so a test that redirected the JSONL half with `--path` still wrote the NARRATIVE half into
 # the real `outreach_log.md`. On a partner install that appended fake SENT rows to their live log,
 # and `check_followups.py` then reported follow-ups overdue on people they had never written to.
@@ -75,9 +75,40 @@ LEGACY_RUNG = {"followup": "follow-up"}
 # If you edit one copy, edit both; a test pins them together.
 NOT_DELIVERED = {"bounced", "drafted", "staged", "failed", "blocked"}
 
-# WARM-ONLY FOLLOW-UPS. Mirrors mail-draft.sh:394-399 exactly. A cold boss who
-# does not answer gets NO second touch; the next action is a NEW target (Bible p.9, p.10).
-ARMS_FOLLOWUP = {"warm", "referred", "event", "off-ladder"}
+# ⛔ THE "DRAFT EXISTS, NOBODY PRESSED SEND YET" STATUSES, and there are TWO spellings.
+# `mail-draft.sh` declares `STAGED_STATUS = "staged"` and writes that. Older rows, and the owner's
+# tree, carry `"drafted"`. A reader that recognizes only one of them is dead code that still looks
+# alive: `pair_brief.stale_drafted()` matched `"drafted"` against a writer emitting `"staged"`, so
+# the stale-draft alert could never fire, and its own docstring asserted the wrong spelling as fact.
+#
+# ⚖️ NARROWER THAN NOT_DELIVERED ON PURPOSE. `bounced`, `failed` and `blocked` are also undelivered,
+# but they are TERMINAL: nothing is waiting on a human. Only these two mean "a draft is sitting
+# there unsent", which is the thing worth nudging about.
+#
+# ⚠️ It cannot be imported by the shell writer, which holds its own copy inside a heredoc, so a test
+# reads the literal out of `mail-draft.sh` and asserts it is a member here. That is the only way to
+# keep a shell constant and a Python constant honest with each other.
+UNSENT_STATUSES = {"drafted", "staged"}
+
+# ⛔ NO RUNG ARMS A FOLLOW-UP. The method is: make the initial contact, then move on.
+# Bible p.9 "Generally, I'm not much for following up", p.11 "You will benefit much more from
+# reaching out to new people than chasing individuals who are either not getting back to you",
+# plus the guidance to spend 90% of your time on initial contact.
+#
+# 🔴 THIS WAS HALF-PORTED, AND THE HALF THAT LANDED WAS THE READER (BUG-094, fixed 2026-08-09).
+# `check_followups.ARMS_FOLLOWUP` was emptied and carries the full rationale, while BOTH writers
+# here and in `mail-draft.sh` kept arming four rungs. So the kit armed follow-ups that its own
+# checker was not looking for: a partner's warm send got a 7-day date written into the log and
+# nothing ever surfaced it. The constant disagreed with itself across a writer and a reader, which
+# is the same shape as BUG-093 one file over.
+#
+# ⚠️ THREE SITES MUST AGREE OR THE RULE IS DECORATIVE: this constant, the `case "$RUNG"` in
+# `mail-draft.sh`, and `check_followups.ARMS_FOLLOWUP`. The shell copy cannot import, so a test
+# pins them. Still allowed because none of them chases silence: a reply, a thank-you, the person
+# pivot, and a deliberate bump via an explicit --followup-due date.
+#
+# The empty set is kept rather than deleted so restoring a rung is a one-line change.
+ARMS_FOLLOWUP = set()
 
 # Rungs where the ask NAMES target companies, so an empty `targets` is almost certainly a mistake
 # that silently defeats the burn guard. Requires an explicit --no-targets to proceed.
@@ -133,6 +164,51 @@ def _slug(value):
         return _slug_from_to(value or "")
     except ImportError:
         return None
+
+
+CONTACT_STORE = os.path.join(REPO, "documents", "state", "contact.jsonl")
+_H2N = None
+
+
+def resolve_handle_name(to):
+    """Turn a LinkedIn recipient into the contact's real NAME, or "" when it cannot be resolved.
+
+    `--boss` already carries the name when the operator remembers to pass it, and it degrades
+    SILENTLY to the bare handle when they forget. What that costs: `to` reads
+    `linkedin.com/in/<handle>`, the outreach_log header carries the same handle, and the ranker's
+    contacted-people join keys on NAMES, so the person is not recognised as already contacted and
+    gets offered again at a higher score. Nearly every LinkedIn row in a mature log has this shape.
+
+    A RECORD SHOULD NOT DEPEND ON OPERATOR DISCIPLINE TO BE READABLE. The reader-side repair lives
+    in `rank_criteria` so existing rows resolve at read time; this is the writer-side half, so new
+    rows carry the name and no future reader needs the join at all.
+
+    Reads the same `documents/state/contact.jsonl` that `parse_network.py` writes, where `linkedin`
+    and `name` sit side by side. Later rows win, matching the append-only last-write-wins rule.
+    Returns "" on any failure, so a missing store never blocks a send.
+    """
+    global _H2N
+    m = re.search(r"linkedin\.com/in/([^/?\s]+)", str(to or ""))
+    if not m:
+        return ""
+    if _H2N is None:
+        _H2N = {}
+        try:
+            with open(CONTACT_STORE, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        p = (json.loads(line) or {}).get("payload") or {}
+                    except ValueError:
+                        continue
+                    u = re.search(r"linkedin\.com/in/([^/?\s]+)", str(p.get("linkedin") or ""))
+                    if u and p.get("name"):
+                        _H2N[u.group(1).lower().rstrip("/")] = p["name"]
+        except Exception:
+            pass                                    # degrade to "", never block the send
+    return _H2N.get(m.group(1).lower().rstrip("/"), "")
 
 
 def same_recipient(a, b):
@@ -197,6 +273,77 @@ def mark_replied(to, path=SENDLOG, when=None):
 
 
 
+CORRESPONDENCE_LOG = os.path.join(REPO, "documents", "correspondence-log.md")
+
+
+def advance_correspondence_line(text, company, to, subject):
+    """Flip a terse `OUTBOUND (STAGED, not yet sent)` line to SENT. Returns (new_text, n_changed).
+
+    THE THIRD WRITER. The mail drafter appends
+    `- <date> · OUTBOUND (STAGED, not yet sent) · <co> → <to> · subj: <subj>`
+    the moment a draft is built, and nothing advanced it when the send happened, because this
+    logger did not touch the file at all. The result is a store that asserts the opposite of the
+    truth about real sends, and it stays wrong indefinitely because nothing re-reads it.
+
+    ⚠️ A presence check cannot catch this. Asking whether a sent company has AN outbound record is
+    satisfied by a line saying the message was never sent. The check has to assert the STATE.
+
+    Matched on company + recipient + subject, the same join key the other two writers use. Every
+    matching line is advanced, not only the first, because a rebuilt draft can leave more than one.
+    """
+    marker = "OUTBOUND (STAGED, not yet sent)"
+    out, changed = [], 0
+    for line in text.splitlines(keepends=True):
+        if (marker in line and f"{company} → {to}" in line
+                and (not subject or f"subj: {subject}" in line)):
+            out.append(line.replace(marker, "OUTBOUND (SENT)"))
+            changed += 1
+        else:
+            out.append(line)
+    return "".join(out), changed
+
+
+def staged_marker(company, subject):
+    """The exact key `mail-draft.sh` writes as `<!-- STAGED · <company> · <subject> -->`.
+
+    Kept as a named function so the two writers share ONE definition of the join key. If the marker
+    ever changes shape in the shell script, this is the single place that has to follow, and a test
+    can pin the two against each other.
+    """
+    return f"STAGED · {company} · {subject}"
+
+
+def replace_staged_block(text, marker, entry):
+    """Swap the STAGED block carrying `marker` for `entry`. Returns (new_text, replaced).
+
+    TWO WRITERS, ONE SEND. `mail-draft.sh` writes a `## … — STAGED (draft)` header the moment a
+    draft exists, deliberately, so a second session can see work in flight. This function is what
+    stops that header from being JOINED by a `## … — ✅ SENT` sibling when the send is confirmed:
+    the staged block is overwritten in place, so one send leaves one header and the two daily
+    counters agree.
+
+    The marker comment is the anchor rather than the header text, because the two writers spell the
+    recipient differently: one has only the address at draft time, the other has the resolved name.
+
+    A block runs from its own `## ` header line to the next `## ` line or the end of the file.
+
+    ⚠️ NO MATCH MEANS NO CHANGE AND A PLAIN APPEND. A send with no staged draft, which is every
+    send that never went through the mail drafter, still gets logged. Losing a send is far worse
+    than logging one twice, so the fall-through is the safe direction and it is deliberate.
+    """
+    anchor = f"<!-- {marker} -->"
+    at = text.find(anchor)
+    if at < 0:
+        return text, False
+    # Walk back to the start of the `## ` header line that owns this marker.
+    start = text.rfind("\n## ", 0, at)
+    start = 0 if start < 0 else start + 1
+    # The block ends at the next header, or EOF.
+    end = text.find("\n## ", at)
+    end = len(text) if end < 0 else end + 1
+    return text[:start] + entry + text[end:], True
+
+
 def _append_narrative(row, a, rung):
     """Append a `## <date>` entry to outreach_log.md so BOTH daily counters move on one send.
 
@@ -213,12 +360,23 @@ def _append_narrative(row, a, rung):
     if body and os.path.exists(body):
         body = open(body, encoding="utf-8").read().strip()
 
-    who = getattr(a, "boss", None) or a.to
+    # Prefer the NAME, so the header itself is joinable. `--boss` first because a human said it,
+    # then the resolved store name, and the bare handle only when neither exists.
+    who = getattr(a, "boss", None) or row.get("to_name") or a.to
     company = a.company or "no company named"
     chan = row.get("channel", "LinkedIn")
     bits = [f"## {row['date']} · {company} · {who} — ✅ SENT [{chan} · rung {rung}]"]
     bits.append(f"**Status:** ✅ SENT {row['date']} on {chan}. You typed and sent it.")
-    bits.append(f"**Rung:** {rung} (kind:{a.kind}) | channel:{chan} | status:{a.status}")
+    if a.subject:
+        # When this entry OVERWRITES a staged block, that block's `**Subject:**` line goes with it.
+        # Carry the subject here or the collapse trades a double count for an information loss.
+        bits.append(f"**Subject:** {a.subject}")
+    # ⚠️ FOLLOWUP-DUE MUST SURVIVE THE COLLAPSE. The staged block written by the mail drafter
+    # carries `FOLLOWUP-DUE: <date>`, and check_followups.py finds an armed send by reading that
+    # token out of the block. Overwriting the staged block without re-stating it would silently
+    # UN-ARM a send that was armed correctly, and the follow-up would read as one nobody set.
+    bits.append(f"**Rung:** {rung} (kind:{a.kind}) | channel:{chan} | status:{a.status}"
+                f" | FOLLOWUP-DUE: {row.get('followup_due') or 'none'}")
     if a.targets:
         bits.append(f"**Targets named (now burned):** {a.targets}")
     if getattr(a, "referred_by", None):
@@ -233,9 +391,24 @@ def _append_narrative(row, a, rung):
     else:
         bits.append("**Verbatim as sent:** ⚠️ not captured at log time (no --body). "
                     "Paste it in; the send-log row is already correct.")
+    entry = "\n".join(bits) + "\n\n"
+
+    # ONE HEADER PER SEND. When the mail drafter staged this exact company and subject, its STAGED
+    # block IS this send's header and gets overwritten; otherwise append as before. The marker is
+    # built from the raw `a.company`, because that is the value the drafter keyed on.
+    marker = staged_marker(a.company, a.subject) if (a.company and a.subject) else ""
+    if marker and os.path.exists(OUTREACH_LOG):
+        with open(OUTREACH_LOG, encoding="utf-8") as fh:
+            text = fh.read()
+        new_text, replaced = replace_staged_block(text, marker, entry)
+        if replaced:
+            with open(OUTREACH_LOG, "w", encoding="utf-8") as fh:
+                fh.write(new_text)
+            return "updated"
+
     with open(OUTREACH_LOG, "a", encoding="utf-8") as fh:
-        fh.write("\n" + "\n".join(bits) + "\n\n")
-    return True
+        fh.write("\n" + entry)
+    return "appended"
 
 
 def main(argv=None):
@@ -243,6 +416,12 @@ def main(argv=None):
     ap.add_argument("--rung", help="one of: " + ", ".join(sorted(RUNGS)))
     ap.add_argument("--to", required=True, help="linkedin.com/in/<handle> or linkedin:<handle>")
     ap.add_argument("--company", default="")
+    # The real subject line, for a send that began as an email draft. Without it this logger can
+    # only ever file a row as "(LinkedIn)", and the narrative collapse below has no key to join on:
+    # mail-draft.sh writes its staged block under `<!-- STAGED · Company · Subject -->`, so the
+    # subject is half of that key. A logger with no --subject cannot close a staged draft, and the
+    # collapse would be present in the file and unreachable in practice.
+    ap.add_argument("--subject", default="", help="the real subject line; email sends only")
     ap.add_argument("--targets", default="", help="comma-separated companies NAMED in the ask; these BURN")
     ap.add_argument("--no-targets", action="store_true", help="acknowledge a warm send that names no companies")
     ap.add_argument("--segment", default="")
@@ -326,9 +505,15 @@ def main(argv=None):
         "date": today,
         "rung": rung,
         "to": a.to,
+        # The recipient's real NAME, so every downstream reader that keys on names can join
+        # without resolving a handle. Empty for a cold target who was never a connection, which
+        # is expected rather than a failure.
+        "to_name": getattr(a, "boss", None) or resolve_handle_name(a.to),
         "company": a.company,
         "targets": a.targets,
-        "subject": "(LinkedIn, in-thread)" if a.kind == "reply" else "(LinkedIn)",
+        # A real subject wins when one was given; the LinkedIn placeholders stay the default, so
+        # every existing caller keeps the exact value it filed before.
+        "subject": a.subject or ("(LinkedIn, in-thread)" if a.kind == "reply" else "(LinkedIn)"),
         "segment": a.segment,
         "kind": a.kind,
         "followup_due": _followup_for(rung, a.followup_due, a.no_followup),
@@ -354,10 +539,25 @@ def main(argv=None):
         print("   📝 outreach_log.md SKIPPED (--no-narrative) — the two daily counters will disagree")
     else:
         try:
-            _append_narrative(row, a, rung)
-            print("   📝 outreach_log.md entry appended (both daily counters now agree)")
+            mode = _append_narrative(row, a, rung)
+            if mode == "updated":
+                print("   📝 outreach_log.md STAGED header updated in place (one header per send)")
+            else:
+                print("   📝 outreach_log.md entry appended (both daily counters now agree)")
         except Exception as exc:
             print(f"   ⚠️  outreach_log.md NOT written ({exc}) — counters will disagree, fix by hand")
+        # Advance the THIRD store too, so it stops saying "not yet sent" about a real send.
+        try:
+            if a.company and os.path.exists(CORRESPONDENCE_LOG):
+                with open(CORRESPONDENCE_LOG, encoding="utf-8") as fh:
+                    _ctext = fh.read()
+                _new, _n = advance_correspondence_line(_ctext, a.company, a.to, a.subject)
+                if _n:
+                    with open(CORRESPONDENCE_LOG, "w", encoding="utf-8") as fh:
+                        fh.write(_new)
+                    print(f"   📝 correspondence-log.md: {_n} STAGED line(s) advanced to SENT")
+        except Exception as exc:
+            print(f"   ⚠️  correspondence-log.md NOT advanced ({exc}) — it will read 'not yet sent'")
     if row["followup_due"]:
         print(f"   📒 follow-up armed {row['followup_due']}")
     else:

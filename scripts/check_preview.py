@@ -895,6 +895,70 @@ def _is_rung12_zero_ask_note(tool_input):
     return True
 
 
+def _is_cocreation_for_live_application(tool_input):
+    """Is this AskUserQuestion co-creating APPLICATION or INTERVIEW content for a live application?
+
+    THE HOLE THIS CLOSES: every other exemption on this gate assumes OUTREACH. `FOLLOWUP:` wants a
+    SENT record, `WARM-RUNG:` / `RUNG12:` / `REFERRED:` want a relationship, `INBOUND:` wants a
+    message you received. **Screening answers, application free-response and interview stories have
+    none of those**, because there is no boss being approached and no campaign to score. Without
+    this branch the gate demands a Boss Match Scorecard for an application screening question and
+    blocks the picker, forcing a markdown-table fallback for exactly the work you asked to
+    co-construct through the picker.
+
+    NON-FORGEABLE anchor, the same discipline as the other exemptions. BOTH must hold:
+      (a) an explicit `APPLYING: <Company>` marker in the question framing, AND
+      (b) an application FOLDER for that company under documents/applications/ that contains at
+          least one real artifact (a job_posting.md, a JD, or a CV draft).
+
+    (b) is the load-bearing half, and it is deliberately expensive to fake. An application folder
+    with the posting in it means the role was read and the work is real. A cold boss-hunt draft
+    disguised as an application has no folder and stays blocked.
+
+    ⛔ THIS AUTHORIZES CO-CREATING THE CONTENT, NOT DECIDING TO APPLY. The decision to pursue an
+    employer still needs its own screen and its own ruling; this only says that once that decision
+    is made and the folder exists, drafting the words belongs in the picker.
+    """
+    blob = " ".join(str(t) for _, t in _strings_from_questions(tool_input or {}))
+    m = re.search(r"(?i:applying:)\s*([A-Za-z][\w'&\-]*(?:\s+[A-Za-z][\w'&\-]*){0,4})", blob)
+    if not m:
+        return False
+    name = m.group(1).strip()
+    # Progressive prefixes, longest first, the same shape as the other multi-word anchors. A folder
+    # is named for the ROLE as well as the company (`someco_product_manager`), so the full company
+    # key will not be a substring of it; the leading token is what actually matches. Floor of 5
+    # characters so a short token cannot become a skeleton key across every folder.
+    words = name.split()
+    candidates = [re.sub(r"[^a-z0-9]", "", " ".join(words[:k]).lower())
+                  for k in range(len(words), 0, -1)]
+    candidates = [c for c in candidates if len(c) >= 5]
+    if not candidates:
+        return False
+    try:
+        repo = os.environ.get("CLAUDE_PROJECT_DIR") or \
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        root = os.path.join(repo, "documents", "applications")
+        if not os.path.isdir(root):
+            return False
+        for d in os.listdir(root):
+            full = os.path.join(root, d)
+            if not os.path.isdir(full):
+                continue
+            dkey = re.sub(r"[^a-z0-9]", "", d.lower())
+            # PREFIX, not substring: the folder must START with the company, so
+            # `someco_product_manager` matches "SomeCo Communications" via its leading token, while
+            # a company whose name merely appears mid-folder does not open the gate.
+            if not any(dkey.startswith(c) for c in candidates):
+                continue
+            for f in os.listdir(full):
+                lf = f.lower()
+                if lf.endswith((".docx", ".pdf", ".tex")) or lf in ("job_posting.md", "jd.md"):
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -930,7 +994,8 @@ def main():
                 and not _is_warm_rung_to_known_contact(tool_input)
                 and not _is_referred_via_known_introducer(tool_input)
                 and not _is_rung12_zero_ask_note(tool_input)
-                and not _is_reply_to_captured_inbound(tool_input)):
+                and not _is_reply_to_captured_inbound(tool_input)
+                and not _is_cocreation_for_live_application(tool_input)):
             if _CLOSENESS_REFUSALS:
                 # The closeness consult refused a claimed exemption. Say WHY and name the fix for
                 # THIS contact — a fail-closed gate is only livable when the refusal carries the

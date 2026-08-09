@@ -109,6 +109,51 @@ def record(args):
         if not (args.evidence or "").strip():
             errs.append("a DROP requires --evidence (the quote or fact, with a URL where there is one)")
 
+    # A CLAIMED CULTURE PEEK MUST CITE BOTH PLATFORMS. The rule is to check Indeed at the same
+    # time as Glassdoor, in parallel; see HARD-INVARIANTS §60-SECOND CULTURE PEEK.
+    #
+    # WHY THIS IS ENFORCED AT WRITE TIME rather than left as prose. A company was once recorded
+    # with "CULTURE PEEK PASSED" citing Glassdoor alone, and the row asserted "newest review over 2
+    # months old, review velocity low" — true of Glassdoor only. Indeed's newest was FOUR DAYS old,
+    # from a remote engineer rather than a frontline worker, and it also carried the sole signal
+    # for the frontline pay picture. The rule had been written down and nothing checked it, which is
+    # the inversion the RULE-EDIT GUARD names. A one-eyed peek wearing a two-eyed badge is worse
+    # than no peek, because it gets recorded as a verdict and read later as settled.
+    #
+    # ⛔ SCOPE IS DELIBERATELY NARROW: this fires only on a row CLAIMING the peek passed. Recording
+    # a single-source observation is still fine — say what you saw. What cannot be recorded is the
+    # CONCLUSION drawn from half the evidence.
+    # ⚠️ IT LOOKS FOR A READING, NOT FOR THE PLATFORM'S NAME, and the difference is the whole check.
+    # The first version tested `re.search("indeed", note)`. The row that provoked this rule PASSED
+    # that test, because its note said "Indeed cross-source still owed" — a sentence declaring the
+    # Indeed read MISSING satisfied a check for the Indeed read being PRESENT. "Indeed" is also an
+    # ordinary English adverb. Testing for the name is a proxy; testing for a rating beside the name
+    # measures the thing ([[a-check-must-measure-the-thing-not-a-proxy]]).
+    blob = " ".join(str(v or "") for v in (args.note, args.evidence))
+    if re.search(r"(culture\s+)?peek\s+(passed|clean|clear)", blob, re.I):
+        # ⚠️ THE RATING SHAPE IS EXPLICIT, because a loose one is how this check lied TWICE.
+        # v2 ended its alternation with `|\b`, which matches ANY digit within 60 chars — so
+        # "Indeed cross-source ... over 2 months old" satisfied it on the strength of the "2".
+        # A rating is a decimal ("3.6"), or an integer qualified as a scale ("4/5", "4 out of 5").
+        # A bare integer is NOT a rating: review counts, dates and month spans are all bare
+        # integers, and every one of them sits near these words.
+        _RATING = r"(?:\d\.\d+|\d\s*(?:/\s*5|out of\s+5))"
+
+        def _has_reading(platform):
+            return re.search(platform + r".{0,60}?" + _RATING, blob, re.I | re.S) is not None
+        seen = [name for name, key in (("Glassdoor", "glassdoor"), ("Indeed", "indeed"))
+                if _has_reading(key)]
+        if len(seen) < 2:
+            missing = ", ".join(n for n in ("Glassdoor", "Indeed") if n not in seen)
+            errs.append(
+                f"this row claims a culture peek passed but carries a READING from "
+                f"{', '.join(seen) if seen else 'neither platform'}. The peek is BOTH platforms in "
+                f"parallel, so {missing} is missing. Naming the platform is not citing it: a note "
+                f"saying 'Indeed still owed' is a record of its ABSENCE. Fetch it (Indeed is the "
+                f"assistant's half; Glassdoor needs your logged-in session), or drop the "
+                f"'peek passed' "
+                f"wording and record what you actually saw.")
+
     if errs:
         print("🔴 not recorded:")
         for e in errs:

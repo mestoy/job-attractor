@@ -28,7 +28,11 @@ tells you exactly what is missing and the command to fix it.
 ## Getting started (about 20 minutes)
 
 ```
-git clone https://github.com/mestoy/job-attractor job-search && cd job-search
+# If you were given access to the PRIVATE kit repo, clone that one:
+git clone https://github.com/mestoy/job-attractor-kit job-search && cd job-search
+
+# No access? The PUBLIC snapshot is read-only and cannot receive updates:
+#   git clone https://github.com/mestoy/job-attractor job-search && cd job-search
 bash install.sh .
 ```
 

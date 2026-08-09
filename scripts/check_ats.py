@@ -193,7 +193,7 @@ def ashby_location(j):
     """Render an Ashby posting's location, trusting `workplaceType` over `isRemote`.
 
     ⚠️ ASHBY SETS `isRemote: true` ON HYBRID ROLES. Verified live 2026-07-25 against
-    `rainforest-pay`, where the Technical Product Owner returns `isRemote: true` alongside
+    `someco-pay`, where the Technical Product Owner returns `isRemote: true` alongside
     `workplaceType: "Hybrid"` and `location: "Atlanta HQ"`. The old code appended " | remote"
     on `isRemote` alone, so an on-site Atlanta req printed as remote, and remote-absolute is
     The single hardest filter for a remote-only search. `workplaceType` is the authoritative field; `isRemote`

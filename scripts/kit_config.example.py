@@ -125,6 +125,17 @@ ROLE_IMPLY = [p for p, _ in ROLE_IMPLY_PATTERNS]
 # Set to "" to disable the check.
 AI_TOOL_NAME = _env("JOBKIT_AI_TOOL_NAME", "Claude Code")
 
+# ── Expired credentials ──────────────────────────────────────────────────────
+# Certifications that have LAPSED. A résumé line that names one without saying so reads as
+# current, which is a claim you cannot support in an interview. Each entry is
+# (regex matching the cert name, the month/year it expired). The check is LINE-SCOPED: a line
+# that names the cert and carries no expiry marker fails.
+# Example shape:
+#   EXPIRED_CREDENTIALS = [(r"\bCSPO\b|Certified Scrum Product Owner", "May 2024")]
+EXPIRED_CREDENTIALS = []
+# Words that count as saying so, on the same line as the cert name.
+CREDENTIAL_EXPIRY_OK = r"expir|lapsed|inactive|no longer"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. VOICE MARKERS — how check_preview.py recognizes that a question is showing you
 #    DRAFTED OUTREACH TEXT (a praise beat, a hook, a phrasing option) rather than an

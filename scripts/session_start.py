@@ -116,9 +116,12 @@ def unfinished():
         items.append(("🔴", f"{len(draft_flags)} message(s) marked DRAFT, confirm whether sent",
                       [d.strip()[:70] for d in draft_flags[:3]]))
 
-    # Stale `drafted` send-log rows (2026-07-27). mail-draft.sh writes status "drafted" on every
-    # row because it creates a visible mail draft and cannot know whether Send was pressed. The
-    # flip to "sent" is manual, so a missed flip leaves a real send invisible to rung_ladder.
+    # Stale unsent send-log rows (2026-07-27). mail-draft.sh writes an UNSENT status on every row
+    # because it creates a visible mail draft and cannot know whether Send was pressed. The flip to
+    # "sent" is manual, so a missed flip leaves a real send invisible to rung_ladder.
+    # ⛔ The spelling is `staged` in this tree and `drafted` in older rows; both are recognised via
+    # log_linkedin_send.UNSENT_STATUSES. Asserting a single spelling here is what made the reader
+    # dead: it matched a value nothing in this tree writes and the alert could never fire.
     # Reader lives in pair_brief, which the pair's decision table also reads: one store, one parser.
     try:
         import pair_brief

@@ -96,12 +96,21 @@ def _squash(s):
 # ⚠️ SCOPED TO MULTI-WORD NAMES ON PURPOSE. Squashing discards word boundaries, so applying it to a
 # single-word pattern would make `\bcircle\b` match "CircleCI". Spacing variance is only a failure
 # mode for names that HAVE a space, so only those are squashed.
-_MULTIWORD_VETO = sorted({
-    _squash(re.sub(r"\\b|\(\?[!=][^)]*\)|[\\^$*+?.()\[\]{}|]", " ", p))
-    for p in VETO_EMPLOYERS
-    if " " in re.sub(r"\\b|\(\?[!=][^)]*\)|[\\^$*+?.()\[\]{}|]", " ", p).strip()
-})
-_MULTIWORD_VETO = [v for v in _MULTIWORD_VETO if len(v) >= 8]
+def derive_multiword(patterns):
+    """The squashed multi-word veto keys derived from a list of employer-name patterns.
+
+    ⚖️ FACTORED OUT OF THE MODULE BODY 2026-08-08 so a TEST CAN EXERCISE IT. It used to be an
+    inline comprehension computed once at import, which meant a test could only cover it by
+    patching `_MULTIWORD_VETO` to a literal — and a test that patches the value it claims to check
+    is measuring the fixture, not the derivation. With a function, a test can hand in its OWN
+    employer patterns and assert on what the REAL squash-and-filter produces.
+    """
+    _strip = lambda p: re.sub(r"\\b|\(\?[!=][^)]*\)|[\\^$*+?.()\[\]{}|]", " ", p)
+    keys = sorted({_squash(_strip(p)) for p in patterns if " " in _strip(p).strip()})
+    return [v for v in keys if len(v) >= 8]
+
+
+_MULTIWORD_VETO = derive_multiword(VETO_EMPLOYERS)
 
 
 def veto_hits(name, text=""):

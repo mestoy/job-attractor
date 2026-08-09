@@ -1,9 +1,19 @@
 # Your employer criteria matrix
 
-> ⚠️ **This file is a TEMPLATE and it degrades SILENTLY.** `scripts/rank_criteria.py` reads it at
-> `documents/employer-criteria-matrix.md` and gets an empty string when it is unfilled, so ranking
-> proceeds with **no personal weighting** and cites a file that says nothing. `doctor.py` does not
-> check it. Nothing will tell you. Fill in the top few rows and the ranking starts being about you.
+> ⚠️ **This file is a TEMPLATE and it degrades SILENTLY.** Fill in the top few rows.
+>
+> ↻ **CORRECTED 2026-08-07 (BUG-047).** This note used to say `rank_criteria.py` reads this file and
+> that leaving it empty means ranking runs with no personal weighting. **Neither is true.**
+> `rank_criteria.py` only PRINTS this path in a header; nothing in it opens the file. Ranking weight
+> lives in `scripts/kit_config.py` under `CRITERIA_WEIGHTS`, and that is where to change it.
+>
+> **What this file DOES serve**, and why an empty one still costs you: it is your durable reasoning
+> about employers, and it is read by `check_rulings.py` (which reconciles it against your veto list)
+> and `backfill_as_of.py` (which extracts your rulings). `doctor.py` reports it under `[6] your
+> inputs` when it is still the shipped template.
+>
+> ⚖️ The old wording was worse than a plain error: you would fill this in, see the check turn green,
+> and get a ranking that came out byte for byte unchanged.
 
 ## The two kinds of criteria, and mixing them is the common mistake
 

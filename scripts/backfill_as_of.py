@@ -90,7 +90,7 @@ _LEGAL_SUFFIX = re.compile(
 # blocked list is the one store where a false negative means you gets shown a company he has
 # already ruled out.
 # ⚠️ EVERY ALTERNATIVE NEEDS ITS WORD BOUNDARY. Without the trailing `\b` this dropped
-# **Sourcegraph**, because the bare alternative `source` matched its first six letters. A prefix
+# **Sourceco**, because the bare alternative `source` matched its first six letters. A prefix
 # match in an exclusion list is a silent false negative, and in THIS store that means a company
 # you already ruled out becomes eligible to be surfaced to him again.
 _NOT_A_COMPANY = re.compile(
@@ -159,8 +159,8 @@ def _clean_name(s):
     """Strip markdown/emoji down to a bare name.
 
     ⚠️ The bold span is only honored when it starts at the HEAD of the string. It used to be a
-    plain `search()` anywhere, which silently deleted rows: the Headway bullet is
-    `- Headway (BORDERLINE …) … **UPDATE 2026-07-18 — you PASSED**`, so the first bold span
+    plain `search()` anywhere, which silently deleted rows: the SomeCo bullet is
+    `- SomeCo (BORDERLINE …) … **UPDATE 2026-07-18 — you PASSED**`, so the first bold span
     sat 200 characters in, `_clean_name` returned "UPDATE 2026-07-18 …", and the not-a-company
     filter dropped the whole row. That is a FALSE NEGATIVE in the blocked list, the one store
     where a miss means you gets re-shown a company he already ruled out — the exact harm this
@@ -203,7 +203,7 @@ def disposition(text, store):
         # the opposite of what the file they sit in means.
         #
         # ⚠️ Kept DELIBERATELY NARROW to explicit reversals. An earlier cut also matched
-        # "borderline" and "not a flat block", which misread the Headway row: it hedges
+        # "borderline" and "not a flat block", which misread the SomeCo row: it hedges
         # ("BORDERLINE / his-call … NOT a flat block") and then records
         # "UPDATE 2026-07-18 — you PASSED". A hedge is not an un-blocking, and treating it as
         # one invented a contradiction against the discovery board that did not exist.
@@ -212,12 +212,12 @@ def disposition(text, store):
         return "blocked"
 
     # ⚠️ An explicit BLOCKED verdict beats the strike-through marker, and this order matters.
-    # Testing strike-through first labelled `~~**Arize AI**~~ … 🔴 **BLOCKED 2026-07-21**` as
-    # "retired" while the blocked list called the same company "blocked", and `conflicts()` duly
-    # reported a disagreement between two rows that say the same thing. Four of the first
-    # eighteen conflicts (Arize AI, Ellevation, SmarterDx, ThreeFlow) were this normalizer
-    # arguing with itself — a false positive manufactured by the detector, which is the fastest
-    # way to make a conflict report unreadable.
+    # Testing strike-through first labels a row like `~~**SomeCo**~~ … 🔴 **BLOCKED 2026-01-01**`
+    # as "retired" while the blocked list calls the same company "blocked", and `conflicts()` duly
+    # reports a disagreement between two rows that say the same thing. When this was measured, a
+    # QUARTER of the first batch of conflicts were this normalizer arguing with itself — a false
+    # positive manufactured by the detector, which is the fastest way to make a conflict report
+    # unreadable.
     if re.search(r"\bblocked\b|\bdrop\b|\bdropped\b|\bdrop\+block\b|\bremote fail\b|"
                  r"\bpass(ed)?\b.*\bnot\b|\bveto\b", low):
         return "blocked"
@@ -233,18 +233,17 @@ def disposition(text, store):
 
 
 # A stated date this much older than the commit that wrote the line is a CITATION, not the row's
-# own date. The number is not a guess: measured across all 859 dated rows, the gap between the
-# stated date and the blame date is bimodal with an EMPTY BAND between 8 and 71 days.
+# own date. The number is not a guess: measured across every dated row in a real store, the gap
+# between the stated date and the blame date is bimodal with an EMPTY BAND between 8 and 71 days.
 #
-#     854 rows   gap 0 to 7 days      a ruling written down within a week of being made
-#       0 rows   gap 8 to 71 days     nothing lands here at all
-#       5 rows   gap 72 to 1118 days  every one hand-checked, every one a citation
+#     nearly all   gap 0 to 7 days      a ruling written down within a week of being made
+#     none at all  gap 8 to 71 days     nothing lands here
+#     a handful    gap 72 days and up   every one hand-checked, every one a citation
 #
-# The five: Andrew LaCivita, milewalk and milewalk Academy all say "a 1st-degree connection since
-# 2023-06-30" (a connection date), Confluent says "acquired by IBM, completed 2026-03-17" (a deal
-# close), and Coursera the same shape. None is when the row was ruled, and left alone they became
-# the five oldest entries in `stale()` at up to 1121 days — sitting at the top of the age report,
-# which is the most visible output this phase produces.
+# The handful were all the same shape: a row saying "a 1st-degree connection since <year>" (a
+# connection date), or "acquired by <buyer>, completed <date>" (a deal close). None is when the row
+# was ruled, and left alone they became the oldest entries in `stale()` at up to three years —
+# sitting at the top of the age report, which is the most visible output this phase produces.
 #
 # Any cut inside the empty band gives identical results, so 30 is chosen for being round rather
 # than for being tuned. If a future row lands in the band, that is a signal to re-measure, not to
@@ -270,9 +269,9 @@ def _split_names(head):
     bullet. The first cut tested the whole bullet for separators and so refused to split any row
     that had a parenthetical, which is nearly all of them — it silently collapsed 24 blocked
     companies into 4 keys:
-        `- Reducto / Encord / HumanSignal / … / Workato (blocked 2026-07-21 …)`   15 companies
-        `- Human Agency · Delivery Associates · … · ERP Suites (…)`                7 companies
-        `- Banyan Software · Embrace Finance Group (…)`                            2 companies
+        `- SomeCo / Otherco / Thirdco / … / Fifteenco (blocked 2026-07-21 …)`    15 companies
+        `- Fourthco · Fifthco · … · Seventhco (…)`                                 7 companies
+        `- Eighthco Software · Ninthco Finance Group (…)`                          2 companies
 
     `FIS / Fidelity National Information Services` is an ALIAS pair rather than a list, and it
     splits too. That is deliberate: two keys both resolve to blocked, and for a blocked list an
@@ -302,12 +301,12 @@ def _explicit_date(text):
     the call that was subsequently OVERTURNED — the older set winning again, in the very backfill
     written to stop that.
 
-    Blame settles it independently. On the 6 rows where first and max disagree, max matches the
-    git blame date and first does not, both times:
-        Fiserv  — "blocked 2026-07-21 … " then updated 2026-07-24, blame says 07-24
-        Headway — "softened 2026-07-15 on revisit" then a 07-18 revision, blame says 07-18
-    Across all 260, max agrees with blame 254 times against first's 252. A row is current as of the
-    latest thing it records.
+    Blame settles it independently. On every row where first and max disagree, max matches the git
+    blame date and first does not. The two shapes, with the companies genericized:
+        SomeCo   — "blocked <date> … " then updated three days later; blame says the later date
+        Otherco  — "softened <date> on revisit" then a revision; blame says the revision
+    Measured across the whole store, max agrees with blame more often than first does. A row is
+    current as of the latest thing it records.
     """
     found = _ISO.findall(text)
     good = []
@@ -689,7 +688,7 @@ def backfill(spec, write=False, limit=None, seen=None):
 #
 # TWO CLASSES OF VARIANT, AND THEY GET OPPOSITE TREATMENT
 # -------------------------------------------------------
-# SAME KEY ("Nymbus" / "Nymbus, Inc." → `nymbus`), auto-merge. The normalizer already ruled these
+# SAME KEY ("SomeCo" / "SomeCo, Inc." → `someco`), auto-merge. The normalizer already ruled these
 # identical; recording both spellings only writes down a decision that was already made.
 #
 # DIFFERENT KEY ("Astra" / "Astra Finance" → `astra` / `astrafinance`), a REAL claim about the
@@ -725,7 +724,7 @@ _PAREN_DOMAIN = re.compile(r"\(([a-z0-9-]+(?:\.[a-z0-9-]+)+)\)", re.I)
 # ⚠️ ANCHORED AT THE HEAD OF THE HEADING, and measured. A loose `.*\bPasses\b` also matched
 # "## Unresolved, deliberately NOT passes" and "### Product-owner sweep passes", and the paragraphs
 # under those two headings entered the store as companies named "Contradictory; comp unstated;
-# consulting travel unassessed" and "Bausch & Lomb ownership caveat left OPEN". A heading that says
+# consulting travel unassessed" and "SomeCo ownership caveat left OPEN". A heading that says
 # NOT passes is the strongest possible signal that its contents are not passes.
 _BANKED_SECTION = re.compile(r"^##\s+(?:Passes\b|Still worth working\b)", re.I)
 
@@ -804,7 +803,7 @@ def extract_banked(path):
         if not inside or not s or s[0] in "->|(*":
             continue
         for part in s.split("·"):
-            # "Sequencing.com (2 reqs)" and "Stratus (GTP Software)", the parenthetical is a note
+            # "SomeCo.com (2 reqs)" and "Otherco (Thirdco Software)", the parenthetical is a note
             # or a former name, not part of the literal the rest of the pipeline writes.
             name = _clean_name(re.sub(r"\s*\([^)]*\)\s*$", "", part.strip()))
             # A sentence is not a company. Semicolons, a closing period and a lowercase first letter
@@ -963,8 +962,8 @@ def _pair_candidates(groups, min_len=5):
 def _word_inside(short, long):
     """Is `short` a whole-word run inside `long`? "pay with spire" ⊂ "spire - pay with spire, inc."
 
-    ⚠️ WORD BOUNDARIES ARE THE ENTIRE GUARD. A plain substring test says "hopper" is inside
-    "grasshopper bank", "vanta" inside "navanta", "resolve" inside "resolver" and "engine" inside
+    ⚠️ WORD BOUNDARIES ARE THE ENTIRE GUARD. A plain substring test says "someco" is inside
+    "awesomeco bank", "otherco" inside "notherco", "resolve" inside "resolver" and "engine" inside
     "advisorengine", four different companies each, and each one a merge that would delete a live
     target. All four die at `\\b`.
     """
@@ -985,13 +984,13 @@ def _merge_evidence(a, b, groups):
       2. ONE SOURCE ROW SPELLING BOTH, with one literal a whole-word run inside the other. Same file,
          same line, so the writer wrote them together deliberately: `FIS / Fidelity National` and
          `Spire - Pay with Spire, Inc.` are that shape. Containment alone is NOT enough and neither
-         is the shared row alone, `Reducto / Encord / HumanSignal / … / Workato` is fifteen
+         is the shared row alone, `SomeCo / Otherco / Thirdco / … / Fifteenco` is fifteen
          different companies on one blocked-list line, and merging those would be a catastrophe.
 
     ⛔ REJECTED: "one line anywhere in documents/ writes both". Measured, it fired on 35 pairs and
     was CIRCULAR by construction, the shorter literal matches inside the longer one, so any line
-    carrying the long name automatically "co-occurs" with the short one. It merged Grasshopper Bank
-    with Hopper, Navan with Vanta, and LMG Staffing Solutions with Staffing. A test that cannot fail
+    carrying the long name automatically "co-occurs" with the short one. It merged Awesomeco Bank
+    with SomeCo, Notherco with Otherco, and Fourthco Staffing Solutions with Staffing. A test that cannot fail
     is not evidence.
     """
     for dom in sorted(groups[a]["domains"] | groups[b]["domains"]):

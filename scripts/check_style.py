@@ -51,6 +51,12 @@ import sys, os, re, fnmatch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
+    import kit_config as cfg
+except Exception:  # pragma: no cover - a missing config must not wedge a Write
+    class cfg:  # noqa: N801 - stand-in namespace, not a real class
+        OWNER_EMAIL = ""
+        OWNER_PHONE = ""
+try:
     from check_outreach import BANNED, SOFT, RETIRED, RETIRED_PATTERNS, banned_hit
 except Exception:  # pragma: no cover - a broken import must not wedge a Write
     BANNED, SOFT, RETIRED, RETIRED_PATTERNS = [], [], [], []
@@ -257,6 +263,72 @@ def strip_noise(text):
     return text
 
 
+LATEX_DROP_CMDS = (
+    "documentclass|usepackage|input|include|includegraphics|hypersetup|geometry|pagestyle|"
+    "fancyhead|fancyfoot|label|ref|pageref|cite|bibliography|bibliographystyle|"
+    "newcommand|renewcommand|providecommand|newenvironment|renewenvironment|def|let|"
+    "setlength|addtolength|definecolor|titleformat|titlespacing|vspace|hspace|rule|phantom|"
+    "fontsize|selectfont|color|begin|end|hyphenchar|raisebox|makebox"
+)
+_LATEX_INNER = r"(?:\[[^\]]*\])*(?:\{[^{}]*\})+"
+
+
+def strip_latex(text):
+    """Reduce a .tex source to the words a reader sees, so the prose rules can run on it.
+
+    The linter used to skip .tex entirely and exit 0, which read as a pass, so no résumé was
+    ever style-checked. Widening the extension tuple alone is worse than the bug: an unstripped
+    .tex lights up on \\textbf, \\hfill and package names, and an operator who learns to ignore
+    a gate has no gate. So the markup comes off first.
+
+    What goes: the preamble (everything before \\begin{document}), comment lines, the contact
+    header line, URLs and \\href targets, command names and the braces of markup-only commands.
+    What stays: the sentences and bullets a hiring manager reads.
+    """
+    # 1. preamble and back matter: only the document body is prose
+    m = re.search(r"\\begin\{document\}", text)
+    if m:
+        text = text[m.end():]
+    m = re.search(r"\\end\{document\}", text)
+    if m:
+        text = text[:m.start()]
+    # 2. comments never render (a lone \% is an escaped percent sign, not a comment)
+    text = re.sub(r"(?<!\\)%.*", "", text)
+    # 3. \href{target}{label} keeps the label only
+    text = re.sub(r"\\href\s*\{[^{}]*\}\s*\{([^{}]*)\}", r"\1", text)
+    # 4. the contact/header line is identifiers, not prose
+    _contact = "|".join(re.escape(s) for s in (
+        cfg.OWNER_EMAIL, cfg.OWNER_PHONE, "linkedin.com/in/") if s)
+    text = "\n".join(
+        "" if (_contact and re.search(_contact, ln)) else ln
+        for ln in text.split("\n"))
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"\b[\w.-]+@[\w.-]+\.\w+\b", " ", text)
+    # 5. markup-only commands go whole; everything else surrenders its braces and keeps the text
+    for _ in range(6):
+        new = re.sub(r"\\(?:" + LATEX_DROP_CMDS + r")\*?" + _LATEX_INNER, " ", text)
+        new = re.sub(r"\\[a-zA-Z@]+\*?(?:\[[^\]]*\])*\{([^{}]*)\}", r" \1", new)
+        if new == text:
+            break
+        text = new
+    # 6. escaped characters render as themselves, so restore them before the bare-command sweep.
+    # An escaped \$ is a DOLLAR SIGN and a bare $ is a math delimiter, and step 7 deletes the
+    # delimiters. Park the real ones out of reach first, or a retired dollar figure survives
+    # without its sign and the retired-figure rule never sees it.
+    text = text.replace(r"\$", "\x00")
+    text = re.sub(r"\\([%&#_{}])", r"\1", text)
+    # 7. leftovers: bare commands (\hfill, \item, \\), math delimiters, orphan braces, lengths
+    text = re.sub(r"\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?", " ", text)
+    text = re.sub(r"\\\\(?:\[[^\]]*\])?", " ", text)
+    text = re.sub(r"\\[^a-zA-Z]", " ", text)
+    text = text.replace("{", " ").replace("}", " ")
+    text = re.sub(r"[ \t]*\$[ \t]*", " ", text)
+    text = re.sub(r"(?<![A-Za-z0-9])-?\d+(?:\.\d+)?(?:pt|em|ex|in|cm|mm)\b", " ", text)
+    text = text.replace("\x00", "$")
+    text = re.sub(r"[ \t]+", " ", text)
+    return text
+
+
 def sentences(text):
     """Rough sentence split, good enough for the rhythm heuristics below."""
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
@@ -305,8 +377,11 @@ def check(text, mode="prose", is_markdown=True):
         for w in RETIRED:
             if w.lower() in low:
                 fails.append(f'retired/incorrect figure: "{w}"')
+        # re.I: `low` is already lowercased, so an uppercase literal in a RETIRED_PATTERNS entry would
+        # be DEAD here while looking alive in your config. Ported from main 2026-08-07 after a panel
+        # found a live pattern that fired on resumes and on nothing else.
         for pat, label in RETIRED_PATTERNS:
-            if re.search(pat, low):
+            if re.search(pat, low, re.I):
                 fails.append(f"retired/incorrect claim: {label}")
 
     # — no-slop patterns —
@@ -343,7 +418,9 @@ def check(text, mode="prose", is_markdown=True):
     # — APA construct (advisory: these are the two mechanizable ones) —
     # Serial comma. Lowercase-initial items only, which keeps dates and names
     # ("In January, Dana and I…") from reading as a three-item list.
-    if re.search(r"\b[a-z][\w-]*,\s+[a-z][\w-]*(?:\s+[a-z][\w-]*){0,2}\s+and\s+[a-z]", body):
+    # Skipped on résumés: a Core Skills line IS a comma list by design, so this heuristic fires on
+    # every clean CV and teaches the reader to skim past the output.
+    if mode != "resume" and re.search(r"\b[a-z][\w-]*,\s+[a-z][\w-]*(?:\s+[a-z][\w-]*){0,2}\s+and\s+[a-z]", body):
         warns.append("serial comma: a 3-item list may be missing the comma before 'and' (APA)")
     if is_markdown:
         levels = [len(m.group(1)) for m in re.finditer(r"^(#{1,6})\s", body, re.M)]
@@ -352,7 +429,10 @@ def check(text, mode="prose", is_markdown=True):
                 warns.append(f"heading hierarchy: level {a} jumps to level {b} (APA: no skipped levels)")
                 break
     # His compound-term ruling, which overrides APA hyphenation.
-    for bad, good in (("civic-tech", "civic tech"), ("builder-PMs", "builder PMs")):
+    # "insurance-claims" is an established compound noun: it needs no hyphen, and a de-hyphen
+    # ruling propagates to every sibling term rather than stopping at the one that was caught.
+    for bad, good in (("civic-tech", "civic tech"), ("builder-PMs", "builder PMs"),
+                      ("insurance-claims", "insurance claims")):
         if re.search(r"(?<![a-z])" + bad + r"(?![a-z])", body, re.I):
             warns.append(f'hyphenated compound: "{bad}" → "{good}" (his rule beats APA here)')
 
@@ -373,13 +453,17 @@ def _hook_write():
     except Exception:
         sys.exit(0)
     path = (payload.get("tool_input") or {}).get("file_path")
-    if not path or is_exempt(path) or not str(path).lower().endswith((".md", ".markdown")):
+    if not path or is_exempt(path) or not str(path).lower().endswith((".md", ".markdown", ".tex")):
         sys.exit(0)
     try:
         text = open(path, encoding="utf-8", errors="ignore").read()
     except Exception:
         sys.exit(0)
-    fails, warns = check(text, mode="prose", is_markdown=True)
+    # A .tex used to fall through this gate, so the hook said nothing on every résumé build.
+    if str(path).lower().endswith(".tex"):
+        fails, warns = check(strip_latex(text), mode="resume", is_markdown=False)
+    else:
+        fails, warns = check(text, mode="prose", is_markdown=True)
     if not fails:
         sys.exit(0)
     rel = os.path.relpath(path, REPO) if path.startswith(REPO) else path
@@ -474,9 +558,17 @@ def main():
         if not os.path.exists(path):
             print(f"file not found: {path}")
             sys.exit(0 if hook else 2)
-        if not path.lower().endswith((".md", ".txt", ".markdown")):
+        if not path.lower().endswith((".md", ".txt", ".markdown", ".tex")):
             sys.exit(0)   # not prose — nothing to say about it
-        text, label, is_md = open(path, encoding="utf-8", errors="ignore").read(), path, True
+        raw = open(path, encoding="utf-8", errors="ignore").read()
+        if path.lower().endswith(".tex"):
+            # A .tex used to exit 0 silently here. It is a résumé, so it gets the résumé mode
+            # (honesty guardrails on) and the markup comes off before the rules run.
+            text, label, is_md = strip_latex(raw), path, False
+            if mode == "prose":
+                mode = "resume"
+        else:
+            text, label, is_md = raw, path, True
 
     fails, warns = check(text, mode=mode, is_markdown=is_md)
 

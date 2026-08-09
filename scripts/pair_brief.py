@@ -49,7 +49,7 @@ REPO = os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
 # The delivered/undelivered vocabulary is IMPORTED, never re-typed (it lives with the writer).
-from log_linkedin_send import NOT_DELIVERED  # noqa: E402
+from log_linkedin_send import NOT_DELIVERED, UNSENT_STATUSES  # noqa: E402
 
 # The literal marker a NEXT-STEP picker must carry. Same explicit-marker pattern as check_preview's
 # `WARM-RUNG:` / `FOLLOWUP:` / `REFERRED:` anchors: an UNMARKED picker (a scorecard, a voice pick)
@@ -237,10 +237,17 @@ def counter_gap(today=None, repo=None):
 def stale_drafted(today=None, repo=None):
     """send-log rows still `drafted` from BEFORE today, formatted for display.
 
-    mail-draft.sh hardcodes status "drafted" on every row it writes: it creates a visible mail
-    draft and cannot know whether you pressed Send. The flip to "sent" is manual. Nothing watched
-    that store at first, so a missed flip left a real send invisible to rung_ladder (excluded as
+    mail-draft.sh writes an UNSENT status on every row it creates: it makes a visible mail draft
+    and cannot know whether you pressed Send. The flip to "sent" is manual. Nothing watched that
+    store at first, so a missed flip left a real send invisible to rung_ladder (excluded as
     undelivered) with no tripwire anywhere.
+
+    ⛔ THE SPELLING IS NOT ONE STRING, AND ASSUMING IT WAS MADE THIS FUNCTION DEAD. This docstring
+    used to claim the status is always "drafted". It is not: `mail-draft.sh` declares
+    `STAGED_STATUS = "staged"` and writes that, so the test below matched a value nothing in this
+    tree ever produced and the stale-draft alert could never fire for a partner. Both spellings are
+    accepted, because an install upgraded from an older kit can hold rows written either way, and a
+    reader that recognizes only the current spelling silently drops the history.
 
     Today's drafts are legitimately unflipped, so the grace period is the whole of today.
 
@@ -268,7 +275,7 @@ def stale_drafted(today=None, repo=None):
 
     out = []
     for r in rows:
-        if r.get("status") != "drafted" or (r.get("date") or "") >= d:
+        if str(r.get("status", "")).lower() not in UNSENT_STATUSES or (r.get("date") or "") >= d:
             continue
         if key(r) in delivered:
             continue
@@ -424,7 +431,7 @@ def open_inbound(today=None, repo=None):
             continue
         # L2b: outreach_log's block for this person or company records a completed outcome.
         # EXACT membership only. A prefix or substring rule was tried and removed the same hour:
-        # `closed` legitimately holds short brand keys ("ably", "apt"), and a fuzzy match on those
+        # `closed` legitimately holds short brand keys ("zylo", "apt"), and a fuzzy match on those
         # silently closes unrelated people. Over-closing here is invisible, which is the failure
         # direction this file is least able to notice.
         if who in closed:
@@ -951,6 +958,34 @@ def bug_alternate(repo=None):
 NEVER_DEFAULT_BUGS = re.compile(r"\bbugs?\b|\bdefects?\b|\btest suite\b|\bred tests?\b|"
                                 r"\bfix the (?:tests?|suite)\b", re.I)
 
+# ⛔ THE 3-3-3 IS A WORKDAY LOOP, AND THIS FILE USED TO HAVE NO IDEA WHAT DAY IT WAS. On a Saturday
+# it kept deriving "send your first contact of the day", so every picker read as a nag about a
+# counter that should not have been running. The 3-3-3 stays VISIBLE on a weekend, because the
+# number is a fact; what changes is that a send stops being the derived DEFAULT. The alternates are
+# untouched, so a weekend you DO want to work is still one pick away.
+#
+# Same shape as the bug-work rule above: asserted at derivation, so no decide() branch can quietly
+# put a send back on a day off.
+WEEKEND = (5, 6)   # Saturday, Sunday
+
+# What counts as a send-shaped default, for the weekend rule below.
+SEND_SHAPED = re.compile(r"\binitial contact\b|\breach out\b|\bnext contact\b|"
+                         r"\bsend\b|\boutreach\b|\bfirst contact\b", re.I)
+
+
+def _is_weekend(today=None):
+    """True on Saturday or Sunday. Accepts a date, an ISO string, or None for today."""
+    import datetime
+    d = today or datetime.date.today()
+    if isinstance(d, str):
+        try:
+            d = datetime.date.fromisoformat(d[:10])
+        except ValueError:
+            # An unparseable stamp is not evidence of a weekend. Fail toward the working-day
+            # behaviour rather than silently muting a send-shaped default on a Tuesday.
+            return False
+    return d.weekday() in WEEKEND
+
 
 def derive(today=None, repo=None):
     d = decide(gather(today, repo))
@@ -967,6 +1002,15 @@ def derive(today=None, repo=None):
         d["andy_read"] = ["Bugs and tests never interrupt the 3-3-3 unless you ask for it. "
                           "Falling back to a new initial contact; the bug row is still "
                           "available as the last alternate."]
+    # Rule 1b: NOT ON A WEEKEND. A send-shaped default on a Saturday is the pipeline pressuring a
+    # loop that is not running. The alternates stay, so if you want to work you still can.
+    if _is_weekend(today) and SEND_SHAPED.search(d["default"]):
+        d["default"] = "Rest. The 3-3-3 is a workday loop and today is not a work day"
+        d["andy_read"] = ["The method's loop is daily on WORKING days. A weekend nag is the "
+                          "pipeline pressuring a counter that should not be running.",
+                          "The ladder is still shown, because the number is a fact. The alternates "
+                          "are still there if you want them."]
+        d["priority"] = "P5"
     # NAME THE METHOD IN THE LABEL ITSELF, here rather than in render(), so that BOTH surfaces the
     # agent can copy from (the printed brief and --json's "default") carry it. This is what makes a
     # picker built verbatim from this tool pass check_pair --hook-ask.

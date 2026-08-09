@@ -203,7 +203,11 @@ def reconcile(only_run=None, dry=False):
         print("🟢 every findings run is reconciled")
         return 0
 
-    blocked_keys = blocked_keys_from_list()
+    # ⛔ OWN COPY, so the `blocked_keys.add(k)` below mutates nothing shared. Safe today only
+    # because the kit's screen_sweep has no cache; the maintainer's does, and there the identical
+    # `.add` poisoned the cached set for every later reader (2026-08-08). Fixing it here too means
+    # the cache can be synced into the kit later without carrying the defect across with it.
+    blocked_keys = set(blocked_keys_from_list())
     banked_keys = _already_banked_keys()
     all_drops, all_survivors, skipped, other = [], [], [], 0
     seen = set()

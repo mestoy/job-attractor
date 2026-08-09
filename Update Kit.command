@@ -118,6 +118,36 @@ if ! git pull --ff-only "$KIT_REMOTE"; then
   # (b) You edited a file the kit also ships. Then a reset WOULD lose your work, so stop instead.
   git fetch "$KIT_REMOTE" --quiet 2>/dev/null
   _upstream="$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || echo "$KIT_REMOTE/main")"
+  # ⛔ CIRCUIT BREAKER (BUG-040, added 2026-08-07). THE TEST BELOW USED TO BE THE ANCESTOR CHECK
+  # ALONE, and that conflates two situations with opposite correct responses. "HEAD is not an
+  # ancestor of upstream" is true when upstream rewrote history, AND it is equally true when YOU
+  # have local commits upstream has never seen. The comment above reads the condition as case (a)
+  # only, so a partner with their own work took the rewrite branch and `git reset --hard` deleted
+  # it. Matthew's clone carries exactly that: his own fixes to boss_registry.py, parse_network.py,
+  # record_finding.py and screen_sweep.py, plus commits 3c36a6a and 19c943a. It did not fire on
+  # 2026-08-06 by luck, not by design.
+  #
+  # The discriminator is not "is HEAD behind" but "does HEAD carry commits upstream does not have".
+  # If it does, nothing here is allowed to destroy them, whatever the reason for the failure.
+  _local_only=0
+  if [ -n "$_upstream" ]; then
+    _local_only="$(git rev-list --count "$_upstream..HEAD" 2>/dev/null || echo 0)"
+  fi
+  if [ "${_local_only:-0}" -gt 0 ]; then
+    _safety="kit-backup-$(date +%Y%m%d-%H%M%S)"
+    git branch "$_safety" HEAD 2>/dev/null
+    echo ""
+    echo "🛑 STOPPED. You have $_local_only commit(s) the published kit does not have, so a"
+    echo "   re-sync here would delete your own work. Nothing was changed."
+    echo ""
+    echo "   Your work is also saved on a branch named:  $_safety"
+    echo "   See what is yours:   git -C \"$(pwd)\" log --oneline $_upstream..HEAD"
+    echo ""
+    echo "   Send that list to the kit maintainer, who can tell you which parts are already"
+    echo "   upstream."
+    [ -n "$CFG_SAVED" ] && cp "$CFG_SAVED" "$CFG" 2>/dev/null
+    echo ""; read -n1 -s -p "Press any key to close."; echo; exit 1
+  fi
   if [ -n "$_upstream" ] && ! git merge-base --is-ancestor HEAD "$_upstream" 2>/dev/null; then
     echo ""
     echo "ℹ  The kit's history was rewritten upstream, so a fast-forward is impossible."

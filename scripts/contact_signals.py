@@ -107,7 +107,7 @@ def segment_for(company="", title="", extra=""):
 #
 # 🔴 THE DEFECT, worth keeping in full because it is easy to reintroduce. `segment_for` matches
 # domain nouns in the company/title text, and real companies mostly do not carry their industry
-# in their name: Stripe, Plaid, Brex, Anthropic all return None. So a single `slug is None` test
+# in their name: SomeCo, Otherco, Thirdco, Fourthco all return None. So a single `slug is None` test
 # demoted a Head of Product at a major payments company exactly as it demoted an artist-management
 # sole trader. A measurement that looked like "almost nobody is segment-relevant" was really
 # measuring how rare SELF-DESCRIBING COMPANY NAMES are.

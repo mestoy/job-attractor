@@ -130,16 +130,16 @@ def variants(name: str):
     # THIRD GUARD: the two guards above are necessary and still not sufficient. A short generic
     # word can also be merely-not-a-legal-suffix and merely 4+ chars long, so it slips past both:
     #     "Blue River Co"   -> "blue"      matched an unrelated "Blue ___" company
-    #     "WAI Global"      -> "global"    matched every "___ Global" company
-    #     "Nym Health"      -> "health"    matched every health company on the boards
-    #     "GM Financial"    -> "financial" matched an unrelated "___ Financial" company
+    #     "QZT Global"      -> "global"    matched every "___ Global" company
+    #     "Zed Health"      -> "health"    matched every health company on the boards
+    #     "QT Financial"    -> "financial" matched an unrelated "___ Financial" company
     # `norm(cand)` passes all of these, because they are ordinary industry nouns, not legal
     # suffixes. A false 🔴 is the dangerous direction — it reads exactly like a completed screen
     # and silently kills a real candidate before anyone looks at it.
     #
     # The needle's ONLY job is to catch a concatenated brand name buried in prose ("TigerData").
     # That needs a genuinely distinctive token: take the FIRST token (an English company name puts
-    # the brand first — "Acme Labs", "Ocrolus Inc"), require >= 6 chars, and reject ordinary
+    # the brand first — "Acme Labs", "Otherco Inc"), require >= 6 chars, and reject ordinary
     # industry vocabulary. The FULL-NAME needle is unaffected and still matches genuine records.
     _fellback = not norm(name)
     toks = [t for t in n.split() if len(t) >= 4]
@@ -225,7 +225,30 @@ def _strong(path, line, nd):
         return nd in norm(ls[:120]) or nd in norm_lite(ls[:120])
     return nd in norm(line[:60]) or nd in norm_lite(line[:60])
 
-def search_file(path: str, needles: set):
+def loose_tokens(name: str):
+    """The needles `variants()` EXTRACTED from a longer name, rather than the name itself.
+
+    🔴 WHY THIS EXISTS. `variants("Some Totally Different Co")` emits both the full name and the
+    bare token `totally`. That one word then matches any prose in a grepped store that happens to
+    contain it, and the send is blocked 🔴 ALREADY-SEEN for a company nobody ever contacted. The
+    capitalization guard does not help: a word opening a sentence or a quoted phrase is capitalized
+    like a brand.
+
+    ⚖️ THE ONE-WORD NEEDLE IS A WEAK SIGNAL BY CONSTRUCTION, and the comment that introduced it says
+    so: its only job is to catch a concatenated brand name buried in prose. Catching a brand in
+    prose is a reason to LOOK, never proof of contact. The FULL-NAME needle carries strong detection
+    and is untouched, so this narrows false BLOCKS without weakening real dedup.
+
+    ⚠️ A SINGLE-WORD COMPANY IS NOT AFFECTED, because its token IS its name and `t != n` excludes
+    it. Only a token pulled out of a LONGER name is demoted, which is the case that cannot tell a
+    brand from an English word.
+    """
+    n = norm(name) or norm_lite(name)
+    toks = [t for t in n.split() if len(t) >= 4]
+    return {t for t in toks[:1] if t and t != n}
+
+
+def search_file(path: str, needles: set, loose: set = ()):
     full = os.path.join(REPO, path)
     if not os.path.exists(full):
         return []
@@ -266,13 +289,33 @@ def search_file(path: str, needles: set):
             )
             low = " " + norm(line) + " "
             low_lite = " " + norm_lite(line) + " "
-            for nd in needles:
+            # ⛔ EVERY MATCHING NEEDLE IS WEIGHED, AND THE STRONGEST VERDICT WINS. This loop used
+            # to `break` on the FIRST needle that matched, which was harmless while all needles were
+            # equal. It stopped being harmless the moment one could be DEMOTED: a correspondence
+            # header naming the company matches BOTH the full name and the extracted token, and
+            # whichever the set yielded first decided the line. A weak needle shadowing a strong one
+            # turns a real prior contact into a 🟡, the wrongly-ALLOWS direction and the costlier.
+            _hit = False
+            _strong_hit = False
+            # ⚠️ SORTED, so the outcome does not depend on set-iteration order. It should not
+            # matter (the loop keeps going until a STRONG hit is found), and that is the point: a
+            # regression reintroducing an early `break` would then pass or fail by hash order, and
+            # a test that flips with the hash seed proves nothing. Deterministic order also makes
+            # the reported line stable between runs.
+            for nd in sorted(needles):
                 # WORD-BOUNDARY match only (padded low handles start/end) — no loose substring,
-                # which would match a short name inside a common word (e.g. "ably" in "reliably").
+                # which would match a short name inside a common word (e.g. "vent" in "prevent").
                 if (" " + nd + " ") in low or (" " + nd + " ") in low_lite:
-                    is_strong = (not is_staged) and (not is_warm_ask_naming) and _strong(path, line, nd)
-                    (strong if is_strong else weak).append((i, line.strip()[:160]))
-                    break
+                    _hit = True
+                    # ⛔ AN EXTRACTED TOKEN NEVER BLOCKS A SEND. Third demotion here, same reasoning
+                    # as the other two: the match is real, what it PROVES is weaker than "already
+                    # contacted", and a false 🔴 blocks a first send that was never made.
+                    if nd not in loose and _strong(path, line, nd):
+                        _strong_hit = True
+                        break
+            if _hit:
+                is_strong = (not is_staged) and (not is_warm_ask_naming) and _strong_hit
+                (strong if is_strong else weak).append((i, line.strip()[:160]))
     return strong, weak
 
 # SEND-GATE stores: only the ones that mean "already BLOCKED or CONTACTED" — a true do-not-send.
@@ -365,9 +408,31 @@ def sendlog_hits(needles: set):
     """
     full = os.path.join(REPO, SENDLOG)
     strong, weak = [], []
-    if not os.path.exists(full):
+    # ⛔ isfile, NOT exists, and this is a real defect rather than a style preference.
+    # `os.path.exists` is TRUE for a DIRECTORY, so a send log that is anything other than a readable
+    # file reaches `open()` and raises IsADirectoryError. check_dup then dies, and `mail-draft.sh`
+    # reads ANY non-zero exit as "🔴 blocked-list or strong duplicate" — so an unreadable send log
+    # silently becomes **"you already contacted this company" on EVERY send**, with a message
+    # pointing at the wrong cause.
+    #
+    # ⚖️ FAILS OPEN, LOUDLY, and that is the deliberate half. The send log is ONE dedup signal among
+    # several; the blocked list and the prose stores are read independently and still run. Failing
+    # CLOSED here would keep the defect alive as an I/O problem masquerading as a duplicate verdict,
+    # which is worse than a missing signal because it is a WRONG one. The warning goes to stderr so
+    # you learn the log is unreadable rather than believing the company was contacted.
+    if not os.path.isfile(full):
+        if os.path.exists(full):
+            print(f"⚠️  send log at {SENDLOG} is not a readable file (found a directory or special "
+                  "file). Skipping the send-log signal; the blocked list and prose stores still ran.",
+                  file=sys.stderr)
         return strong, weak
-    with open(full, encoding="utf-8", errors="ignore") as f:
+    try:
+        f = open(full, encoding="utf-8", errors="ignore")
+    except OSError as e:
+        print(f"⚠️  send log at {SENDLOG} could not be read ({e.__class__.__name__}). Skipping the "
+              "send-log signal; the blocked list and prose stores still ran.", file=sys.stderr)
+        return strong, weak
+    with f:
         for i, line in enumerate(f, 1):
             line = line.strip()
             if not line:
@@ -396,6 +461,7 @@ def main():
     company = args[0]
     boss = args[1] if len(args) > 1 else ""
     needles = variants(company)
+    loose = loose_tokens(company)      # extracted tokens may WARN, never BLOCK
     if boss:
         needles |= {norm(boss)}
         toks = [t for t in norm(boss).split() if len(t) >= 4]
@@ -414,7 +480,7 @@ def main():
         else:
             paths = [pattern]
         for path in paths:
-            res = search_file(path, needles)
+            res = search_file(path, needles, loose)
             if not res:
                 continue
             strong, weak = res

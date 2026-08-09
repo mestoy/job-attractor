@@ -544,7 +544,7 @@ def check_ingredients(body, rung):
     what MAKE a message one-of-a-kind, so the O-A-K test is already their composite — and the
     composite is far more robust to detect than either part. Calibration proved the point: the
     per-ingredient vocabulary detectors for #2 and #4 produced a 17.6% false-fail rate against
-    your real sent corpus (the DonorsChoose send expresses "why I chose you" as admiration,
+    your real sent corpus (a strong send expresses "why I chose you" as admiration,
     which no keyword list anticipates), while the fixed O-A-K composite produces none. So #2 and
     #4 WARN, and the composite FAILs. Hard-failing an individually brittle detector is how you
     get a gate that people learn to --force past, which is worse than no gate.
@@ -657,8 +657,11 @@ def main():
     for w in RETIRED:
         if w.lower() in low:
             fails.append(f"retired/incorrect figure: \"{w}\"")
+    # re.I: `low` is already lowercased, so an uppercase literal in a RETIRED_PATTERNS entry would
+    # be DEAD here while looking alive in your config. Ported from main 2026-08-07 after a panel
+    # found a live pattern that fired on resumes and on nothing else.
     for pat, label in RETIRED_PATTERNS:
-        if re.search(pat, low):
+        if re.search(pat, low, re.I):
             fails.append(f"retired/incorrect claim: {label}")
     # ENGINEER-IMPLICATION (added 2026-07-19). This file had NO engineer patterns at all —
     # only verify_resume.py did, and its patterns ("as an engineer", "engineer-turned-pm")
@@ -712,31 +715,27 @@ def main():
     # because a joined greeting reads the same in any message.
     if not _IN_THREAD and not re.search(r"^\s*(hi|hey|tgif|hello)[, ]+[A-Z][a-z]+!", body, re.M | re.I):
         warns.append("no 'Hi/Hey, First!' greeting line found")
-    # IN-THREAD REPLIES DO NOT GET A SIGNATURE (you 2026-07-21): "I'm debating including my
-    # signature name and website address when replying. That makes it seem impersonal since we
-    # already have active thread?" He is right, and his own unassisted writing proves it — his
-    # in-thread reply to Brian de Haaff was "TGIF, Brian! Thanks for accepting. I'm definitely not
-    # at the VP level yet 🤣... maybe someday!" with no name and no URL. The signature earns its
-    # place on FIRST contact, where the recipient may not know who he is or how to find him. Three
-    # messages deep it reads like closing a business letter. This check was built for email and was
-    # over-applied to DM replies — it hard-failed a real DM reply of his until the block was added.
+    # IN-THREAD REPLIES DO NOT GET A SIGNATURE. Signing a reply inside a live thread reads as
+    # impersonal, and unassisted writing proves the point: a real in-thread DM reply runs to two
+    # warm sentences with no name and no URL. The signature earns its place on FIRST contact,
+    # where the recipient may not know who you are or how to find you. Three messages deep it
+    # reads like closing a business letter. This check was built for email and was over-applied to
+    # DM replies, where it hard-failed a real reply until this block was added.
     # (_IN_THREAD is computed in main() above, at the point --type is normalized.)
-    # — signature block format (you 2026-07-19): TWO blank lines before his name,
-    #   then the website URL on the line DIRECTLY under it (no blank line between).
-    #   Sign-off token is his real name — "you", the diminutive "Mike", or the surname
-    #   "Estoy"; he picks the register (a warm post-chat thank-you gets "Mike", a cold-boss email
-    #   gets "you", a note to somebody who has called him by his surname since high school
-    #   gets "Estoy" — added 2026-07-26 with a warm-lane note).
+    # — signature block format: TWO blank lines before your name, then the website URL on the
+    #   line DIRECTLY under it (no blank line between). The sign-off token is any of YOUR real
+    #   names — the full name, a diminutive, or the surname alone — and you pick the register per
+    #   message (a warm post-chat thank-you often gets the diminutive, a cold-boss email the full
+    #   name, a note to somebody who has called you by your surname for twenty years the surname).
     #
-    # ⛔ THE SIGNATURE IS RUNG-AWARE AS OF 2026-07-26. It used to demand the full block on every
-    # first contact, which hard-failed his REAL warm practice. Measured: the 2026-07-21 Trina
-    # earlier note and a later warm-lane note were both sent, both welcomed, and both
-    # end on a bare first name with no URL. A gate that fails copy he actually sent is wrong about
-    # the copy, not the other way round ([[the rule is wrong, not the message]], the same principle
-    # test_style.py's LiveCorpusRegressionTests enforces on the word list).
+    # ⛔ THE SIGNATURE IS RUNG-AWARE. It used to demand the full block on every first contact,
+    # which hard-failed REAL warm practice. Measured against a live corpus: warm notes that were
+    # sent, welcomed, and replied to end on a bare first name with no URL. A gate that fails copy
+    # somebody already sent is wrong about the copy, not the other way round — the same principle
+    # the live-corpus regression tests enforce on the word list.
     #
-    # The distinction is the RUNG, not the channel. A cold boss does not know who he is or how to
-    # find him, so the full block earns its place. A warm 1st-degree contact already knows both,
+    # The distinction is the RUNG, not the channel. A cold boss does not know who you are or how to
+    # find you, so the full block earns its place. A warm 1st-degree contact already knows both,
     # and a portfolio URL under a note to a friend reads like a pitch. So: warm lane accepts EITHER
     # shape, cold lane still requires the full block. This LOOSENS nothing for cold outreach.
     # ⚠️ Derived from the configured identity, never hardcoded. The main pipeline can name one
@@ -749,14 +748,13 @@ def main():
     if not _IN_THREAD:
         _full_block = bool(re.search(r"\n\n\n" + _NAME + r"\n(https?://)?(www\.)?" + re.escape(OWNER_SITE),
                                      body))
-        # Warm shape, measured from his REAL sends rather than assumed. The 2026-07-21 Trina note
-        # is `…unicorns.\n\nMike\nhttps://www.<your site>\n` — ONE blank line, name, URL
-        # directly under. The 2026-07-26 Esther note ends on a bare `Estoy` with no URL. So the
-        # warm lane varies on BOTH axes (one-or-two blank lines, URL present or not) and the only
-        # invariant is: a sign-off name alone on its line, optionally followed by the URL line,
-        # with nothing after it.
-        # ⚠️ An earlier read of this said his warm notes carry no URL. That was wrong, taken from a
-        # truncated blockquote in outreach_log.md rather than from the bytes. Measure the file.
+        # Warm shape, measured from REAL sends rather than assumed. One warm note ends
+        # `…\n\n<diminutive>\nhttps://www.<your site>\n` — ONE blank line, name, URL directly
+        # under. Another ends on a bare surname with no URL at all. So the warm lane varies on
+        # BOTH axes (one-or-two blank lines, URL present or not) and the only invariant is: a
+        # sign-off name alone on its line, optionally followed by the URL line, nothing after it.
+        # ⚠️ An earlier read of this said warm notes carry no URL. That was wrong, taken from a
+        # truncated blockquote in the narrative log rather than from the bytes. Measure the file.
         _warm_sig = bool(re.search(
             r"\n\n+" + _NAME + r"[ \t]*(?:\n(?:https?://)?(?:www\.)?" + re.escape(OWNER_SITE) + r"[ \t]*)?\s*\Z",
             body))

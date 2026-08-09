@@ -138,9 +138,33 @@ def cmd_add(a):
         return 4
 
     raw_key = a.linkedin or f"{a.company}/{a.person}"
+    # ── PROVENANCE, IN THE VOCABULARY `state.py` RECOGNIZES ──────────────────────────────────────
+    #
+    # 🔴 THE DEFECT THIS CLOSES. This writer emitted `ts` and `date` and stopped there. `state.py`
+    # reads `as_of` for recency and `as_of_source` for provenance, and `_source_family()` recognizes
+    # four families and no others: live, authored, export, git. A row carrying neither field is
+    # UNDATED to every reader in that module and its provenance counts as **invalid**, so recorded
+    # boss research is invisible to the recency rules that decide which record wins.
+    #
+    # ⚖️ THE FAMILY IS DERIVED FROM HOW THE SEAT WAS VERIFIED, not stamped as a constant. A seat
+    # confirmed against a live profile is `live:` evidence and outranks one a human asserted, which
+    # is what `SOURCE_PRECEDENCE` expresses. Flattening every row to `authored` would make the store
+    # look consistent while discarding the distinction.
+    # ⛔ An unrecognized or absent `--verified` falls to `authored`, NEVER to a `live:` family. The
+    # error that matters is claiming verification that did not happen.
+    _VERIFIED_FAMILY = {"linkedin-live": "live:linkedin",
+                        "company-page": "live:company-page",
+                        "press-release": "live:press-release"}
+    _as_of = a.date or _today()
+    _as_of_source = _VERIFIED_FAMILY.get(a.verified or "", "authored")
     row = {
         "ts": datetime.datetime.now().astimezone().isoformat(),
-        "date": a.date or _today(),
+        "date": _as_of,
+        # ⚠️ `as_of` DUPLICATES `date` ON PURPOSE. `date` is this file's own field and other readers
+        # use it; `as_of` is the name `state.py` looks for. Writing one and hoping the other is
+        # inferred is how these rows became invisible in the first place.
+        "as_of": _as_of,
+        "as_of_source": _as_of_source,
         "kind": "boss",
         "key": state.key_for("boss", raw_key),
         "person": a.person,

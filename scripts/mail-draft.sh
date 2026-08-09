@@ -546,10 +546,12 @@ if [ $STATUS -eq 0 ]; then
   # checker reads it as a DECISION rather than an un-armed send, which is what stopped every
   # compliant cold send from reding the consistency check forever. This set must stay in sync with
   # ARMS_FOLLOWUP in log_linkedin_send.py, or the two paths disagree and the rule is decorative.
+  # ⛔ NO RUNG ARMS A FOLLOW-UP (BUG-094, fixed 2026-08-09). This case armed four rungs while
+  # check_followups.ARMS_FOLLOWUP was already empty, so the kit wrote follow-up dates its own
+  # checker never looked for. All three sites now agree: here, log_linkedin_send.ARMS_FOLLOWUP,
+  # and check_followups.ARMS_FOLLOWUP. The empty case is kept rather than deleted so restoring a
+  # rung is a one-line change, and so this stays the single arming site.
   case "$RUNG" in
-    warm|referred|event|off-ladder)
-      _FUP="$(python3 -c 'import datetime,sys; print((datetime.date.today()+datetime.timedelta(days=7)).isoformat())' 2>/dev/null)"
-      _FUP="${_FUP:-none}" ;;
     *) _FUP="none" ;;
   esac
   # SEND-LOG, the machine-readable record. rank_criteria.py reads the `targets` field to burn-track
@@ -558,8 +560,12 @@ if [ $STATUS -eq 0 ]; then
   _SLOG="$(cd "$HERE/.." && pwd)/documents/send-log.jsonl"
   if [ -d "$(dirname "$_SLOG")" ]; then
     python3 - "$_SLOG" "${RUNG:-cold-boss}" "$TO" "$_LOG_CO" "$TARGETS" "$SUBJECT" "$_FUP" "$SEGMENT" <<'PYLOG' 2>/dev/null || true
-import json, sys, datetime
+import json, sys, datetime, os
 path, rung, to, company, targets, subject, fup, segment = sys.argv[1:9]
+# ⛔ ONE DEFINITION OF THE STATUS THIS FILE WRITES. The row below and the rebuild guard further
+# down must agree, and they are twelve lines apart. A guard that matched a status this script does
+# not write would never fire, and the fix would be present in the file and dead in practice.
+STAGED_STATUS = "staged"
 # ⚠️ `targets` is a COMMA-SEPARATED STRING, not a list. rank_criteria.burned_targets() reads it as
 # `(row.get("targets") or "").split(",")`, and log_linkedin_send.py writes it the same way. A list
 # here is silently unreadable to the consumer, so the burn guard that stops one company being named
@@ -567,12 +573,45 @@ path, rung, to, company, targets, subject, fup, segment = sys.argv[1:9]
 # READER, not what looks tidier in JSON.
 row = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
        "date": datetime.date.today().isoformat(),
-       "channel": "email", "status": "staged", "rung": rung, "to": to,
+       "channel": "email", "status": STAGED_STATUS, "rung": rung, "to": to,
        "company": company,
        "targets": ",".join(t.strip() for t in targets.split(",") if t.strip()),
        "subject": subject, "followup_due": fup, "segment": segment}
-with open(path, "a", encoding="utf-8") as fh:
-    fh.write(json.dumps(row) + "\n")
+# ── ONE ROW PER DRAFT, NOT ONE PER BUILD ──────────────────────────────────────────────────
+# Rebuilding a draft (a corrected attachment, a reworded subject line) used to append a SECOND
+# staged row here while the outreach log's own marker guard correctly deduplicated, so the two
+# stores disagreed in BOTH directions and the daily counters could not be reconciled. A rebuild
+# is the SAME draft in a later state, so the existing row is overwritten rather than joined.
+# ⚠️ Only staged rows are eligible. A row that already reads as sent is history and is never
+# touched. Unparseable lines are preserved exactly as found rather than dropped, and the rewrite
+# is atomic (temp file + os.replace) so an interrupted run cannot truncate a shared store.
+rows, replaced = [], False
+if os.path.exists(path):
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line.strip():
+                continue
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                rows.append(line)
+for i in range(len(rows) - 1, -1, -1):
+    r = rows[i]
+    if (isinstance(r, dict) and r.get("status") == STAGED_STATUS and r.get("to") == to
+            and r.get("company") == company and r.get("subject") == subject):
+        rows[i] = row
+        replaced = True
+        break
+if not replaced:
+    rows.append(row)
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    for r in rows:
+        fh.write((r if isinstance(r, str) else json.dumps(r)) + "\n")
+os.replace(tmp, path)
+if replaced:
+    print("   ♻️  rebuild: existing staged row updated in place (one row per draft)")
 PYLOG
   fi
   _STAG_KEY="STAGED · ${_LOG_CO} · ${SUBJECT}"

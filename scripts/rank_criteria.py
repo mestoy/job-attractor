@@ -189,6 +189,63 @@ def _num(pattern, text, default=None):
     return float(m.group(1)) if m else default
 
 
+# ── PARSE ONCE PER FILE STATE ─────────────────────────────────────────────────────────────────
+#
+# 📊 This function re-read and re-parsed the whole blocked list on EVERY membership test, which is
+# once per candidate. A profile of the sign-in briefing put 16.2 of its 22.9 seconds here: 1,990
+# calls, feeding 2.66 million calls to `canon()`, to answer 2,056 questions about a file that never
+# changed between them. `screen_sweep.blocked_keys_from_list` carries the same cache for the same
+# reason; this is its twin and it was left uncached.
+#
+# ⛔ KEYED ON (path, mtime, size), NOT a bare lru_cache. The blocked list IS written inside a
+# session when a screening run records a drop, and a cache blind to that would hand back a stale
+# spelling for a company blocked moments earlier.
+_BLOCKED_NAMES_CACHE = {}
+
+
+def _blocked_names_by_key():
+    """canon key → the RAW blocked name it came from, so an alias test can see the real words.
+
+    `blocked_keys_from_list()` returns canon keys only ("otherco financial" → "othercofinancial"),
+    which cannot be split back into words. This re-parses the same two bullet shapes for DISPLAY
+    names, and is deliberately a READER of the same file rather than a second source of truth about
+    who is blocked: membership is still decided by `blocked_keys_from_list()`; this only supplies
+    the spelling.
+    """
+    import re as _re
+    path = os.path.join(REPO, "documents", "blocked-employers-list.md")
+    try:
+        st = os.stat(path)
+        stamp = (path, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+    except OSError:
+        return {}
+    hit = _BLOCKED_NAMES_CACHE.get(stamp)
+    if hit is not None:
+        return hit
+    out = {}
+    try:
+        from screen_sweep import canon
+        with open(path, encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                if not line.lstrip().startswith("-"):
+                    continue
+                body = line.lstrip()[1:].strip()
+                m = _re.match(r"\*\*(.+?)\*\*", body) or \
+                    _re.match(r"([A-Za-z][\w&.\-' ]{1,44}?)\s*[(:—]", body)
+                if not m:
+                    continue
+                nm = m.group(1).strip()
+                k = canon(nm)
+                if k:
+                    out.setdefault(k, nm)
+    except Exception:
+        return {}
+    if len(_BLOCKED_NAMES_CACHE) > 8:
+        _BLOCKED_NAMES_CACHE.clear()
+    _BLOCKED_NAMES_CACHE[stamp] = out
+    return out
+
+
 class _BlockedText(str):
     """The blocked-list text, whose `in` test is WORD-BOUNDED rather than raw substring.
 
@@ -229,6 +286,22 @@ class _BlockedText(str):
          (6) is real, so length does not separate them.
     """
 
+    # Corporate qualifiers: the words that can trail a parent brand in a legal name without
+    # changing WHO the company is. Used by the entity-variant alias layer below.
+    _QUALIFIERS = frozenset({
+        "inc", "llc", "ltd", "limited", "corp", "corporation", "co", "company", "plc", "sas",
+        "sa", "ag", "gmbh", "bv", "nv", "ab", "oy", "pty", "srl", "spa",
+        "group", "holdings", "holding", "global", "international", "worldwide",
+        "financial", "finance", "capital", "technologies", "technology", "tech", "systems",
+        "solutions", "services", "software", "labs", "digital", "data", "health", "healthcare",
+        "care", "security", "networks", "media", "partners", "ventures", "industries",
+        # ⚠️ KEEP EACH PLURAL AND ITS SINGULAR TOGETHER. Upstream shipped seven plurals without
+        # their singular forms, so a legal name ending "… Service SAS" or "… Data Lab" never
+        # aliased to its parent brand and two blocked companies ranked under their bare names. A
+        # qualifier list that carries "services" and not "service" is a coin flip on spelling.
+        "service", "solution", "system", "lab", "partner", "venture", "network", "industry",
+    })
+
     def __contains__(self, needle):
         n = (needle or "").strip().lower()
         if not n:
@@ -236,7 +309,38 @@ class _BlockedText(str):
         try:
             from screen_sweep import canon, blocked_keys_from_list
             k = canon(n)
-            return bool(k) and k in blocked_keys_from_list()
+            if not k:
+                return False
+            keys = blocked_keys_from_list()
+            if k in keys:
+                return True
+            # ── ENTITY-VARIANT ALIAS, added after a LIVE leak upstream ──────────────────────
+            # The list records a company under its LEGAL name; the sweeps emit the BRAND. Exact
+            # canon matching cannot bridge that, so a blocked company gets offered as a candidate.
+            # Shape of the receipt: "SOMECO SERVICE SAS" is blocked over one of its government
+            # subsidiaries, and plain "SomeCo" ranks on the board anyway. "Otherco Financial" is
+            # blocked; "Otherco" is not.
+            #
+            # ⛔ THIS IS NOT A RAW TEXT TEST OVER THE FILE, AND THE EVIDENCE SAYS NOT TO BUILD ONE.
+            # A text test blocks a company that is not blocked at all, because its name appears once
+            # as PROSE inside another company's reason ("same failure class as Thirdco"). Stripping
+            # quoted spans does not help, because such a mention is usually unquoted. Matching brand
+            # names against reasons re-creates the exact false-positive class that this whole
+            # two-layer design exists to avoid.
+            #
+            # The rule instead: the needle must be a WHOLE-WORD leading run of a blocked entry, and
+            # every remaining word must be a corporate QUALIFIER. Word-level, so a three-letter
+            # brand never matches inside a longer ordinary word.
+            words = [w for w in re.split(r"[^a-z0-9]+", n) if w]
+            if not words:
+                return False
+            for key, raw in _blocked_names_by_key().items():
+                other = [w for w in re.split(r"[^a-z0-9]+", raw.lower()) if w]
+                if len(other) <= len(words) or other[:len(words)] != words:
+                    continue
+                if all(w in _BlockedText._QUALIFIERS for w in other[len(words):]):
+                    return True
+            return False
         except Exception:
             # FAIL CLOSED on a broken import. A ranker that cannot read the blocked list must not
             # quietly start offering blocked companies; an empty pool is a visible failure, a
@@ -631,14 +735,91 @@ def banked_sweep_files():
     return sorted(fs, reverse=True)
 
 
+def survivor_rulings():
+    """company canon-key → the latest SURVIVOR row, for rows whose screen is genuinely DONE.
+
+    ⚖️ FAILS OPEN, the same direction as the deferred reader and for the same reason: an unreadable
+    ledger costs a screened row its upgrade, which is one repeated screen, whereas failing closed
+    would take the pool down entirely.
+
+    ⛔ SURVIVOR ONLY, and the narrowness is the whole safety of this. UNVERIFIED means the screen
+    STARTED and did not finish, so those rows keep the conservative default; DEFERRED is already
+    removed upstream by `_drop_deferred`; DROP never reaches here because the reconciler writes it
+    to the blocked list. Widening this set past SURVIVOR would put an unfinished screen in front of
+    you wearing a finished badge, which is the failure this reader exists to prevent.
+    """
+    try:
+        import findings_ledger
+        return {k: r for k, r in findings_ledger.rulings().items()
+                if str(r.get("verdict") or "") == "SURVIVOR"}
+    except Exception:
+        return {}
+
+
+def _screened_fields(row):
+    """Map one SURVIVOR ledger row onto the strings `_score_fields()` expects.
+
+    ⛔ THE LEDGER'S FREE TEXT IS NEVER PASSED THROUGH RAW, and this is the trap that turns a display
+    bug into a silent exclusion. `_score_fields()` vetoes remote on
+    `"✅" not in remote and "remote" not in remote.lower()`, and recorded `--remote` evidence often
+    reads like "United States. https://jobs.example.com/…", which contains neither token. Fed in
+    raw, the row would be VETOED off the board by the very screen that cleared it. So the VERDICT
+    supplies the verdict token and the recorded text rides along behind it as evidence.
+
+    ⛔ `culture` is returned EMPTY for every verdict, without exception. Review sites block agents,
+    so an agent's "culture clean" may only mean "culture unreachable", and those are opposite
+    findings. Leaving it empty is also what keeps the row at tier 0 and prints
+    "leadership: unproven", so a screened row outranks an unscreened one without ever claiming to be
+    culture-verified. The 60-second human peek stays a human's.
+
+    ⛔ `boss` is never synthesized: an "@" in it earns a readiness point, so inventing one would
+    manufacture actionability that does not exist.
+    """
+    when = str(row.get("ts") or "")[:10]
+    remote_txt = str(row.get("remote") or "").strip()
+    owner_txt = str(row.get("ownership") or "").strip()
+    # No recorded evidence for a gate means that gate is NOT upgraded, even on a SURVIVOR row.
+    remote = f"✅ remote (screened {when}) · {remote_txt}" if remote_txt else ""
+    nonpe = f"✅ no PE · {owner_txt}" if owner_txt else ""
+    return remote, nonpe, str(row.get("boss") or "")
+
+
+def _screened_lane(row, remote, nonpe):
+    """The lane text a screened row shows, naming what is STILL OWED rather than implying done."""
+    when = str(row.get("ts") or "")[:10]
+    got = []
+    if remote:
+        got.append("remote")
+    if nonpe:
+        got.append("noPE")
+    # ⚠️ WHAT IS OWED COMES BEFORE WHAT CLEARED, AND THE ORDER IS THE WHOLE POINT.
+    # There are TWO renderers with DIFFERENT truncations: the detail block cuts at 60 and the
+    # compact top-10 list cuts at 34. The compact one is what the morning 3-3-3 brief prints, so it
+    # is the view actually read. A string tuned to the 60 gets sheared by the 34 into
+    # "SCREENED <date> · remote+noPE ", a row advertising everything it cleared and silently
+    # dropping everything it still owed. Truncation that flatters is a render defect, and fixing it
+    # for one renderer while a stricter sibling still lies fixes nothing.
+    # The full string fits the 60; the 34 cut lands inside "culture", which still reads as OWED.
+    got = "+".join(got) or "verdict"
+    return f"SCREENED {when} · OWED culture+boss · {got} ✅"
+
+
 def banked_topup(have, done, blocked, need):
     """Fill from the agent-screened BANKED files before falling back to raw discovery.
 
     Reads the dot-separated batch lists that screen_sweep.py --bank writes to
     documents/banked-candidates-*.md. Keep this reader interface intact: screen_sweep.py's bank()
     points at this function, and it deliberately skips lines starting with `|`, `#`, `>` or `-`.
+
+    ⚠️ IT MEASURED THE FILE, NOT THE VERDICT. This used to stamp `pts=0.5` and "NOT screened" on
+    every banked name, never once asking what verdict that company actually held, so a company with
+    a SURVIVOR row carrying verified remote and ownership still displayed as unscreened. It measured
+    which file a name came from instead of the thing itself.
+
+    ⚠️ THE CONSERVATIVE DEFAULT STAYS, and only a recorded SURVIVOR verdict overrides it.
     """
     out = []
+    survivors = survivor_rulings()
     havenames = {c["company"].lower() for c in have}
     for path in banked_sweep_files():
         try:
@@ -672,6 +853,25 @@ def banked_topup(have, done, blocked, need):
                 # still owed. A name in a banked file means *worth screening*, never *worth sending*.
                 # Reading those rows as pre-screened is how a PE-owned company and a predatory-lending
                 # company both sat in a proposed pool.
+                # ── A RECORDED SURVIVOR VERDICT OVERRIDES THE DEFAULT ──
+                # SURVIVOR only. UNVERIFIED keeps the default because an unfinished screen is not a
+                # verdict; DEFERRED is stripped upstream by `_drop_deferred`; DROP never arrives
+                # because the reconciler puts it on the blocked list. See `survivor_rulings()`.
+                row = survivors.get(_deferred_key(co))
+                if row is not None:
+                    remote, nonpe, boss = _screened_fields(row)
+                    lane = _screened_lane(row, remote, nonpe)
+                    scored, _why = _score_fields(co, lane, remote, "", nonpe, boss, "")
+                    if scored:
+                        scored["source"] = os.path.basename(path)
+                        out.append(scored)
+                        havenames.add(low)
+                        if len(out) >= need:
+                            return out
+                        continue
+                    # A screened row that the scorer VETOES is a real disagreement between the
+                    # ledger and the gates, not a reason to go quiet. Fall through to the default so
+                    # the company still appears and can be looked at.
                 out.append({"company": co, "lane": "MECHANICAL gates only, NOT screened",
                             "tier": 1, "pts": 0.5,
                             "reasons": ["BANKED sweep: mechanical gates only. Remote, PE, culture "
@@ -1519,6 +1719,41 @@ def nonus_tell(company):
     return m.group(1) if m else ""
 
 
+_H2N_CACHE = None
+
+
+def _handle_to_name():
+    """Map a LinkedIn slug to the contact's real name, read from the state store.
+
+    `documents/state/contact.jsonl` is written by `parse_network.py` and carries both `linkedin`
+    and `name` in its payload, so a slug that no pattern can unpack ("janedoe") still resolves by
+    lookup. Cached because `contacted_people()` runs inside a ranking loop.
+
+    Later rows win, matching the append-only last-write-wins rule the other stores follow. Returns
+    an empty dict on any failure, so a missing store degrades the caller rather than breaking it.
+    """
+    global _H2N_CACHE
+    if _H2N_CACHE is not None:
+        return _H2N_CACHE
+    out = {}
+    try:
+        for line in rd("documents/state/contact.jsonl").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                p = (json.loads(line) or {}).get("payload") or {}
+            except ValueError:
+                continue
+            m = re.search(r"linkedin\.com/in/([^/?\s]+)", str(p.get("linkedin") or ""))
+            if m and p.get("name"):
+                out[m.group(1).lower().rstrip("/")] = p["name"]
+    except Exception:
+        pass
+    _H2N_CACHE = out
+    return out
+
+
 def contacted_people():
     """Person NAMES already contacted, so a fresh pick does not re-surface them.
 
@@ -1574,6 +1809,13 @@ def contacted_people():
                 d = json.loads(line)
             except ValueError:
                 continue
+            # Writer-side half: rows written by the current logger carry the resolved NAME, so
+            # the handle join below is a fallback for older rows rather than the only path.
+            for variant in (d.get("to_name"),
+                            closeness.normalize_name(d.get("to_name") or "") if closeness else ""):
+                tn = re.sub(r"[^a-z0-9]", "", str(variant or "").lower())
+                if len(tn) >= 4:
+                    names.add(tn)
             m = re.search(r"linkedin\.com/in/([^/?\s]+)", str(d.get("to") or ""))
             if m:
                 slug = m.group(1).lower()
@@ -1581,8 +1823,8 @@ def contacted_people():
                 if len(nm) >= 4:
                     names.add(nm)
                 # 🔴 A MIDDLE INITIAL IN THE SLUG BREAKS THE JOIN. A profile at
-                # `/in/jordan-a-lee` keys as `jordanalee`, while the contact pool knows the person
-                # as "Jordan Lee" and keys as `jordanlee`. The two never match, so the
+                # `/in/jane-a-doe` keys as `janeadoe`, while the contact pool knows the person
+                # as "Jane Doe" and keys as `janedoe`. The two never match, so the
                 # already-contacted test cannot see the send, and the ranker offers that person
                 # again as a fresh target MINUTES after they were messaged.
                 # A credential suffix (`-mba`, `-phd`) survives this because the name normalizer
@@ -1594,6 +1836,29 @@ def contacted_people():
                 trimmed = re.sub(r"[^a-z0-9]", "", "".join(p for p in parts if len(p) > 1))
                 if len(trimmed) >= 4 and trimmed != nm:
                     names.add(trimmed)
+                # 🔴 A SLUG THAT COMPRESSES THE FIRST NAME TO A BARE INITIAL CAN NEVER BE SPLIT
+                # BACK INTO THE POOL'S KEY. A profile at `/in/janedoe` keys as `janedoe`, while the pool
+                # knows the person as "Jane Doe" and keys as `janedoe`. The middle-initial
+                # repair above cannot help: it works by DROPPING one-letter parts, and here the
+                # initial is FUSED to the surname with no separator, so there is nothing to split.
+                # In a mature log almost every LinkedIn send row carries no personal name at all,
+                # in the row or in the narrative header.
+                # The harm is worse than a re-offer. A contact can rank #1 before the send and #1
+                # again AFTER it, at a HIGHER score, while every other name drifts down. A
+                # first-ever LinkedIn contact is the exact case that slips through, because the
+                # closeness store's `he_sent` count in source (3) comes from a periodic EXPORT and
+                # stays 0 until the next export is parsed. Initial contacts are the whole job.
+                # ⚖️ THE FIX RESOLVES THE HANDLE INSTEAD OF GUESSING AT ITS MORPHOLOGY. Slug shapes
+                # are unbounded (`janedoe`, `jane-a-doe`, `janedoemba`) and every repair by
+                # pattern has failed once already. The contact store already holds the LinkedIn URL
+                # beside the real name, so the join is a LOOKUP. Add the resolved name in addition
+                # to the slug keys, so a cold target absent from that store still registers.
+                real = _handle_to_name().get(slug.rstrip("/"))
+                if real:
+                    for variant in (real, closeness.normalize_name(real) if closeness else ""):
+                        rn = re.sub(r"[^a-z0-9]", "", str(variant or "").lower())
+                        if len(rn) >= 4:
+                            names.add(rn)
     except Exception:
         pass                                        # degrade to the other sources, never fail
     # (3) the closeness store's own message counts — the source that caught the other two out.

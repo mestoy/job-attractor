@@ -260,6 +260,23 @@ def _ts_epoch(ts):
         return 0.0
 
 
+def work_since(row, repo=None, now_mtime=None):
+    """True when an action of record landed after this pair row was written.
+
+    The LEGACY path's clock, kept as a named function so the two paths in `pair_owed` cannot drift
+    apart the way they once did: a legacy row fell back to this mtime check, a stamped row did not,
+    so a whole day of work with no sends never charged for a pair.
+
+    ⛔ THIS IS NOT THE STAMPED PATH'S TEST, deliberately. When the row carries a ladder stamp,
+    `pair_owed` compares the live sent/replied figures against the ones you last saw, which is a
+    strictly better signal. A send-log mtime moves for reasons the ladder does not (a compaction, a
+    dedup pass, a restore, a plain copy), so using it there would trade a precise comparison for a
+    noisy one and start charging conversational turns for background writes.
+    """
+    mt = newest_action_mtime(repo) if now_mtime is None else now_mtime
+    return mt > _ts_epoch(row.get("ts"))
+
+
 def pair_owed(session_id, repo=None, ledger=None, now_mtime=None):
     """(owed, reason_key). Pure enough to test: ledger and the fallback mtime can be injected.
 
@@ -301,8 +318,7 @@ def pair_owed(session_id, repo=None, ledger=None, now_mtime=None):
         if (int(shown.group(2)), int(shown.group(3))) != (sent, replied):
             return True, "ladder-moved"
         return False, "current"
-    mt = newest_action_mtime(repo) if now_mtime is None else now_mtime
-    if mt > _ts_epoch(row.get("ts")):
+    if work_since(row, repo, now_mtime):
         return True, "work-since-pair"
     return False, "current"
 

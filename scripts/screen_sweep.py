@@ -153,10 +153,28 @@ def canon(name):
 # Three-letter canon keys that are common English function words, not companies. Without this the
 # widened parser (comma/colon tail-harvest) would turn a reason-phrase word into a blocked key and
 # wrongly hide any company whose name canonizes to it. Kept deliberately small: only pure noise words,
-# never a plausible short brand (UKG, OKX, FIS, CNA, JLL stay in the pool of real 3-letter names).
+# never a plausible short brand (QZT, VBN, KRP, DWL, MFG stay in the pool of real 3-letter names).
 STOP3 = {"all", "and", "not", "new", "the", "for", "was", "are", "its", "our", "out", "you",
          "has", "per", "pre", "non", "two", "via", "ice", "who", "why", "how", "inc", "llc",
          "ltd", "usa", "www", "com", "org"}
+
+
+# ── PARSE ONCE PER FILE STATE ─────────────────────────────────────────────────────────────────
+#
+# 📊 Every reader of the blocked set comes through here, once per candidate, and each call re-read
+# and re-parsed the whole list. On the maintainer's tree a profile put 54 of 61 seconds inside this
+# one function: 664 calls in a single briefing, 232 million function calls and 22.8 million regex
+# substitutions, to answer 664 questions about a file that never changed between them.
+#
+# ⛔ KEYED ON (path, mtime, size), NOT a bare lru_cache. The blocked list IS written inside a
+# session when a screening run records a drop, and a cache blind to that would answer "not blocked"
+# for a company blocked moments earlier. That turns a speedup into a screening defect, which is the
+# one direction this file is not allowed to fail in.
+#
+# ⚖️ mtime+size rather than a content hash: hashing the file on every call would re-read the very
+# bytes this exists to stop re-reading. A same-second write that preserves byte length is the known
+# blind spot, and it is narrow enough to accept for a file only ever appended to.
+_BLOCKED_KEYS_CACHE = {}
 
 
 def blocked_keys_from_list(path=None):
@@ -173,6 +191,16 @@ def blocked_keys_from_list(path=None):
     missing, so a fresh install banks rather than crashing.
     """
     path = path or os.path.join(REPO, "documents/blocked-employers-list.md")
+    # ⛔ realpath, because the raw path STRING is not a file identity. Two different strings can
+    # name the same file, and caching under both would parse it twice for no gain.
+    path = os.path.realpath(path)
+    try:
+        _st = os.stat(path)
+        _stamp = (path, _st.st_mtime_ns, _st.st_ctime_ns, _st.st_size)
+    except OSError:
+        _stamp = None                      # missing file: fall through to the empty-set path below
+    if _stamp is not None and _stamp in _BLOCKED_KEYS_CACHE:
+        return _BLOCKED_KEYS_CACHE[_stamp]
     try:
         blocked_raw = open(path, encoding="utf-8", errors="ignore").read().lower()
     except Exception:
@@ -181,7 +209,7 @@ def blocked_keys_from_list(path=None):
     # and the file writes blocked names in three more shapes that were all silently missed:
     #   - COMMA LIST as the head:      "- SomeCo, Otherco, Thirdco"
     #   - MIDDOT LIST, colon or not:   "- **Filter 2, defense:** Scale AI · C3.ai"
-    #                                  "- Notable Health (13 of 16 SF) · OpenEvidence (8 SF)"
+    #                                  "- SomeCo (13 of 16 SF) · Otherco (8 SF)"
     #   - MARKDOWN TABLE ROW:          "| Rad AI | All 3 product seats SF-only | 1 |"
     # Splitting on · FIRST and then taking each segment's head is what generalizes across all of
     # them. Every candidate is still length-capped and reason-word filtered, because the cost of
@@ -202,8 +230,8 @@ def blocked_keys_from_list(path=None):
             # ⬇️ FLOOR is len>=3, not >3. A `3 < len(k)` floor silently drops every three-letter
             # company from the blocked set, so a blocked three-letter name keeps surfacing in the
             # ranker's banked_topup even though it was blocked. Longer names are never affected,
-            # which is why the bug hides. Three-letter names are a real class (UKG, OKX, 8x8, CNA,
-            # JLL, FIS). STOP3 guards the handful of common function words that the comma/colon
+            # which is why the bug hides. Three-letter names are a real class (QZT, VBN, 7x7, DWL,
+            # MFG, KRP). STOP3 guards the handful of common function words that the comma/colon
             # tail-harvest would otherwise turn into keys that wrongly hide a real company (a false
             # BLOCK hides a good target, the costlier error).
             if 2 < len(k) <= 40 and k not in STOP3:
@@ -239,6 +267,10 @@ def blocked_keys_from_list(path=None):
             cands += [p for c in list(cands) for p in re.split(r"\s*,\s*", c) if p.strip()]
             for cand in cands:
                 _add(cand, keys)
+    if _stamp is not None:
+        if len(_BLOCKED_KEYS_CACHE) > 8:
+            _BLOCKED_KEYS_CACHE.clear()
+        _BLOCKED_KEYS_CACHE[_stamp] = keys
     return keys
 
 
