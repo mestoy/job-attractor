@@ -35,6 +35,56 @@ The pipeline screens every company against this, in order. Fill in your own rule
 
 ---
 
+## 9. Cadence and targets
+
+⚙️ **THE OPERATING CADENCE IS 3-3-3.** **3 companies, 3 people, 3 messages, every day, on a
+never-ending loop.** Adopted from Andrew LaCivita's method.
+
+⭐ **The daily unit of work is messages SENT, not companies eliminated.** That distinction is the
+whole rule. A day spent screening thirty companies and sending nothing is a day the loop did not
+run. If a day produces 3 real messages it was a good day.
+
+⛔ **3 is a FLOOR, never a cap.** Hitting 3 does not end the day.
+
+### Why a small number, when more feels better
+
+This replaces three contradictory volume figures the reference workspace used to carry: a 3-4/day
+pacing cap, ~10 outreach/day, and 50/day. They never reconciled, actual throughput ran about
+15.9/day, and **the two highest-volume days were the days the method got skipped under pressure.**
+Volume bent the method instead of the method bending volume.
+
+⚖️ **Quality gates volume: fewer researched messages beat many generic ones.** A cold boss-hunt
+message needs a sourced accomplishment and a live-verified role, and that research does not
+compress. Three of those beat fifteen that skipped it.
+
+### What you will see on screen
+
+`scripts/pair_brief.py` computes this every session and prints a line like:
+
+```
+LADDER 2026-08-09 · sent 375 · replied 61 · rate 16.3% · 3-3-3 1/3
+```
+
+The trailing `1/3` is today's message count against the floor. `scripts/check_pair.py` enforces that
+the line is present and recomputed rather than carried forward from an earlier message, because a
+stale count is worse than none.
+
+⚠️ **The count only sees what reaches `documents/send-log.jsonl`.** `mail-draft.sh` writes that log
+itself; a LinkedIn message does not, so log it with `scripts/log_linkedin_send.py` or the day's count,
+your reply rate and the burned-target guard all read low.
+
+### Queue depth is a different axis
+
+**Target queue depth = 50 approval-pending matches; run discovery continuously while below 50.**
+That is an inventory goal for prepared, unsent matches. It is not a send target and it never gates
+surfacing. Depth is how much is ready; 3-3-3 is how much goes out.
+
+### Adjust it deliberately, not by drifting
+
+The number is a method, not a law of nature. Raise or lower it on purpose, in this file, and say why.
+⛔ What is not allowed is letting a busy day quietly redefine it, which is the failure the three
+deleted figures above came from.
+
 ## Session refinements — 2026-07-18 (generic; mirrored from the reference workspace)
 
 - **Close the "common gaps" BEFORE surfacing — present a DECISION, not a verify-list.** When a prospect has the recurring gaps (no confirmed live role, remote/travel unverified, comp unknown, boss/email unconfirmed), RESEARCH and RESOLVE them at the gate before the candidate sees a card. Verify a live role + comp + reporting via the company's **live ATS API** (Greenhouse `boards-api.greenhouse.io/v1/boards/<token>/jobs`, Ashby `api.ashbyhq.com/posting-api/job-board/<token>?includeCompensation=true`, Lever) — NOT stale aggregators/web-search. Verify remote + travel/offsite from the JD + careers page. Then present a one-word verdict (SEND / DROP / RADAR / PREP) with only the one genuine human-call left. Unreachable fact → mark UNVERIFIED, never a passed-off task.

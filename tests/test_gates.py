@@ -4900,6 +4900,41 @@ class TestEmployerRegistryUpgradePath(unittest.TestCase):
         self.assertFalse(self.employers.is_blocked("Zenith Labs"))
 
     # ── 4. THE SWITCH ITSELF ─────────────────────────────────────────────────────────────────
+    def test_a_renamed_company_is_blocked_under_BOTH_names_end_to_end(self):
+        """⛔ THE KIT'S OWN SEEDER AND THE KIT'S OWN GATE, driven together (2026-08-09).
+
+        A blocked employer's other name, announced on its row, used to be captured nowhere, so the
+        company was blocked under one name and walked straight through under the other. The failure
+        direction is silent admission: a company you declined is re-offered with nothing printed.
+
+        ⛔ THE RELOAD DISCIPLINE IS THE TEST'S FOUNDATION, not boilerplate. `seed_employers` and
+        `registry_equivalence` bind their REPO/SRC at IMPORT, exactly like `employers` does, and
+        Python caches modules by bare name. Without reloading BOTH after CLAUDE_PROJECT_DIR is set,
+        this test parses the real installed blocked list instead of the fixture below and proves
+        nothing about the fixture at all.
+        """
+        import importlib
+        se = importlib.reload(importlib.import_module("seed_employers"))
+        rq = importlib.reload(importlib.import_module("registry_equivalence"))
+        try:
+            with open(self.blocked, "w", encoding="utf-8") as fh:
+                fh.write("# Blocked employers\n\n"
+                         "- **Acme Corp (now Bravo Dynamics)** (blocked 2026-01-04, filter 8): "
+                         "acquired at a >$3B valuation\n")
+            se.main()
+            self.employers._CACHE.clear()
+            self.assertTrue(self.employers.is_blocked("Acme Corp"), "the declared name must block")
+            self.assertTrue(self.employers.is_blocked("Bravo Dynamics"),
+                            "the renamed company must block too, or it walks through under its "
+                            "current name while the old one is blocked")
+            # And the gate must still certify the store it just produced: the seeder and the gate
+            # share ONE definition of a name position, so a rename alias is traceable by construction.
+            self.assertEqual(rq.untraceable_blocked(), [],
+                             "every blocked key must trace to a name position the seeder can produce")
+        finally:
+            importlib.reload(importlib.import_module("seed_employers"))
+            importlib.reload(importlib.import_module("registry_equivalence"))
+
     def test_available_is_false_without_a_registry_and_true_with_one(self):
         self.assertFalse(self.employers.available())
         with open(self.registry, "w", encoding="utf-8") as fh:

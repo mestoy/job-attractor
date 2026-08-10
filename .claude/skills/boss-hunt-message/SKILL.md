@@ -32,7 +32,7 @@ Offer 3 distinct drafted options, name a recommended pick with the reasoning, an
 
 ## Review package — get EVERYTHING ready before any send (you inspect first)
 Every outreach = **two artifacts, both made review-ready before anything leaves your machine:**
-1. **The outreach email draft** (To / Subject / Body); when you say go, opened prefilled in your mail client (via a `mailto:` link that your OS hands to your default mail app).
+1. **The outreach email draft** (To / Subject / Body); when you say go, built by `scripts/mail-draft.sh` as a visible draft in your mail client with the résumé attached. That script is the path because it lints the body, runs the dedup check and writes the send log; a draft made any other way has passed none of those. See the `outreach-send-prep` skill.
 2. **A company-tailored résumé**, built and **opened for your inspection before you attach it.** Pick a consistent naming convention and keep to it, e.g. **`<Your Name> - Resume - <Company>.pdf`**, and keep your build source (LaTeX/docx) separate from the attachable copy.
 
 **Sequence:** draft email → build + name + open the tailored résumé → review both → edit/approve → *you* attach the résumé and send. The skill gets it ready; you hit send.

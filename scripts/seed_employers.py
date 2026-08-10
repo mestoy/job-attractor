@@ -310,6 +310,87 @@ def alias_parts(name):
             continue
         (aliases if len(k) >= ALIAS_MIN else parked).append(part)
     return aliases, parked
+# ── RENAME ALIASES ───────────────────────────────────────────────────────────────────────────
+#
+# WHY (2026-08-09). A blocked employer's FORMER or CURRENT alternate name, announced on its own row,
+# was captured nowhere, so the company was blocked under one name and walked through under the
+# other. `_head_names()` cuts the head at the first `(`, so everything a parenthetical says about
+# identity was discarded before any alias code ran.
+#
+# 📊 REALIZED, NOT THEORETICAL. a row of the shape blocked-employers-list.md (a `(now X)` row).
+# The parent was blocked; the renamed company had no entity and `is_blocked()` returned
+# False; and the renamed company appeared in 14 separate sweep files across three weeks. It never reached the board, so a later gate happened to catch it. That
+# is containment by accident, not a gate.
+#
+# ⭐ Found by running this pipeline on a second machine with a different blocked list, which is the
+# only way this class surfaces: an install satisfies its own assumptions by construction.
+#
+# ⛔ CASE-INSENSITIVITY IS SCOPED TO THE MARKER TOKEN, NEVER THE CAPTURE, and that is not a style
+# choice. An `re.I` over the whole pattern was MEASURED letting `at Harness` into a capture: with the
+# capture case-folded, `[A-Z]` stops meaning "a proper noun" and the run swallows ordinary words.
+#
+# ⛔ MARKERS DELIBERATELY EXCLUDED, each with its receipt from the live file. All three name a
+# COUNTERPARTY rather than another name for this row's entity, so aliasing them would block a
+# different company on this row's ruling:
+#   · `merged into/with X`   → Anthology, Contentsquare, Songbird, Valeris
+#   · `rebranded to X`       → the one live instance is one live instance, whose bullet DISPROVES it
+#                              ("certify.com redirects to Emburse, unrelated")
+#   · `rebranding it 'X'`    → one live instance is the new name of Cardknox's PARENT
+#   · `resolves to X`        → recorded, not harvested: `AmerisourceBergen` and `CRC Group` stay
+#                              unblocked. Under-block, logged rather than guessed at.
+_TOK = r"(?:[A-Z][A-Za-z0-9&.'’\-]*|\d+[A-Za-z][A-Za-z0-9&.'’\-]*)"
+_RUN = rf"{_TOK}(?:\s+{_TOK})*"
+_LTOK = r"[A-Z][A-Za-z&.'’\-]*"
+RENAME_FORMS = (
+    re.compile(rf"\b(?i:formerly|fka|dba|rebranded\s+from)\s+({_RUN})"),
+    # Paren-anchored ON PURPOSE: bare "now" is one of the commonest words in the reason prose, and
+    # unanchored it captured "~19 ppl" and "serves on its Board of Directors".
+    re.compile(rf"\((?i:\s*now)\s+({_RUN})"),
+    # Prose form. Some rows announce a rename in PROSE ("OldName rebrand") rather than in a
+    # parenthetical, and this is the only form that reaches those. Directionally blind by nature, so the self guard below is what makes it safe.
+    re.compile(rf"\b({_LTOK}(?:\s+{_LTOK})*)\s+rebrand\b"),
+)
+RENAME_MAX_WORDS = 5
+RENAME_MAX_CHARS = 44
+
+
+def rename_aliases(text, own_keys=frozenset()):
+    """(kept, parked) alias display strings declared by a rename marker on ONE source line.
+
+    Pure, no I/O, so the seeder, the gate and the tests all drive the identical rule. That shared
+    single definition is the whole point: `registry_equivalence` decides whether a blocked key is
+    traceable to a name position, and if it held a SECOND copy of this rule the two would drift and
+    the gate would start failing correct data (or, worse, passing junk).
+
+    ⛔ `own_keys` IS THE SELF GUARD AND IT IS LOAD-BEARING. `a self-narrating row` reads "...still private through
+    the 2025 NewName rebrand", where `NewName` is the row's OWN CURRENT NAME narrating its own
+    rebrand, not a former name. The prose form cannot tell "X rebrand" (X = the new name) from
+    "formerly X" (X = the old one); rejecting a capture that canons to a name this row already
+    declares is what separates them.
+
+    ⚖️ RESIDUAL RISK, stated rather than hidden: a bullet narrating ANOTHER entity's rebrand in its
+    reason text would alias that entity onto this row. That direction is OVER-block, which is
+    visible on the board and in `why()`. The direction this function exists to close is
+    silent UNDER-block. The asymmetry is deliberate.
+    """
+    kept, parked = [], []
+    seen = set()
+    for form in RENAME_FORMS:
+        for m in form.finditer(text or ""):
+            cand = (m.group(1) or "").strip(" *_`~:,.")
+            if not cand or len(cand) > RENAME_MAX_CHARS or len(cand.split()) > RENAME_MAX_WORDS:
+                continue
+            k = canon(cand)
+            # A canon with no letters is a date or a money figure, never an employer.
+            if not k or not re.search(r"[a-z]", k) or k in seen:
+                continue
+            if k in own_keys:                      # self-narration, see the docstring
+                continue
+            seen.add(k)
+            # Same floor as alias_parts, for the same reason: a three-character alias is a skeleton
+            # key. `GPS` (a 3-char row) parks here rather than making `gps` blocked.
+            (kept if len(k) >= ALIAS_MIN else parked).append(cand)
+    return kept, parked
 
 
 # ── PROVENANCE, CARRIED FROM THE STORE THAT OWNS IT ─────────────────────────────────────────────
@@ -425,6 +506,33 @@ def scan():
         else:
             names = _head_names(s, bold_line=s.startswith("**"))
         d = DATE.search(s)
+        # ── RENAME CAPTURES, attributed by how many entities this line declares ───────────────
+        # ⛔ ATTRIBUTION IS THE RISK, not extraction. A rename marker says "this entity is also
+        # called X", and on a middot line declaring six companies there is no way to know WHICH one
+        # it means. Guessing would alias a name onto the wrong employer and block a company on
+        # another company's ruling, which is the exact false-block class the registry exists to
+        # abolish. So: one declared name → attribute; more than one → park every capture with its
+        # source line, visible and not blocking; zero → harvest nothing.
+        # 📊 Measured: zero live lines hit the multi-entity branch, so its only coverage is a
+        # fabricated test fixture, and the test says so.
+        _rn_kept, _rn_parked = [], []
+        if len(names) == 1:
+            _own = {canon(names[0])} | {canon(a) for a in alias_parts(names[0])[0]}
+            _rn_kept, _rn_parked = rename_aliases(s, _own)
+        elif len(names) > 1:
+            _amb, _amb_parked = rename_aliases(s)
+            for _p in _amb + _amb_parked:
+                parked_aliases.append({
+                    "key": canon(_p), "display": _p,
+                    "reason": "rename marker on a multi-entity line, attribution ambiguous",
+                    "parent": canon(names[0]), "source": f"blocked-employers-list.md:{i}",
+                })
+        for _p in _rn_parked:
+            parked_aliases.append({
+                "key": canon(_p), "display": _p, "reason": "rename alias under 4 chars",
+                "parent": canon(names[0]), "source": f"blocked-employers-list.md:{i}",
+            })
+
         for name in names:
             k = canon(name)
             if not k or len(k) < 2:
@@ -433,6 +541,9 @@ def scan():
             # harvesting their names is how documenting an exception creates the thing it excepted.
             status = "cleared" if exonerated else "blocked"
             _al, _parked = alias_parts(name)
+            # Rename captures join the slash/comma parts. Only reachable when this line declared
+            # exactly ONE entity, so `_rn_kept` is empty on every multi-entity line by construction.
+            _al = _al + [a for a in _rn_kept if canon(a) != k and canon(a) not in {canon(x) for x in _al}]
             for _p in _parked:
                 parked_aliases.append({
                     "key": canon(_p), "display": _p, "reason": "alias part under 4 chars",
@@ -507,7 +618,8 @@ def main():
     for pa in parked_aliases:
         queue.append({
             "key": pa["key"], "status": "unresolved",
-            "why": f"alias part of {pa['parent']} but under {ALIAS_MIN} chars, too short to alias",
+            "why": f"{pa.get('reason') or f'alias part under {ALIAS_MIN} chars, too short to alias'} "
+                   f"(parent: {pa['parent']})",
             "display": pa["display"], "parent": pa["parent"],
             "src_line": int(pa["source"].rsplit(":", 1)[1]),
             "context": None,
@@ -521,6 +633,17 @@ def main():
     print(f"old harvest       : {len(harvested):,}  -> registry is "
           f"{len(harvested)-len(declared):,} smaller")
     print(f"  digit debris    : {len(debris):,}  DISCARDED (salary fragments, reported not hidden)")
+    # ⛔ THE NAMES, NOT JUST THE COUNT (2026-08-09). This line claimed "reported not hidden" while
+    # printing a bare number, and a number is not a report. A digit-bearing key that is a REAL
+    # employer (8x8, 37signals, E2open, 1Password) would be discarded here and appear to the reader
+    # as one increment. Confirming the current set was all noise took four filtering passes and a
+    # targeted search for known digit-named companies; nobody does that from a count.
+    # ⚠️ FULL LIST, NEVER A SAMPLE. A truncated list re-creates the exact problem: the one name that
+    # matters is the one past the cutoff. Reported from a second install.
+    if debris:
+        _d = sorted(debris)
+        for _j in range(0, len(_d), 6):
+            print("                    " + " · ".join(_d[_j:_j + 6]))
     _prov_matched, _prov_alias = attach_provenance(entities)
     _alias_ct = sum(len(r["aliases"]) for r in entities.values())
     print(f"  aliases           : {_alias_ct:,}  (A/B and A, B, C parts resolved onto the same row)")

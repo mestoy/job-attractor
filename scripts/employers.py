@@ -176,6 +176,17 @@ def why(name):
     return {"entity": row, "notes": notes}
 
 
+# ⛔ NEVER HAND-EDIT THE REGISTRY TO ADD AN ALIAS FOR AN UNMARKED RENAME. FIX THE PROSE.
+# Reported from a partner install 2026-08-09, and it is doubly unsafe:
+#   1. the registry is a DERIVED artifact, so a hand-added alias is ERASED by the next reseed, and
+#   2. it has no name position in the source list, so `registry_equivalence.untraceable_blocked()`
+#      reports it as a phantom block and step [28] goes RED.
+# That is the gate working. A blocked key with no traceable origin has no defensible reason to be
+# blocking anybody, and a hand alias for a rename the prose never announced is exactly that.
+# ✅ THE FIX IS ALWAYS UPSTREAM: mark the rename in the blocked list itself, e.g.
+# `- **NewName (now OldName)** ...` or `(formerly OldName)`, then reseed. The harvester derives the
+# alias traceably and it survives every future reseed.
+
 def declare_blocked(rows, path=None):
     """Append newly-blocked entities to the registry. Returns the number actually written.
 

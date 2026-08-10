@@ -167,31 +167,58 @@ def untraceable_blocked():
     but a key that traces to NOTHING has no defensible reason to be blocking anybody.
     """
     try:
-        se = _import_sibling("seed_employers")
-        canon = _import_sibling("screen_sweep").canon
         raw = open(SRC, encoding="utf-8", errors="ignore").read().split("\n")
-        namepos = set()
-        for line in raw:
-            t = line.strip()
-            if not t.startswith(("-", "*", "|")):
-                continue
-            cells = [c.strip() for c in t.strip("|").split("|")] if t.startswith("|") else [t]
-            # ⚠️ THE SAME bold_line FLAG THE SEEDER USES. Without it this reader would treat a bold
-            # LABEL as a name position, so a label-derived key would trace to "a name position" and
-            # the invariant would pass on a key the seeder no longer produces. A check measured
-            # against a wider surface than the thing it checks is the proxy defect again.
-            for nm in se._head_names(cells[0], bold_line=cells[0].startswith("**")):
-                k = canon(nm)
-                if k:
-                    namepos.add(k)
-                for a in se.alias_parts(nm)[0]:
-                    ak = canon(a)
-                    if ak:
-                        namepos.add(ak)
-        return sorted(registry_blocked() - namepos)
-    except Exception as e:                       # pragma: no cover - degraded path
+    except OSError as e:                         # pragma: no cover - degraded path
         print(f"[!] could not read the source list ({e})", file=sys.stderr)
         return []
+
+    # ⛔ NO EXCEPTION IS CAUGHT BELOW THIS LINE, AND THAT IS THE POINT (2026-08-09).
+    #
+    # This whole body used to sit inside `except Exception: return []`. Returning an EMPTY list on
+    # any failure means "zero untraceable keys", so `invariants()` PASSED UNCONDITIONALLY. Any bug
+    # in the harvest, a `re.error`, an AttributeError from a typo, a syntax error in seed_employers,
+    # silently converted the strongest claim this gate makes into a permanent green light, with one
+    # stderr line as the only evidence.
+    #
+    # ⚖️ A SILENTLY GREEN GATE IS WORSE THAN A RED ONE. A red gate stops you; a green one certifies
+    # a screening authority nobody checked. Only the file read above is a legitimate degradation
+    # (no source list yet is a real state on a fresh install). Everything below is this kit's own
+    # code, and this kit's code failing must be loud.
+    se = _import_sibling("seed_employers")
+    canon = _import_sibling("screen_sweep").canon
+    namepos = set()
+    for line in raw:
+        t = line.strip()
+        if not t.startswith(("-", "*", "|")):
+            continue
+        cells = [c.strip() for c in t.strip("|").split("|")] if t.startswith("|") else [t]
+        # ⚠️ THE SAME bold_line FLAG THE SEEDER USES. Without it this reader would treat a bold
+        # LABEL as a name position, so a label-derived key would trace to "a name position" and
+        # the invariant would pass on a key the seeder no longer produces. A check measured
+        # against a wider surface than the thing it checks is the proxy defect again.
+        names = se._head_names(cells[0], bold_line=cells[0].startswith("**"))
+        for nm in names:
+            k = canon(nm)
+            if k:
+                namepos.add(k)
+            for a in se.alias_parts(nm)[0]:
+                ak = canon(a)
+                if ak:
+                    namepos.add(ak)
+        # ── RENAME ALIASES, in EXACT lockstep with what the seeder can actually produce ───────
+        # Single-name lines only, KEPT captures only. Parked captures and every capture on a
+        # multi-entity line are excluded, because the seeder never aliases those either. A gate
+        # that harvests MORE than the seeder produces would wave through keys the seeder cannot
+        # justify. ⚖️ Accepted: namepos is a flat set of canon strings, not (key, line) pairs, so
+        # it proves a string appeared as a name position SOMEWHERE. That is why the marker set is
+        # kept as narrow as the evidence supports.
+        if len(names) == 1:
+            own = {canon(names[0])} | {canon(a) for a in se.alias_parts(names[0])[0]}
+            for a in se.rename_aliases(line, own)[0]:
+                ak = canon(a)
+                if ak:
+                    namepos.add(ak)
+    return sorted(registry_blocked() - namepos)
 
 
 def invariants(path=None):
