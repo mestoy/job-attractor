@@ -15,7 +15,7 @@ eval "$(python3 "$HERE/kit_config.py" --sh 2>/dev/null || true)"
 KIT_OWNER_NAME="${KIT_OWNER_NAME:-Your Name}"
 KIT_RESUME_EXAMPLE="${KIT_RESUME_EXAMPLE:-$KIT_OWNER_NAME - Resume - <Company>.pdf}"
 KIT_RULES_DOC="${KIT_RULES_DOC:-documents/WORKFLOW-RULES.md}"
-TO="" BCC="" SUBJECT="" BODYFILE="" ATTACH="" FORCE="" PRAISE_SOURCE="" LACIVITA_CHECK="" PRAISE_PHRASING="" COMPANY="" SEGMENT="" WARM_RUNG="" RUNG="" RUNG_EXPLICIT="" TARGETS="" POST_CONTACT="" NO_RESUME="" MTYPE="outreach" BOSS=""
+TO="" BCC="" SUBJECT="" BODYFILE="" ATTACH="" FORCE="" PRAISE_SOURCE="" LACIVITA_CHECK="" PANEL_CHECK="" RESUME_PANEL_CHECK="" PRAISE_PHRASING="" COMPANY="" SEGMENT="" WARM_RUNG="" RUNG="" RUNG_EXPLICIT="" TARGETS="" POST_CONTACT="" NO_RESUME="" MTYPE="outreach" BOSS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --to) TO="$2"; shift 2;;
@@ -27,6 +27,8 @@ while [ $# -gt 0 ]; do
     --praise-source) PRAISE_SOURCE="$2"; shift 2;;   # REQUIRED: cite the researched SPECIFIC boss accomplishment + source (Andy A2)
     --praise-phrasing) PRAISE_PHRASING="$2"; shift 2;; # REQUIRED: the Stage-2 phrasing YOU PICKED — must appear verbatim in the body
     --lacivita-check) LACIVITA_CHECK="$2"; shift 2;;  # REQUIRED: "pass" — the A1-A10 checklist was run+reported this email
+    --panel-check) PANEL_CHECK="$2"; shift 2;;
+    --resume-panel-check) RESUME_PANEL_CHECK="$2"; shift 2;;  # REQUIRED when a résumé is attached: you READ the résumé panel findings        # REQUIRED on every INITIAL rung: you READ the reviewer-panel findings for THIS body
     --segment) SEGMENT="$2"; shift 2;;                # REQUIRED on cold sends: one of your SEGMENTS slugs (kit_config.SEGMENTS). Andy's hot-zone test.
     --warm) WARM_RUNG="1"; shift;;                    # BACK-COMPAT alias for `--rung warm` (see the profile switch below)
     --rung) RUNG="$2"; RUNG_EXPLICIT=1; shift 2;;     # cold-boss|cold-stranger|warm|referred|event|thank-you|reply|follow-up
@@ -375,6 +377,65 @@ fi
 
 # SEND-TIME conformance tripwire: scrub AI-tells / retired figures / format
 # before building the draft. FAIL blocks unless --force (for a verified false positive).
+# ── THE REVIEWER PANEL RECEIPT, AND IT IS BOUND TO THIS EXACT BODY ────────────────────────────
+#
+# WHY THIS EXISTS. The operating rules have said "3-panel review before finalizing ANY artifact"
+# since July. It was never mechanized, it sits among the résumé rules so it reads as résumé-scoped,
+# and it was skipped on a real message to a real person. A rule that nothing enforces runs when
+# somebody remembers it. The question that surfaced it came from a partner install: "does your
+# install run multiple independent reviewers over the outreach EMAIL itself, beyond the checklist
+# and the linters?" The honest answer was no.
+#
+# ⛔ WHY A HASH AND NOT A FLAG. `--lacivita-check pass` is an assertion: whoever types it is
+# promising the checklist ran. That is honor-system and it can be typed by an agent that did not run
+# it. This receipt cannot: `scripts/review_outreach.py` writes it under the SHA-256 of the body it
+# reviewed, so editing one character of the draft orphans the receipt and the send blocks again.
+# **A panel run on an earlier draft cannot authorize a later one.**
+#
+# ⚖️ SCOPED TO INITIAL OUTREACH, deliberately. Every rung that opens a conversation needs it,
+# including the warm ones, because a bad warm ask costs a relationship rather than a reply. The
+# POST-CONTACT rungs (thank-you, reply, follow-up) are excluded: they answer inside a live thread
+# where the recipient already knows you, and requiring a three-lens panel to send "thank you, that
+# was useful" is the kind of friction that gets a gate bypassed rather than obeyed.
+PANEL_STATE="n/a"
+if [ -z "$POST_CONTACT" ] && [ -f "$HERE/review_outreach.py" ]; then
+  _PANEL_DIR="$(cd "$HERE/.." && pwd)/documents/state/outreach-panels"
+  _BODY_SHA="$(shasum -a 256 "$BODYFILE" 2>/dev/null | cut -d' ' -f1)"
+  _PANEL_FILE="$_PANEL_DIR/${_BODY_SHA}.json"
+  if [ -z "$_BODY_SHA" ]; then
+    echo "⛔ BLOCKED: could not hash the body file, so the panel receipt cannot be verified." >&2; exit 4
+  fi
+  # ⚖️ --force BYPASSES THIS GATE, AND THE BYPASS IS RECORDED. A --force that works on eight gates
+  # and silently not on the ninth is surprising, and surprising escape hatches get worked around
+  # rather than obeyed. ⛔ THE GOAL WAS NEVER TO PREVENT SKIPS, IT WAS TO PREVENT SILENT ONES: the
+  # send-log row carries `panel: forced`, so a forced send stays visible in the record forever.
+  if [ -n "$FORCE" ] && [ ! -f "$_PANEL_FILE" ]; then
+    PANEL_STATE="forced"
+    echo "   ⚠️  reviewer panel BYPASSED by --force. This is recorded as panel:forced in the send log." >&2
+  elif [ ! -f "$_PANEL_FILE" ]; then
+    echo "⛔ BLOCKED: no reviewer-panel receipt for THIS body." >&2
+    echo "   Run:  python3 scripts/review_outreach.py \"$BODYFILE\" --rung \"$RUNG\"" >&2
+    echo "   It runs three independent lenses (RECIPIENT, METHOD, HONESTY+VOICE), shows you the" >&2
+    echo "   findings, and writes a receipt keyed to this body's hash ($_BODY_SHA)." >&2
+    echo "   ⚠️ If you edited the draft after reviewing it, that is exactly what this caught: the" >&2
+    echo "   receipt is bound to the reviewed text, so re-run the panel on the version you are sending." >&2
+    exit 4
+  fi
+  if [ "$PANEL_CHECK" != "pass" ] && [ -n "$FORCE" ]; then
+    PANEL_STATE="forced"
+    echo "   ⚠️  panel receipt present but unread (--panel-check absent); --force recorded it as forced." >&2
+  elif [ "$PANEL_CHECK" != "pass" ]; then
+    echo "⛔ BLOCKED: a panel receipt exists for this body but --panel-check pass was not given." >&2
+    echo "   Read the findings in $_PANEL_FILE, apply what you accept, then pass --panel-check pass." >&2
+    echo "   ⚖️ The receipt proves the panel RAN. This flag is you saying you READ it." >&2
+    exit 4
+  fi
+  if [ "$PANEL_STATE" != "forced" ]; then
+    PANEL_STATE="reviewed"
+    echo "   ✅ reviewer panel: receipt found for this body (${_BODY_SHA:0:12})"
+  fi
+fi
+
 if [ -f "$HERE/check_outreach.py" ]; then
   # --rung/--type matter: holding a warm connector ask to the cold-boss ingredient shape FAILS
   # correct messages, which is the other half of how the warm lane went unused.
@@ -554,14 +615,81 @@ if [ $STATUS -eq 0 ]; then
   case "$RUNG" in
     *) _FUP="none" ;;
   esac
+# ── THE RÉSUMÉ PANEL RECEIPT, BOUND TO THE TEXT LAYER OF THE ATTACHED FILE (2026-08-09) ───────
+#
+# WHY, and it is the SAME rule as the outreach panel rather than a second idea. `WORKFLOW-RULES.md`
+# has carried "3-panel review (CEO/CTO/CPO) before finalizing ANY artifact" since July with nothing
+# enforcing it, and that line sits among the RÉSUMÉ rules. The outreach half was mechanized this
+# earlier. This is the half the rule was literally written next to.
+#
+# ⚖️ IT COMPLEMENTS verify_resume, IT DOES NOT DUPLICATE IT. verify_resume asks mechanical
+# questions: one page, reverse chronological, summary length, retired figures, a clean text layer.
+# Nothing asked whether the résumé is CONVINCING, DEFENSIBLE in the interview it earns, or TARGETED
+# at the role. Those are the three lenses, and no linter can answer them.
+#
+# ⚖️ THE HASH IS OF THE TEXT LAYER, NOT THE FILE BYTES. pdflatex stamps a creation date, so two
+# builds of an unchanged .tex differ in bytes. Hashing bytes would orphan the receipt on every
+# recompile and teach everyone to re-run the panel without reading it, which is how a gate becomes a
+# formality. Measured: two builds of one source share a text-layer hash and differ in bytes; one
+# reworded line moves the text-layer hash. So a content edit still orphans the receipt.
+RESUME_PANEL_STATE="n/a"
+if [ -n "$ATTACH" ] && [ -f "$HERE/review_resume.py" ]; then
+  _RP_DIR="$(cd "$HERE/.." && pwd)/documents/state/resume-panels"
+  # The hash is recomputed from the artifact rather than parsed out of `--show`'s human output:
+  # --show prints a receipt when one exists and a sentence when it does not, and a gate that reads
+  # a sentence breaks the day somebody rewords it.
+  _RP_SHA="$(python3 - "$HERE" "$ATTACH" <<'PYRP' 2>/dev/null
+import sys, os
+sys.path.insert(0, sys.argv[1])
+import review_resume as rr
+t = rr.text_layer(sys.argv[2])
+print(rr.artifact_hash(t) if t is not None else "")
+PYRP
+)"
+  if [ -z "$_RP_SHA" ]; then
+    # ⚠️ FAILS OPEN, AND SAYS SO. An attachment whose text layer cannot be read (a scanned PDF, no
+    # pdftotext installed) is not evidence of a skipped review, and blocking a send on a missing
+    # system binary would strand the whole method on one dependency. Loud, never silent.
+    echo "   ⚠️  résumé panel: no text layer could be read from $(basename "$ATTACH"), so the receipt" >&2
+    echo "       could not be checked. Recorded as unreadable, NOT as reviewed." >&2
+    RESUME_PANEL_STATE="unreadable"
+  else
+    _RP_FILE="$_RP_DIR/${_RP_SHA}.json"
+    if [ -n "$FORCE" ] && [ ! -f "$_RP_FILE" ]; then
+      RESUME_PANEL_STATE="forced"
+      echo "   ⚠️  résumé panel BYPASSED by --force. Recorded as resume_panel:forced in the send log." >&2
+    elif [ ! -f "$_RP_FILE" ]; then
+      echo "⛔ BLOCKED: no résumé-panel receipt for THIS résumé." >&2
+      echo "   Run:  python3 scripts/review_resume.py \"$ATTACH\" --company \"$_QA_CO\"" >&2
+      echo "   It runs three independent lenses (CEO, CTO, CPO), shows you the findings, and writes" >&2
+      echo "   a receipt keyed to this résumé's text layer ($_RP_SHA)." >&2
+      echo "   ⚠️ If you edited and rebuilt the résumé after reviewing it, that is what this caught." >&2
+      exit 4
+    fi
+    if [ "$RESUME_PANEL_CHECK" != "pass" ] && [ -n "$FORCE" ]; then
+      RESUME_PANEL_STATE="forced"
+      echo "   ⚠️  résumé receipt present but unread (--resume-panel-check absent); --force recorded it as forced." >&2
+    elif [ "$RESUME_PANEL_CHECK" != "pass" ]; then
+      echo "⛔ BLOCKED: a résumé-panel receipt exists but --resume-panel-check pass was not given." >&2
+      echo "   Read the findings in $_RP_FILE, apply what you accept, then pass --resume-panel-check pass." >&2
+      echo "   ⚖️ The receipt proves the panel RAN. This flag is you saying you READ it." >&2
+      exit 4
+    fi
+    if [ "$RESUME_PANEL_STATE" != "forced" ]; then
+      RESUME_PANEL_STATE="reviewed"
+      echo "   ✅ résumé panel: receipt found for this résumé (${_RP_SHA:0:12})"
+    fi
+  fi
+fi
+
   # SEND-LOG, the machine-readable record. rank_criteria.py reads the `targets` field to burn-track
   # which companies a warm ask already named, so without this the trio generator keeps proposing
   # companies you already asked about.
   _SLOG="$(cd "$HERE/.." && pwd)/documents/send-log.jsonl"
   if [ -d "$(dirname "$_SLOG")" ]; then
-    python3 - "$_SLOG" "${RUNG:-cold-boss}" "$TO" "$_LOG_CO" "$TARGETS" "$SUBJECT" "$_FUP" "$SEGMENT" <<'PYLOG' 2>/dev/null || true
+    python3 - "$_SLOG" "${RUNG:-cold-boss}" "$TO" "$_LOG_CO" "$TARGETS" "$SUBJECT" "$_FUP" "$SEGMENT" "$PANEL_STATE" "${RESUME_PANEL_STATE:-n/a}" <<'PYLOG' 2>/dev/null || true
 import json, sys, datetime, os
-path, rung, to, company, targets, subject, fup, segment = sys.argv[1:9]
+path, rung, to, company, targets, subject, fup, segment, panel, resume_panel = sys.argv[1:11]
 # ⛔ ONE DEFINITION OF THE STATUS THIS FILE WRITES. The row below and the rebuild guard further
 # down must agree, and they are twelve lines apart. A guard that matched a status this script does
 # not write would never fire, and the fix would be present in the file and dead in practice.
@@ -576,7 +704,10 @@ row = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
        "channel": "email", "status": STAGED_STATUS, "rung": rung, "to": to,
        "company": company,
        "targets": ",".join(t.strip() for t in targets.split(",") if t.strip()),
-       "subject": subject, "followup_due": fup, "segment": segment}
+       "subject": subject, "followup_due": fup, "segment": segment,
+       "panel": panel,
+       # the résumé half of the same rule: reviewed | forced | unreadable | n/a
+       "resume_panel": resume_panel}
 # ── ONE ROW PER DRAFT, NOT ONE PER BUILD ──────────────────────────────────────────────────
 # Rebuilding a draft (a corrected attachment, a reworded subject line) used to append a SECOND
 # staged row here while the outreach log's own marker guard correctly deduplicated, so the two
@@ -626,9 +757,23 @@ PYLOG
       # Rung + FOLLOWUP-DUE on the block itself: check_followups.py reads this file, and a SENT
       # block with no FOLLOWUP-DUE token at all is what it flags as un-armed.
       printf '**Rung:** %s | FOLLOWUP-DUE: %s\n' "${RUNG:-cold-boss}" "$_FUP"
+      # ── THE MACHINE-READABLE RECONCILE MARKER (2026-08-10) ────────────────────────────────
+      # ⛔ WHY A MARKER AND NOT PROSE. The narrative already carries the address and the rung, but
+      # in shapes that drift as the log's conventions change: older entries write the address and
+      # no rung, newer ones write the rung and no address. Measured on one real log, the two sets
+      # were DISJOINT, 30 with an address and 81 with a rung and ZERO with both, so
+      # `reconcile_outreach_log.py` could reconstruct nothing and the ladder's denominator stayed
+      # permanently unverifiable. Prose that a human edits is not a schema.
+      #
+      # ⚖️ ONE LINE, WRITTEN ONCE, SURVIVING THE HUMAN EDIT. It goes in the STAGED block because
+      # that is the moment both fields are known for certain, and it is an HTML comment so it stays
+      # invisible in every rendered view and is carried along when the entry is edited into its SENT
+      # form. `subject` is LAST and any `-->` in it is defanged, so a subject can never truncate it.
+      printf '<!-- SENDLOG v1 date=%s rung=%s channel=%s to=%s subject=%s -->\n' \
+        "$_TODAY" "${RUNG:-}" "email" "$TO" "$(printf '%s' "$SUBJECT" | sed 's/--*>/-->/g; s/-->/->/g')"
       [ -z "$TARGETS" ] || printf '**Targets:** %s\n' "$TARGETS"
     } >> "$_OLOG" 2>/dev/null \
-      && echo "   📝 STAGED touch logged to outreach_log.md (company=$_LOG_CO)" || true
+      && echo "   📝 STAGED touch logged to $_OLOG (company=$_LOG_CO)" || true
     if [ -d "$(dirname "$_CLOG")" ]; then
       printf -- '- %s · OUTBOUND (STAGED, not yet sent) · %s → %s · subj: %s\n' \
         "$_TODAY" "$_LOG_CO" "$TO" "$SUBJECT" >> "$_CLOG" 2>/dev/null || true

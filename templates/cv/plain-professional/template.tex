@@ -28,6 +28,14 @@
 
 \pagestyle{empty}
 
+% ⛔ THE UNFILLED SKELETON MUST COMPILE. The [PLACEHOLDER] tokens carry underscores, and a bare `_`
+% is a math subscript in LaTeX, so this file failed with ~95 errors before a single field was
+% filled in — while install.sh tells you to compile it as your smoke test and /add-template
+% requires a test compile before registering. `underscore` makes `_` behave as text; the catcode
+% fallback does the same on an install that lacks the package. Harmless once your real content is
+% in: a resume has no math.
+\IfFileExists{underscore.sty}{\usepackage{underscore}}{\catcode`\_=12\relax}
+
 \begin{document}
 
 % ============================================================
@@ -57,24 +65,28 @@
 
 \noindent\textbf{[COMPANY_1]} \hfill [LOCATION_1] $\cdot$ [DATES_1]\\
 \textit{[TITLE_1]} \hfill \textit{[DOMAIN_TAG_1]}
+% \item{} — the empty group stops LaTeX reading a [BRACKETED] placeholder as the
+    % item's optional LABEL, which silently renders the bullet with no marker.
 \begin{itemize}
-    \item [BULLET_1]
-    \item [BULLET_2]
-    \item [BULLET_3]
+    \item{} [BULLET_1]
+    \item{} [BULLET_2]
+    \item{} [BULLET_3]
 \end{itemize}
 
 \noindent\textbf{[COMPANY_2]} \hfill [LOCATION_2] $\cdot$ [DATES_2]\\
 \textit{[TITLE_2]} \hfill \textit{[DOMAIN_TAG_2]}
 \begin{itemize}
-    \item [BULLET_1]
-    \item [BULLET_2]
+    \item{} [BULLET_1]
+    \item{} [BULLET_2]
 \end{itemize}
 
 % ============================================================
 %     EDUCATION & CERTIFICATIONS
 % ============================================================
 \section*{Education \& Certifications}
-\textbf{[SCHOOL]} --- [DEGREE]\\
+% \newline, not \\: a line break followed by a [BRACKETED] placeholder makes LaTeX read the
+% placeholder as \\'s optional vertical-space argument, and the skeleton fails to compile.
+\textbf{[SCHOOL]} --- [DEGREE]\newline
 [CERTIFICATION], [ISSUING_BODY], [YEAR]
 
 \end{document}

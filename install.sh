@@ -59,8 +59,32 @@ add green-board.md            "# Green Board\n\nVetted, build-ready companies (t
 add BUG-LOG.md            "# 🐞 Bug Log\n\nThe durable record of defects you find in YOUR pipeline. \`pair_brief.py\` READS this file, so an OPEN row surfaces on its own as the LAST picker option, and never as the default.\n\n## ⛔ The pacing rule\n\nBugs and tests never interrupt the 3-3-3 unless you ask for them. The daily unit is 3 messages sent, and deskwork that displaces a send is deskwork. A bug that BLOCKS a send is not bug work, it is the send.\n\n## How a row works\n\n- \`- [ ]\` OPEN, \`- [x]\` FIXED. Only OPEN rows are counted.\n- Severity: 🔴 costs real work, 🟡 wrong output contained, 🟢 cosmetic.\n- Every row names where it was found, what it COST, and the fix. A row with no cost line is a preference, not a bug.\n- Never delete a fixed row. The record that a defect existed is what stops it reappearing.\n\n## OPEN\n\n## FIXED\n"
 add partner-feedback.md       "# Partner Feedback (upstream)\n\nAppend-only. Entries here are defects in the SHIPPED kit that only the maintainer can fix. Format + rules: documents/partner-feedback-protocol.md. Send with: python3 scripts/send_feedback.py\n"
 addroot() { [ -f "$TARGET/$1" ] || printf '%b' "$2" > "$TARGET/$1"; }
-addroot outreach_log.md       "# Outreach Log\n\nOne block per send. For WARM contacts only, arm a follow-up: FOLLOWUP-DUE: YYYY-MM-DD | channel:email | status:armed  (a cold non-reply gets a new target, not a chase)\n\nFor a COLD send, record the decline explicitly: FOLLOWUP-DUE: none\nThe token must be PRESENT. Omitting it entirely makes the send look like an un-armed one and reds the consistency check forever; 'none' records that you decided not to chase.\n"
+# ⛔ THIS SEED DOCUMENTED BEHAVIOR THAT WAS REMOVED (kit issue #17, 2026-08-10). It told every new
+# install that a WARM send arms a follow-up with `status:armed` and a +7 day date. No rung has armed
+# a follow-up since BUG-094 (2026-08-09); `mail-draft.sh`, `log_linkedin_send` and `check_followups`
+# all write and expect `none`. The SEND GATE card was corrected and `install.sh` refreshes that card
+# on every run, so it self-heals. **This text does not**: `addroot` writes only when the file is
+# absent, so the retired instruction sat at the top of the very log the operator reads on every
+# send, permanently, on every install ever made. A register that documents a mechanism which does
+# not exist is the same defect as dead code, and harder to catch, because the next reader trusts it.
+addroot outreach_log.md       "# Outreach Log\n\nOne block per send.\n\n⛔ NO RUNG ARMS A FOLLOW-UP. Every send records FOLLOWUP-DUE: none, warm included. The token must be PRESENT: omitting it makes the send look un-armed by accident, while 'none' records that you decided not to chase.\n\nChasing silence is retired on purpose (LaCivita p.11: you gain far more from reaching out to NEW people than from chasing someone who has not replied). A REPLY, a THANK-YOU and a new contact at the same company are all still fair game, because none of them chases silence. If you want a deliberate bump, you set the date yourself.\n"
 addroot prospect_queue.md     "# Prospect Queue\n\nCompanies awaiting review.\n"
+
+# ⚠️ TWO OUTREACH LOGS IS A REAL STATE AND THE TOOLING ONLY READS ONE (kit issue #17, 2026-08-10).
+# `mail-draft.sh` resolves `_OLOG` to the REPO ROOT copy. An install was found carrying a second
+# `documents/outreach_log.md` holding 329 lines of the operator's own screening narrative, culture
+# verdicts and verbatim sent notes — none of it visible to any script. Nothing created that file and
+# nothing forbids it, which is why it went unnoticed: both files look canonical to a human.
+# ⛔ Report it, never merge or delete it. That content is the operator's and only they know which
+# copy they meant.
+if [ -f "$TARGET/documents/outreach_log.md" ]; then
+  printf '  [!] TWO outreach logs exist, and the tooling reads only ONE:\n'
+  printf '        reads:    %s\n' "$TARGET/outreach_log.md"
+  printf '        IGNORED:  %s  (%s lines)\n' "$TARGET/documents/outreach_log.md" \
+         "$(wc -l < "$TARGET/documents/outreach_log.md" | tr -d ' ')"
+  printf '        Every script writes and reads the first one. Move anything you want the pipeline\n'
+  printf '        to see into it; nothing here will merge them for you.\n'
+fi
 # The tracker is a STORE in check_dup.py, so an absent file is a HARD issue in consistency-check
 # on day one — before you have done anything. That is the worst possible first impression for the
 # Stop hook: it goes red immediately, stays red, and trains you to ignore the one surface that
@@ -110,7 +134,8 @@ fi
 _ref=0
 for _d in HARD-INVARIANTS.md ENFORCEMENT-REGISTER.md workflow-checklist.md apply-checklist.md \
           culture-screen-checklist.md boss-research-checklist.md email-body-checklist.md \
-          resume-build-checklist.md HANDOFF.md MIGRATION-2026-07.md partner-feedback-protocol.md; do
+          resume-build-checklist.md HANDOFF.md MIGRATION-2026-07.md partner-feedback-protocol.md \
+          RECLONE-PROCEDURE.md; do
   [ -f "$TARGET/partner-docs/$_d" ] || continue
   [ -f "$TARGET/documents/$_d" ] || continue          # not installed yet: the seeding above owns it
   cmp -s "$TARGET/partner-docs/$_d" "$TARGET/documents/$_d" && continue
@@ -120,6 +145,50 @@ done
 
 # 3) Search-CLI dependencies (needs bun)
 printf '\n'
+
+# ── PORTAL COVERAGE, MEASURED AGAINST A BASELINE (kit issue #20, 2026-08-10) ─────────────────
+# ⛔ A HEADCOUNT WITH NO MEMORY REPORTS A SHRINK AS HEALTH. This step used to print "[ok] <name>"
+# for whatever it found and nothing else. A partner install recloned on 2026-08-09 lost two
+# operator-generated portals (dice-search, indeed-search) in the process; install.sh then reported
+# "5 ok" and read as a clean run, and the loss surfaced three weeks later only because someone
+# diffed a remote by hand before a force-push.
+#
+# ⚖️ PORTALS ADDED BY `/add-portal` ARE OPERATOR-GENERATED and live in `.agents/skills/`, outside
+# anything the kit ships or tracks. So the kit cannot restore them and must not pretend to; what it
+# CAN do is notice they are gone and say so while the previous copy may still exist somewhere.
+#
+# Enumerated INDEPENDENTLY of bun on purpose: the directories exist whether or not bun does, and
+# conflating "could not install" with "not present" is how the count lies in the other direction.
+_PORTAL_STAMP="$TARGET/documents/state/portals-installed.txt"
+_portals_now="$(ls -d "$TARGET"/.agents/skills/*/ 2>/dev/null | xargs -n1 basename 2>/dev/null | sort)"
+
+if [ -f "$_PORTAL_STAMP" ]; then
+  _missing="$(comm -23 "$_PORTAL_STAMP" <(printf '%s\n' "$_portals_now") 2>/dev/null)"
+  if [ -n "$_missing" ]; then
+    printf '  [!] PORTAL COVERAGE SHRANK since the last install run. These were present before and are gone now:\n'
+    printf '%s\n' "$_missing" | sed 's/^/        • /'
+    printf '        These are YOUR portals (/add-portal output), not kit files, so the kit cannot restore them.\n'
+    printf '        If this followed a reclone or a branch change, the previous copy is probably still on your\n'
+    printf '        old remote or in a stale branch. Recover them BEFORE any force-push.\n'
+    printf '        This warning REPEATS every run until the portals are back, or until you accept the loss\n'
+    printf '        by deleting documents/state/portals-installed.txt.\n'
+  fi
+fi
+# ⛔ NEVER RE-STAMP WHILE SOMETHING IS MISSING (kit issue #22, 2026-08-11). The first version
+# guarded only the TOTAL loss (an empty enumeration) and re-stamped freely otherwise, so a PARTIAL
+# shrink warned once, rewrote the baseline from 7 entries to 6, and went silent forever after. The
+# reporter's words: a check that measures the drop, announces it once, then adopts it as the new
+# truth "has measured it exactly one run's worth." That is #20's own defect with a longer fuse, and
+# the warning scrolls past inside a long install run, so missing it is the expected case.
+#
+# ⚖️ So the baseline only moves FORWARD. It updates when nothing is missing, which still picks up
+# newly added portals, and it is frozen while a loss is outstanding so the warning repeats until the
+# operator resolves it. Accepting the loss is an explicit act: delete the stamp.
+if [ -n "$_portals_now" ] && [ -z "${_missing:-}" ]; then
+  mkdir -p "$(dirname "$_PORTAL_STAMP")"
+  printf '%s\n' "$_portals_now" > "$_PORTAL_STAMP"
+fi
+
 if command -v bun >/dev/null 2>&1; then
   printf '  Installing search-CLI dependencies with bun...\n'
   for d in "$TARGET"/.agents/skills/*/cli; do

@@ -382,6 +382,64 @@ def blocked_keys_from_list(path=None):
     return keys
 
 
+_ATS_TOKEN_RE = [
+    re.compile(r"greenhouse\.io/(?:embed/job_app\?for=)?([A-Za-z0-9_.-]+)/jobs?/", re.I),
+    re.compile(r"job-boards\.greenhouse\.io/([A-Za-z0-9_.-]+)/", re.I),
+    re.compile(r"jobs\.ashbyhq\.com/([A-Za-z0-9_.-]+)", re.I),
+    re.compile(r"hiring\.cafe/jobs/(?:ashby|greenhouse|lever)-([A-Za-z0-9_.-]+?)-[0-9a-f]{8}", re.I),
+    re.compile(r"jobs\.lever\.co/([A-Za-z0-9_.-]+)", re.I),
+]
+
+
+def _register_banked_identity(company, row):
+    """Record the banked company in the state store, with its ATS token as an alias.
+
+    ⚖️ WHY AT BANK TIME. A recorded alias is what lets `state.resolve()` collapse two spellings of
+    one employer, and this is the one moment BOTH spellings are in hand: the display name the sweep
+    captured and the ATS token sitting in the posting URL.
+
+    📊 THE LEAK IT CLOSES. In the tree this shipped from, six already-contacted companies were
+    sitting in the screening queue under variant spellings, and every one was a VARIANT rather than
+    an exact miss: a domain-suffixed name against a bare one, a full legal name against a short one,
+    a brand against an entity name. Exact-key matches: zero. One of them had already received a
+    cold-boss email with a resume attached, three weeks before the board offered it back as fresh.
+
+    ⚠️ WHAT THIS DOES NOT DO, stated so nobody reads more into it. It links the display name to the
+    ATS token. It cannot invent the link to a spelling a HUMAN typed into a send log months earlier,
+    because that string appears nowhere on the posting. Those still need a recorded ruling. This
+    stops the NEXT generation of leaks; it does not retro-fix a spelling nobody wrote down.
+
+    ⛔ FAILS OPEN, always. Identity bookkeeping must never take a sweep down: a store problem costs
+    an alias, while a raise here costs the whole screening run.
+    """
+    try:
+        # ⚠️ `date` is imported inside bank(), not at module scope, so this needs its own import.
+        # Without it the NameError would be swallowed by the fail-open below and this function
+        # would never register anything while looking like it worked. A fail-open that ALWAYS
+        # fails is worse than no feature, because it reports success by staying quiet.
+        from datetime import date as _date
+        import state as _state
+        url = ""
+        for field in ("url", "link", "href", "posting_url"):
+            if row.get(field):
+                url = str(row[field])
+                break
+        token = ""
+        for rx in _ATS_TOKEN_RE:
+            m = rx.search(url)
+            if m:
+                token = m.group(1)
+                break
+        # Only register the token when it is a DIFFERENT spelling. A token equal to the canon of
+        # the display name adds nothing and would grow the payload on every sweep.
+        alias = token if (token and canon(token) and canon(token) != canon(company)) else None
+        _state.register("company", company, alias=alias,
+                        as_of=_date.today().isoformat(),
+                        as_of_source="live:screen_sweep-bank")
+    except Exception:
+        pass
+
+
 def bank(keep, boss_hunt, greenfield, src):
     """Write the survivors to documents/banked-candidates-<date>.md so the RANKER can read them.
 
@@ -413,6 +471,7 @@ def bank(keep, boss_hunt, greenfield, src):
             continue
         seen.add(k)
         names.append(co)
+        _register_banked_identity(co, r)
     if dropped_blocked:
         print(f"\n   ⛔ {len(dropped_blocked)} name-variant(s) of BLOCKED companies caught by "
               f"normalization: {', '.join(dropped_blocked[:6])}")

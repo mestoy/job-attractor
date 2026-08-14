@@ -14,6 +14,7 @@ without deleting the guard it protects is how these come back.
 Run:  python3 tests/test_gates.py        (or: python3 -m unittest discover tests)
 No dependencies beyond the standard library.
 """
+import datetime
 import importlib
 import json
 import os
@@ -414,6 +415,69 @@ class TestChatRulingTargets(unittest.TestCase):
 # gate and still read as a wall of nested clauses. WARN, never FAIL — so a long
 # sentence must surface the advisory, and a short/plain body must stay silent.
 # ─────────────────────────────────────────────────────────────────────────────
+class TestRungGuard(unittest.TestCase):
+    """--rung is validated (filed as kit issue #21, fixed 2026-08-11).
+
+    --type was hardened against unrecognized values on 2026-07-21; --rung, parsed eleven lines
+    away, never was. An unrecognized rung was not an error, it was silently "not warm", so the body
+    got the COLD profile while the type stayed "outreach" and the full first-contact ask block ran.
+    The reporter staged a no-ask reunion note, ran `--rung reunion`, and was told it was missing an
+    ask and a portfolio sign-off. The obvious repair is to add an ask to a note that must not carry
+    one, so the gate would have talked the operator into breaking the rule the gate enforces.
+
+    ⚠️ This suite previously ran check_outreach with NO FLAGS AT ALL, so it could not have caught a
+    flag-parsing regression in either direction.
+    """
+
+    BODY = "Hey, Brian!\n\nI assume you're currently covered in something. How's dad life?\n"
+
+    def _run(self, *args, body=None):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as fh:
+            fh.write(body if body is not None else self.BODY)
+            path = fh.name
+        try:
+            return subprocess.run(
+                [sys.executable, os.path.join(SCRIPTS, "check_outreach.py"), path, *args],
+                capture_output=True, text=True)
+        finally:
+            os.unlink(path)
+
+    def test_unknown_rung_is_a_usage_error(self):
+        """Exit 2 so mail-draft BLOCKS, matching the --type sibling. Exit 1 would be a lint FAIL,
+        which is the confident wrong answer this replaces."""
+        res = self._run("--rung", "warmm")
+        self.assertEqual(res.returncode, 2, res.stdout)
+        self.assertIn("unknown --rung 'warmm'", res.stdout)
+
+    def test_the_reunion_mixup_names_the_repair(self):
+        """The reported case, both halves: the refusal must NAME --type reunion, and that named
+        repair must actually pass, or the error sends the operator nowhere."""
+        bad = self._run("--rung", "reunion")
+        self.assertEqual(bad.returncode, 2, bad.stdout)
+        self.assertIn("--type reunion", bad.stdout)
+        self.assertNotIn("ingredient", bad.stdout)
+        good = self._run("--type", "reunion", "--rung", "warm")
+        self.assertEqual(good.returncode, 0, good.stdout)
+
+    def test_every_known_rung_and_a_bare_run_are_accepted(self):
+        """A gate that blocks a legitimate send is worse than the bug. The bare run matters most
+        here: the checklists in this kit tell the operator to run the linter with no flags."""
+        for rung in sorted(check_outreach.KNOWN_RUNGS) + ["followup", "thankyou"]:
+            with self.subTest(rung=rung):
+                res = self._run("--rung", rung)
+                self.assertNotEqual(res.returncode, 2, f"{rung} refused: {res.stdout}")
+        self.assertNotEqual(self._run().returncode, 2)
+
+    def test_the_rung_vocabulary_has_not_forked_from_the_logger(self):
+        """KNOWN_RUNGS is typed in check_outreach rather than imported, so this is what stops it
+        drifting. The one-word difference is DELIBERATE: a reunion is a message TYPE in the linter
+        and a real rung in the logger, and that divergence IS the fix."""
+        lls = importlib.import_module("log_linkedin_send")
+        self.assertEqual(set(check_outreach.KNOWN_RUNGS), set(lls.RUNGS) - {"reunion"},
+                         "rung vocabulary forked between check_outreach and log_linkedin_send")
+        self.assertLessEqual(set(check_outreach.WARM_RUNGS), set(check_outreach.KNOWN_RUNGS))
+
+
 class TestCadenceWarn(unittest.TestCase):
     def _run(self, body):
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as fh:
@@ -548,6 +612,32 @@ class TestRung12ZeroAskExemption(unittest.TestCase):
         with open(os.path.join(self.tmp.name, "documents", "state", "contact.jsonl"),
                   "w", encoding="utf-8") as fh:
             fh.write(json.dumps({"kind": "contact", "payload": {"name": name}}) + "\n")
+        # ⭐ FOURTH CONDITION, added 2026-08-11: a CONTACT SCORECARD must have been shown for that
+        # person before any co-creation picker opens. Seeded here because every test in this class
+        # is about the OTHER three conditions; `test_no_card_shown_blocks` covers this one alone.
+        self._show_card(name)
+
+    def _show_card(self, name="Jane Doe"):
+        import datetime as _dt
+        with open(os.path.join(self.tmp.name, "documents", "state",
+                               "contact-cards-shown.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"kind": "contact-card-shown", "name": name,
+                                 "ts": _dt.datetime.now(_dt.timezone.utc).isoformat()}) + "\n")
+
+    def test_no_card_shown_blocks_even_when_every_other_condition_holds(self):
+        """⭐ THE 2026-08-11 RULING. Recorded 1st-degree contact, clean zero-ask text, correct
+        marker, and the exemption must STILL refuse, because the owner was never shown who this
+        person is. The exemption was right about authorization and wrong about information."""
+        import importlib
+        cp = importlib.import_module("check_preview")
+        with open(os.path.join(self.tmp.name, "documents", "state", "contact.jsonl"),
+                  "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"kind": "contact", "payload": {"name": "Jane Doe"}}) + "\n")
+        ti = {"questions": [{"question": "RUNG12: Jane Doe. Which opener?", "header": "n",
+                             "options": [{"label": "a", "description": "d",
+                                          "preview": "Hi, Jane! Small world. Would love to connect."}]}]}
+        self.assertFalse(cp._is_rung12_zero_ask_note(ti),
+                         "no card was shown, so the exemption must not open")
 
     def _seed_connections_csv(self, name="Jane Doe"):
         d = os.path.join(self.tmp.name, "documents", "linkedin-exports")
@@ -570,6 +660,7 @@ class TestRung12ZeroAskExemption(unittest.TestCase):
     def test_connection_proven_by_csv_export_is_exempt(self):
         """1st-degree is provable by EITHER source; the CSV export alone must satisfy the anchor."""
         self._seed_connections_csv()
+        self._show_card()          # the card precondition is orthogonal to WHICH source proves 1st-degree
         self.assertTrue(check_preview._is_rung12_zero_ask_note(
             self._q("RUNG12: Jane Doe, say hi?")))
 
@@ -1122,14 +1213,60 @@ class TestMailDraftRungProfiles(unittest.TestCase):
             fh.write(f"\n## 2026-01-10 · {company} (Ann Lee) · boss-hunt\n"
                      f"**Rung:** cold-boss | FOLLOWUP-DUE: none\nStatus: sent\n")
 
+    def _seed_panel_receipt(self):
+        """Write the reviewer-panel receipt for the CURRENT body, inside the sandbox.
+
+        ⛔ WHY THE TESTS SEED ONE. `mail-draft.sh` refuses to build an INITIAL outreach without a
+        panel receipt keyed to the SHA-256 of the body. That gate is the point of the mechanism, so
+        these tests satisfy it the way a real send does rather than being exempted from it, exactly
+        as they already pass `--lacivita-check pass`.
+
+        ⚠️ THIS IS NOT A BYPASS. It seeds the receipt for the body AS IT IS RIGHT NOW, so a test
+        that rewrites the body after seeding still blocks, which is the hash-binding the gate exists
+        to prove. A test of the gate ITSELF must not call this.
+        """
+        import hashlib
+        if not os.path.exists(self.body):
+            return
+        with open(self.body, encoding="utf-8") as fh:
+            sha = hashlib.sha256(fh.read().encode("utf-8")).hexdigest()
+        d = os.path.join(self.root, "documents", "state", "outreach-panels")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, f"{sha}.json"), "w", encoding="utf-8") as fh:
+            json.dump({"body_sha256": sha,
+                       "findings": {"recipient": [], "method": [], "honesty_voice": []}}, fh)
+
+    def _seed_resume_receipt(self):
+        """Write the résumé-panel receipt for the CURRENT attachment, by RUNNING production.
+
+        ⛔ Seeded through `review_resume.py` itself rather than by rehashing the file here.
+        `text_layer` shells out to `pdftotext`, so a helper that computed the hash its own way would
+        keep passing on the day production changed how it reads a résumé.
+
+        ⚠️ On a fixture that is not a real PDF the text layer is unreadable, the gate FAILS OPEN and
+        says so, and this seeds nothing. That is production behaviour, not a hole being papered
+        over, and `TestResumePanelGate` below exercises the readable case with a stub that echoes.
+        """
+        rr = os.path.join(self.root, "scripts", "review_resume.py")
+        if not os.path.exists(rr):
+            return
+        env = dict(os.environ, PATH=self.bin + os.pathsep + os.environ.get("PATH", ""),
+                   CLAUDE_PROJECT_DIR=self.root)
+        subprocess.run([sys.executable, rr, self.pdf, "--record",
+                        json.dumps({"ceo": [], "cto": [], "cpo": []})],
+                       capture_output=True, text=True, env=env, cwd=self.root)
+
     def _run(self, *args):
         env = dict(os.environ)
         env["PATH"] = self.bin + os.pathsep + env.get("PATH", "")
         env["CLAUDE_PROJECT_DIR"] = self.root
         env["JOBKIT_LEDGER_KEYFILE"] = self.keyfile
+        self._seed_panel_receipt()
+        self._seed_resume_receipt()
         cmd = ["bash", os.path.join(self.root, "scripts", "mail-draft.sh"),
                "--to", "j@x.com", "--subject", "Reconnecting",
-               "--body-file", self.body, "--attach", self.pdf] + list(args)
+               "--body-file", self.body, "--attach", self.pdf,
+               "--panel-check", "pass", "--resume-panel-check", "pass"] + list(args)
         return subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=self.root)
 
     COLD = ["--praise-source", "https://example.com/post", "--lacivita-check", "pass",
@@ -1251,9 +1388,13 @@ class TestMailDraftRungProfiles(unittest.TestCase):
         self._ruling("anything")
         env = dict(os.environ, PATH=self.bin + os.pathsep + os.environ.get("PATH", ""),
                    CLAUDE_PROJECT_DIR=self.root, JOBKIT_LEDGER_KEYFILE=self.keyfile)
+        # Builds its own argv rather than going through _run(), so it satisfies the reviewer-panel
+        # gate the same way _run() does. The subject here is the ATTACHMENT rule, and a test that
+        # blocked on an unrelated gate would pass its first assertion for the wrong reason.
+        self._seed_panel_receipt()
         base = ["bash", os.path.join(self.root, "scripts", "mail-draft.sh"),
                 "--to", "j@x.com", "--subject", "R", "--body-file", self.body,
-                "--rung", "warm", "--targets", "AlphaCo"]
+                "--rung", "warm", "--targets", "AlphaCo", "--panel-check", "pass"]
         r = subprocess.run(base, capture_output=True, text=True, env=env, cwd=self.root)
         self.assertEqual(4, r.returncode)
         r2 = subprocess.run(base + ["--no-resume"], capture_output=True, text=True,
@@ -2254,12 +2395,31 @@ class TestClosenessTwin(_ClosenessSandbox):
     """The tier -> rung -> sanctioned-ask table, mirrored from the frozen upstream module."""
 
     def test_every_strong_stated_tier_maps_warm_with_strong_bonus(self):
+        """↻ The band string changed 2026-08-11 and the change is the assertion.
+
+        It used to read a flat "warm 5-7", promising two rungs no closeness answer can grant:
+        rung 5 is *they know someone at the target* and rung 6 is *they work at the target*, both
+        facts about where the person SITS. Only rung 7 turns on standing. The label now says so,
+        and the ask names the missing precondition instead of implying it away.
+        """
         for tier in ("worked-together", "know-well", "personal-friend", "classmate"):
             rung, band, ask, bonus, flag = self.cl.rung_for(
                 {"closeness": tier, "source": "stated-by-owner"}, "product-leader")
-            self.assertEqual(("warm", "warm 5-7"), (rung, band), tier)
+            self.assertEqual("warm", rung, tier)
+            self.assertEqual("warm 7 (5-6 if positioned)", band, tier)
             self.assertEqual(self.cl.CLOSENESS_STRONG, bonus, tier)
             self.assertIsNone(flag, tier)
+
+    def test_no_tier_promises_rung_5_or_6_unconditionally(self):
+        """The general form. A closeness tier may name rungs 5-6 only with the condition attached,
+        because a tier can never establish where the other person works."""
+        for tier, spec in self.cl.TIERS.items():
+            band = (spec[1] or "")
+            if "5" in band or "6" in band:
+                self.assertIn("if positioned", band,
+                              f"{tier} advertises rung 5 or 6 with no precondition on it")
+                self.assertIn("position fact", spec[2] or "",
+                              f"{tier} names rungs 5-6 in the band but not in the ask")
 
     def test_know_not_close_is_warm_but_thin_and_never_hire_me(self):
         rung, band, ask, bonus, _ = self.cl.rung_for(
@@ -2268,11 +2428,24 @@ class TestClosenessTwin(_ClosenessSandbox):
         self.assertEqual(self.cl.CLOSENESS_THIN, bonus)
         self.assertIn("NEVER hire-me", ask)
 
-    def test_shared_community_is_rung_10_not_a_warm_ask(self):
+    def test_shared_community_is_the_reduced_rung_7_ask(self):
+        """↻ RE-RULED 2026-08-11; this used to assert rung 10.
+
+        The old reading was that a shared context is where you MET, not a relationship. What
+        reopened it: the same tier was absent from the upstream table, so upstream it fell to the
+        cold floor while here it opened rung 10, and one question had two answers. Settled at Kuya
+        Andy's read — rungs 5 and 6 are situational (they know someone at the target, or they work
+        there), so closeness cannot grant either, and only rung 7 turns on standing. Its ask is
+        built to survive a thin tie: not "vouch for me" but "do you have relationships at these
+        three?" Rung 10 is for someone met briefly with no thread; these contacts wrote real
+        paragraphs.
+        """
         rung, band, ask, bonus, _ = self.cl.rung_for(
             {"closeness": "shared-community", "source": "stated-by-owner"}, "founder-exec")
-        self.assertEqual(("event", "rung 10"), (rung, band))
-        self.assertEqual(self.cl.CLOSENESS_THIN, bonus)
+        self.assertEqual(("warm", "warm 7"), (rung, band))
+        self.assertIn("NEVER hire-me", ask)
+        self.assertEqual(self.cl.CLOSENESS_THIN, bonus,
+                         "the ask opens up; the CONFIDENCE does not. A group tie stays thin.")
 
     def test_best_friend_lapsed_is_reunion_no_ask(self):
         rung, band, ask, bonus, _ = self.cl.rung_for(
@@ -4560,8 +4733,146 @@ class TestLooseNeedleNeverBlocks(unittest.TestCase):
                              f"an English word in prose must not block a first send:\n{out}")
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# G1b — the INDUSTRY must be STATED, not merely free of veto trigger words.
+#
+# The defect both directions guard: G1 only fires when a veto word APPEARS, so a scorecard that
+# never mentions what the company does sailed through it. "No veto term appeared" is not "we
+# screened the industry". The wrongly-quiet direction is the expensive one; the wrongly-fires
+# direction matters too, because a gate that red-flags a properly screened card teaches its reader
+# to ignore it.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+class TestIndustryMustBeStated(unittest.TestCase):
+    # Every screen layer present and clean, so the ONLY variable under test is the industry line.
+    BASE = (
+        "SomeCo — dedup: 🟢 NEW, not on the blocked-list.\n"
+        "remote: fully remote, confirmed on the careers posting (greenhouse listing).\n"
+        "travel: no-travel role, one offsite a year.\n"
+        "politics: apolitical, no political red flag found.\n"
+        "culture: Glassdoor 4.1, WLB 4.0, 88% recommend, senior leadership 3.9, "
+        'verbatim "steady and calm", trend flat.\n'
+        "ownership: bootstrapped.\n"
+        "tag: live — send.\n"
+    )
+
+    def _run(self, text):
+        proc = subprocess.run(
+            [sys.executable, os.path.join(SCRIPTS, "check_screen_gate.py"), "-"],
+            input=text, capture_output=True, text=True)
+        return proc.returncode, proc.stdout
+
+    def test_a_card_silent_on_industry_is_blocked(self):
+        """The wrongly-quiet direction: no veto word appears, and that is not a screen."""
+        code, out = self._run(self.BASE)
+        self.assertEqual(code, 1, f"a card that never says what SomeCo does passed:\n{out}")
+        self.assertIn("INDUSTRY is never stated", out)
+
+    def test_a_card_that_states_the_industry_passes(self):
+        """The wrongly-fires direction: a stated, cleared industry must not be flagged."""
+        code, out = self._run(self.BASE + "INDUSTRY: CLEARED — workflow software for clinics.\n")
+        self.assertEqual(code, 0, f"a properly screened card was blocked:\n{out}")
+        self.assertNotIn("INDUSTRY is never stated", out)
+
+    def test_a_veto_word_still_takes_the_G1_path_not_this_one(self):
+        """G1b must not double-report a card G1 already owns, or the two reasons contradict."""
+        code, out = self._run(self.BASE + "they build targeting systems for defense customers.\n")
+        self.assertEqual(code, 1)
+        self.assertIn("deal-breaker INDUSTRY term", out)
+        self.assertNotIn("INDUSTRY is never stated", out,
+                         "a vetoed card is not an unstated one; only one of the two may fire")
+
+
+class TestIndustryResolution(unittest.TestCase):
+    """The tri-state read. 'unknown' is a real answer, never a failure to compute."""
+
+    def setUp(self):
+        self.mod = importlib.import_module("check_screen_gate")
+
+    def test_a_veto_term_resolves_as_vetoed(self):
+        state, detail = self.mod.industry_resolution("SomeCo Crypto Exchange")
+        self.assertEqual(state, "vetoed")
+        self.assertTrue(detail, "a veto must name what fired")
+
+    def test_a_nondescript_name_is_unknown_not_resolved(self):
+        """⛔ THE WHOLE POINT. A name that says nothing about the industry must not read as clean —
+        that silent upgrade is how an unscreened employer reaches the pool."""
+        state, _detail = self.mod.industry_resolution("Otherco")
+        self.assertNotEqual(state, "resolved",
+                            "a company whose name says nothing was reported as screened")
+        self.assertIn(state, ("unknown", "vetoed"))
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Tie tripwires + the screening queue. Both must fire on an indistinguishable band and stay
+# silent on a genuinely separated one.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+class TestTieTripwiresAndScreeningQueue(unittest.TestCase):
+    def setUp(self):
+        self.rc = importlib.import_module("rank_criteria")
+
+    def _capture(self, fn, *a):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            fn(*a)
+        return buf.getvalue()
+
+    def _rows(self, n, pts, reason, distinct=False):
+        return [{"company": f"SomeCo {i}", "pts": pts,
+                 "reasons": [f"{reason} {i}" if distinct else reason]} for i in range(n)]
+
+    def test_a_tied_band_is_announced(self):
+        out = self._capture(self.rc.print_tie_tripwires,
+                            self._rows(10, 13.0, "WLB n/a (not scored)"), "input order decides")
+        self.assertIn("PLATEAU", out)
+        self.assertIn("TIE RATE", out)
+        self.assertIn("input order decides", out,
+                      "the warning must name what actually decided the order")
+
+    def test_a_separated_ranking_says_nothing(self):
+        """The wrongly-fires direction: distinct scores AND distinct reasons are a real ranking."""
+        rows = [{"company": f"SomeCo {i}", "pts": 50 - i * 7,
+                 "reasons": [f"reason {i}"]} for i in range(6)]
+        self.assertEqual(self._capture(self.rc.print_tie_tripwires, rows, "tiebreak").strip(), "")
+
+    def test_screening_stake_counts_only_what_the_scorer_called_unmeasured(self):
+        stake, owed, veto = self.rc.screening_stake(
+            {"reasons": ["WLB n/a (not scored)", "comp unpublished (not scored)"]})
+        self.assertGreater(stake, 0)
+        self.assertTrue(veto, "WLB is the one missing datum that can VETO")
+        self.assertIn("comp band", owed)
+        self.assertNotIn("%recommend", owed, "a criterion the scorer DID measure is not owed")
+
+    def test_a_fully_measured_row_owes_nothing(self):
+        stake, owed, veto = self.rc.screening_stake(
+            {"reasons": ["WLB 4.1 (9/10)", "88% rec (9/10)", "leadership: clean screen (10/10)",
+                         "comp $200,000 published, clears the target (10/10)"]})
+        self.assertEqual((stake, owed, veto), (0.0, [], False))
+
+    def test_the_queue_refuses_to_invent_an_order_when_every_row_owes_the_same(self):
+        """⛔ A uniform penalty cannot break a tie. Ordering identical rows would be a tiebreak
+        dressed as a verdict, which is the exact mistake this queue exists to stop repeating."""
+        out = self._capture(self.rc.print_screening_queue, self._rows(4, 0.5, "WLB n/a"))
+        self.assertIn("SCREENING QUEUE", out)
+        self.assertIn("no order here to give you", out)
+        self.assertNotIn("pts at stake  SomeCo", out, "it ranked rows it had said were identical")
+
+    def test_the_queue_does_order_rows_that_owe_different_amounts(self):
+        rows = [{"company": "SomeCo", "pts": 1, "reasons": ["WLB n/a"]},
+                {"company": "Otherco", "pts": 1,
+                 "reasons": ["WLB n/a", "rec n/a", "comp unpublished"]}]
+        out = self._capture(self.rc.print_screening_queue, rows)
+        self.assertNotIn("no order here", out)
+        self.assertLess(out.index("Otherco"), out.index("SomeCo"),
+                        "the row with more points unmeasured must be screened first")
+
+    def test_the_queue_is_silent_when_nothing_is_owed(self):
+        self.assertEqual(self._capture(
+            self.rc.print_screening_queue,
+            [{"company": "SomeCo", "pts": 40, "reasons": ["WLB 4.1 (9/10)"]}]), "")
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -4952,3 +5263,1284 @@ class TestEmployerRegistryUpgradePath(unittest.TestCase):
         self.assertEqual(n, 1)
         self.assertTrue(self.employers.is_blocked("Initech"), "read-after-write, no re-seed needed")
         self.assertEqual(self.employers.declare_blocked([{"company": "Initech", "filter": 8}]), 0)
+
+
+class TestResumePanelGate(unittest.TestCase):
+    """The résumé-panel receipt gate at its REFUSAL states.
+
+    ⛔ WHY A SEPARATE CLASS. `TestMailDraftRungProfiles` seeds a receipt for every send, so on its
+    own it only ever proves that a correct receipt does not block. A gate is defined by what it
+    refuses. It also runs against a fixture that is not a real PDF, where the gate correctly fails
+    OPEN, so nothing there can exercise the hash binding at all.
+
+    This class installs a `pdftotext` that echoes the file, which is what the real binary does for a
+    text-bearing PDF, and then watches the gate refuse.
+    """
+    @classmethod
+    def setUpClass(cls):
+        import shutil
+        cls.root = tempfile.mkdtemp()
+        shutil.copytree(SCRIPTS, os.path.join(cls.root, "scripts"))
+        os.makedirs(os.path.join(cls.root, "documents"), exist_ok=True)
+        cls.bin = os.path.join(cls.root, "bin")
+        os.makedirs(cls.bin, exist_ok=True)
+        for name, body in (("osascript", "#!/bin/sh\ncat >/dev/null 2>&1\nexit 0\n"),
+                           ("pdftotext", '#!/bin/sh\nfor a in "$@"; do case "$a" in -*) ;; *) '
+                                         '[ -f "$a" ] && cat "$a" && exit 0;; esac; done\nexit 1\n')):
+            fp = os.path.join(cls.bin, name)
+            with open(fp, "w") as fh:
+                fh.write(body)
+            os.chmod(fp, 0o755)
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def setUp(self):
+        import shutil
+        self.pdf = os.path.join(self.root, "resume.pdf")
+        with open(self.pdf, "w", encoding="utf-8") as fh:
+            fh.write("SUMMARY A builder. EXPERIENCE Acme 2020-2024.\n")
+        # Receipts are files and the temp root is per class, so one test's receipt would satisfy
+        # the next test's gate.
+        shutil.rmtree(os.path.join(self.root, "documents", "state", "resume-panels"),
+                      ignore_errors=True)
+
+    def _env(self):
+        return dict(os.environ, PATH=self.bin + os.pathsep + os.environ.get("PATH", ""),
+                    CLAUDE_PROJECT_DIR=self.root)
+
+    def _review(self, *args):
+        return subprocess.run([sys.executable, os.path.join(self.root, "scripts", "review_resume.py"),
+                               self.pdf] + list(args), capture_output=True, text=True,
+                              env=self._env(), cwd=self.root)
+
+    def test_a_receipt_is_written_and_found_for_the_same_resume(self):
+        self.assertEqual(0, self._review("--record", '{"ceo":[],"cto":[],"cpo":[]}').returncode)
+        self.assertIn("artifact_sha256", self._review("--show").stdout)
+
+    def test_the_receipt_orphans_when_the_content_changes(self):
+        """The binding. A panel run on an earlier résumé cannot cover a later one."""
+        self._review("--record", '{"ceo":[],"cto":[],"cpo":[]}')
+        with open(self.pdf, "w", encoding="utf-8") as fh:
+            fh.write("SUMMARY A builder. EXPERIENCE Acme 2020-2025.\n")
+        self.assertIn("no receipt", self._review("--show").stdout)
+
+    def test_whitespace_reflow_alone_does_NOT_orphan_the_receipt(self):
+        """⚖️ pdftotext's column reconstruction is not stable enough to hash raw. A receipt that
+        orphaned because a line wrapped differently is a receipt nobody would trust, so the hash is
+        over the WORDS. The content test above is what keeps that from being a loophole."""
+        self._review("--record", '{"ceo":[],"cto":[],"cpo":[]}')
+        with open(self.pdf, "w", encoding="utf-8") as fh:
+            fh.write("SUMMARY A builder.\n\n   EXPERIENCE   Acme 2020-2024.\n")
+        self.assertIn("artifact_sha256", self._review("--show").stdout)
+
+    def test_a_partial_panel_is_recorded_as_partial_not_as_clean(self):
+        r = self._review("--record", '{"ceo":["top third does not say what he is for"]}')
+        self.assertEqual(0, r.returncode)
+        self.assertIn("no findings recorded for", r.stdout)
+        import glob
+        f = glob.glob(os.path.join(self.root, "documents", "state", "resume-panels", "*.json"))[0]
+        with open(f, encoding="utf-8") as fh:
+            self.assertEqual(sorted(json.load(fh)["lenses_missing"]), ["cpo", "cto"])
+
+    def test_the_kit_ships_no_expert_names_of_its_own(self):
+        """⛔ [[the-kit-must-not-assume-whose-search-it-is-running]]. The fourth lens is a mechanism
+        the recipient fills in. A kit that shipped two product coaches would be telling a partner
+        hunting analyst or architect seats whose advice their résumé answers to."""
+        import importlib
+        if SCRIPTS not in sys.path:
+            sys.path.insert(0, SCRIPTS)
+        kc = importlib.import_module("kit_config")
+        self.assertEqual([], list(getattr(kc, "RESUME_EXPERT_LENSES", [])))
+
+
+
+class TestDeskCriteriaScoring(unittest.TestCase):
+    """Criteria a JOB POSTING answers, scored, so a board can tell its own rows apart.
+
+    ⛔ WHY THIS EXISTS. In the tree this shipped from, 36 of 37 scored companies carried an
+    IDENTICAL score. Every criterion that could have separated them was a culture criterion, and
+    culture is empty by design for screened rows (review sites block automated readers, so an
+    agent's "culture clean" may only mean "culture unreachable"). The scorer was starved, not
+    short of criteria. A whole screening session's comp bands, seat counts and reporting lines
+    never reached the score.
+
+    Both failure directions are covered: a criterion that fails to fire, and one that fires on
+    something it should not.
+    """
+
+    def _rc(self):
+        if SCRIPTS not in sys.path:
+            sys.path.insert(0, SCRIPTS)
+        import rank_criteria
+        return rank_criteria
+
+    def test_a_floor_named_in_prose_is_not_a_published_band(self):
+        """The trap the first run fell into, and it produced a confident wrong number."""
+        rc = self._rc()
+        # Real evidence shape: comp UNKNOWN, floor mentioned while saying so.
+        self.assertIsNone(
+            rc._money_max("UNVERIFIED. No band in the posting. The $170K floor is unconfirmed."),
+            "the FLOOR was read as the employer's published band; two companies were scored as "
+            "clearing a band neither had published")
+        self.assertIsNone(rc._money_max("No band published. Floor is $170K."))
+
+    def test_a_real_band_still_parses(self):
+        """The guard above must not be so eager that it blinds the criterion it serves."""
+        rc = self._rc()
+        self.assertEqual(rc._money_max("$201,000-$294,000 USD"), 294000)
+        self.assertEqual(rc._money_max("Salary Range: $130,000- $150,000"), 150000)
+        # A floor mentioned ALONGSIDE a real band must not suppress the band.
+        self.assertEqual(
+            rc._money_max("$147,000-$183,000 on the req. The $170K floor sits in the top quarter."),
+            183000)
+
+    def test_calm_pace_is_awarded_once_not_twice(self):
+        """One company collected it twice on the first run, double points for one criterion."""
+        rc = self._rc()
+        fresh, _ = rc._desk_points({"ownership": "bootstrapped, no funding raised"})
+        self.assertGreaterEqual(fresh, 8, "calm pace did not fire when it should")
+        dupe, _ = rc._desk_points({"ownership": "bootstrapped, no funding raised",
+                                   "_calm_already": True})
+        self.assertEqual(dupe, 0.0,
+                         "calm pace was granted a second time after the culture branch already "
+                         "awarded it; one criterion must not pay twice")
+
+    def test_an_IC_seat_outscores_a_management_only_title(self):
+        rc = self._rc()
+        ic, _ = rc._desk_points({"pm_req": "LIVE: Senior Product Manager, Remote"})
+        mg, _ = rc._desk_points({"pm_req": "LIVE: Director of Product Management"})
+        self.assertGreater(ic, mg, "an IC seat must rank above a management-only title")
+
+    def test_desk_points_never_veto_and_a_missing_field_says_so(self):
+        """Additive only. A blank row scores zero and explains itself, never drops out."""
+        rc = self._rc()
+        pts, reasons = rc._desk_points({"comp": None, "pm_req": None,
+                                        "ownership": None, "note": None})
+        self.assertEqual(pts, 0.0)
+        self.assertTrue(any("not scored" in r for r in reasons),
+                        "an unscored criterion must announce itself, so 'no data' never reads "
+                        "as 'bad data'")
+        self.assertEqual(rc._desk_points(None), (0.0, []))
+
+    def test_the_board_path_is_unchanged(self):
+        """`desk` defaults to None, so the positional board reader scores as before."""
+        import inspect
+        rc = self._rc()
+        sig = inspect.signature(rc._score_fields)
+        self.assertIsNone(sig.parameters["desk"].default,
+                          "desk must default to None so the board call site is unchanged")
+
+    def test_comp_scoring_reads_the_configured_floor_not_a_hardcoded_number(self):
+        """⛔ THE KIT MUST NOT ASSUME WHOSE SEARCH IT IS RUNNING.
+
+        Asserts the MECHANISM, not the shipped default: a floor read from config, whatever it is.
+        """
+        rc = self._rc()
+        floor, target = rc._salary_floor()
+        self.assertIsInstance(floor, int)
+        self.assertGreaterEqual(target, floor, "the target must not sit below the floor")
+        src = open(os.path.join(SCRIPTS, "rank_criteria.py"), encoding="utf-8").read()
+        self.assertIn("COMP_FLOOR", src,
+                      "comp scoring must read kit_config.COMP_FLOOR, never a hardcoded salary")
+
+
+class TestSeatCountReadsTheDatedSweep(unittest.TestCase):
+    """The seat tiebreak must read the newest JOB SWEEP, never a same-prefixed neighbour file.
+
+    `sorted(glob("sweep-*.jsonl"))[-1]` sorts LEXICALLY, so any neighbour whose next character
+    outranks a digit wins. In the tree this shipped from, a local-business directory named
+    `sweep-chambers-…` beat every dated sweep, so every row scored 0 seats and the tiebreak
+    ordered nothing while looking like it worked.
+    """
+
+    def test_a_neighbour_file_never_wins_over_a_dated_sweep(self):
+        if SCRIPTS not in sys.path:
+            sys.path.insert(0, SCRIPTS)
+        import json as _j
+        import rank_criteria as rc
+        with tempfile.TemporaryDirectory() as td:
+            docs = os.path.join(td, "documents")
+            os.makedirs(docs)
+            with open(os.path.join(docs, "sweep-2026-08-10-0400.jsonl"), "w") as fh:
+                fh.write(_j.dumps({"company": "SomeCo", "id": "a"}) + "\n")
+                fh.write(_j.dumps({"company": "SomeCo", "id": "b"}) + "\n")
+            # Lexically LAST, and the whole reason the defect existed.
+            with open(os.path.join(docs, "sweep-chambers-town-2026-07-23.jsonl"), "w") as fh:
+                fh.write(_j.dumps({"company": "Corner Diner", "id": "z"}) + "\n")
+            counts = rc._open_seat_counts(repo=td)
+        self.assertEqual(counts.get("someco"), 2,
+                         "the dated job sweep was not read; a sweep-* neighbour won the sort")
+        self.assertNotIn("corner diner", counts,
+                         "a non-sweep directory is feeding the seat tiebreak")
+
+    def test_no_dated_sweep_yields_empty_rather_than_a_wrong_file(self):
+        if SCRIPTS not in sys.path:
+            sys.path.insert(0, SCRIPTS)
+        import json as _j
+        import rank_criteria as rc
+        with tempfile.TemporaryDirectory() as td:
+            docs = os.path.join(td, "documents")
+            os.makedirs(docs)
+            with open(os.path.join(docs, "sweep-chambers-town-2026-07-23.jsonl"), "w") as fh:
+                fh.write(_j.dumps({"company": "Corner Diner", "id": "z"}) + "\n")
+            self.assertEqual(rc._open_seat_counts(repo=td), {},
+                             "with no dated sweep the tiebreak must go silent, never substitute "
+                             "a differently-shaped file")
+
+
+class TestRecordedAliasOutranksAScrapedRow(unittest.TestCase):
+    """A RECORDED alias must beat a row that merely exists under that spelling.
+
+    `resolve()` used to return a key the moment it existed, consulting aliases only for names the
+    store had never seen. That inverted the module's own principle: a spelling collapse is a
+    RECORDED RULING, not a read-time guess. A scraped spelling gets its own row BECAUSE a sweep
+    banked it, which is exactly when the collapse is wanted.
+
+    ⛔ Also pins the refusal that still stands: no fuzzy matching, and an unknown name resolves None.
+    """
+
+    def _state(self, tmp):
+        if SCRIPTS not in sys.path:
+            sys.path.insert(0, SCRIPTS)
+        import importlib
+        os.environ["CLAUDE_PROJECT_DIR"] = tmp
+        import state as _s
+        importlib.reload(_s)
+        _s.REPO = tmp
+        _s._ALIAS_INDEX.clear(); _s._KEY_SET.clear()
+        _s.ALIAS_OVERRIDES.clear(); _s._ALIAS_WARNED.clear()
+        return _s
+
+    def test_a_recorded_alias_collapses_two_spellings(self):
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, "documents", "state"), exist_ok=True)
+            st = self._state(td)
+            st.register("company", "SomeCo.ai", as_of="2026-08-01", as_of_source="live:test")
+            st.register("company", "SomeCo", alias="SomeCo.ai",
+                        as_of="2026-08-10", as_of_source="live:test")
+            st._ALIAS_INDEX.clear(); st._KEY_SET.clear()
+            self.assertEqual(st.resolve("company", "SomeCo.ai"), st.resolve("company", "SomeCo"),
+                             "the recorded alias did not collapse the two spellings; a scraped row "
+                             "is still outranking a deliberate ruling")
+
+    def test_the_override_is_logged_and_never_silent(self):
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, "documents", "state"), exist_ok=True)
+            st = self._state(td)
+            st.register("company", "SomeCo.ai", as_of="2026-08-01", as_of_source="live:test")
+            st.register("company", "SomeCo", alias="SomeCo.ai",
+                        as_of="2026-08-10", as_of_source="live:test")
+            st._ALIAS_INDEX.clear(); st._KEY_SET.clear(); st.ALIAS_OVERRIDES.clear()
+            st.resolve("company", "SomeCo.ai")
+            self.assertTrue(st.ALIAS_OVERRIDES,
+                            "an alias override must be recorded; the failure mode of this rule is "
+                            "merging two DIFFERENT companies, and that cannot be silent")
+
+    def test_no_collapse_without_a_recorded_alias(self):
+        """Prefix-shaped names must NOT merge on their own. That is the fuzzy matching this refuses."""
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, "documents", "state"), exist_ok=True)
+            st = self._state(td)
+            st.register("company", "Acme", as_of="2026-08-10", as_of_source="live:test")
+            st.register("company", "Acme Health", as_of="2026-08-10", as_of_source="live:test")
+            st._ALIAS_INDEX.clear(); st._KEY_SET.clear()
+            self.assertNotEqual(st.resolve("company", "Acme"),
+                                st.resolve("company", "Acme Health"),
+                                "two companies collapsed with NO recorded alias")
+
+    def test_an_unknown_name_still_resolves_to_None(self):
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, "documents", "state"), exist_ok=True)
+            st = self._state(td)
+            st.register("company", "Acme", as_of="2026-08-10", as_of_source="live:test")
+            st._ALIAS_INDEX.clear(); st._KEY_SET.clear()
+            self.assertIsNone(st.resolve("company", "Nobody Recorded This"),
+                              "resolve() must answer None for an unknown name, never a guess")
+
+
+class TestScorecardFragmentsAreArtifacts(unittest.TestCase):
+    """A culture note split on the banked-file separator is not an employer."""
+
+    def test_rating_fragments_are_dropped_and_real_names_survive(self):
+        if SCRIPTS not in sys.path:
+            sys.path.insert(0, SCRIPTS)
+        from check_screen_gate import is_artifact
+        for frag in ("Culture 3.1", "WLB 3.8", "Career 3.9", "D&I 3.9", "PE", "4.2"):
+            with self.subTest(fragment=frag):
+                self.assertTrue(is_artifact(frag), f"{frag!r} reached the pool as an employer")
+        # ⛔ The other direction matters more: a real company must never be eaten.
+        for name in ("Web 3.0 Labs", "Culture Amp", "Career Karma", "PE Systems Inc", "3M"):
+            with self.subTest(company=name):
+                self.assertFalse(is_artifact(name), f"{name!r} was dropped as an artifact")
+
+
+class TestBlockedListReaderParsesTheWrittenShape(unittest.TestCase):
+    """The blocked-list READER must parse what the reconciler WRITES.
+
+    ⛔ Reported by a partner install 2026-08-10 with measurements: the reader parsed 26 names, all
+    hand-written legacy entries, and ZERO of the 31 entries `reconcile_findings.py` had written
+    moments earlier. Every automated DROP was invisible to the company ranker.
+
+    Two distinct failures from one cause, and the second is the dangerous one:
+      (a) a LONG description blew the 40-character guard and the entry was discarded in silence;
+      (b) a SHORT one PASSED the guard under a bogus key that matches no company, so nothing tripped.
+    """
+
+    def _blocked_from(self, text):
+        if SCRIPTS not in sys.path:
+            sys.path.insert(0, SCRIPTS)
+        import importlib
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, "documents"))
+            with open(os.path.join(td, "documents", "blocked-employers-list.md"),
+                      "w", encoding="utf-8") as fh:
+                fh.write(text)
+            os.environ["CLAUDE_PROJECT_DIR"] = td
+            import rank_network_companies as r
+            importlib.reload(r)
+            r.REPO = td
+            return r._blocked()
+
+    def test_a_long_description_does_not_silently_discard_the_entry(self):
+        blocked = self._blocked_from(
+            "- **SomeCo** (off-segment, 2026-08-10). A description long enough that the whole line "
+            "would blow the forty character guard and vanish without a word.\n")
+        self.assertIn("someco", blocked,
+                      "a reconciler-written entry was discarded in silence; the list reads correct "
+                      "to a human and does nothing")
+        self.assertFalse([k for k in blocked if len(k) > 40], "a key escaped the length guard")
+
+    def test_a_short_description_does_not_register_a_bogus_key(self):
+        """The dangerous case: it passes the guard, so nothing trips."""
+        blocked = self._blocked_from(
+            "- **Acme Defense** (off-segment, 2026-08-10). Prime contractor.\n")
+        self.assertIn("acmedefense", blocked)
+        self.assertNotIn("acmedefenseprimecontractor", blocked,
+                         "the description was absorbed into the company name and registered under "
+                         "a key that matches nothing")
+
+    def test_the_alias_shape_still_works(self):
+        """The 2026-07-21 alias fix must survive the bold-span extraction."""
+        blocked = self._blocked_from(
+            "- **Acme / Acme Web Services** (REMOTE FAIL, 2026-07-21). reason.\n")
+        self.assertIn("acme", blocked)
+        self.assertIn("acmewebservices", blocked)
+
+    def test_a_plain_unbolded_legacy_entry_still_parses(self):
+        """Hand-written legacy entries predate the bold shape and must not regress."""
+        blocked = self._blocked_from("- PlainCo (REMOTE FAIL, 2026-07-21). reason.\n")
+        self.assertIn("plainco", blocked)
+
+
+class TestCompanyNameIsNotTruncated(unittest.TestCase):
+    """A company name with a lowercase connector must survive extraction intact.
+
+    ⚠️ SAFETY, not tidiness. `check_preview` binds authorization to a NAMED company, so a truncated
+    name scopes a ruling to a company the human did not rule on. "Welcome" is not "Welcome to the
+    Jungle", and a stray match against a real company of that shorter name is cross-company
+    authorization leakage.
+    """
+
+    def _extract(self):
+        if SCRIPTS not in sys.path:
+            sys.path.insert(0, SCRIPTS)
+        from record_decision import extract_company
+        return extract_company
+
+    def test_a_connector_does_not_truncate_the_name(self):
+        ex = self._extract()
+        self.assertEqual(ex("Build or skip for Pay with Spire?"), "Pay with Spire",
+                         "the name was cut at the lowercase connector; the ruling would be scoped "
+                         "to a company the human never ruled on")
+        self.assertEqual(ex("Build or skip for Welcome to the Jungle?"), "Welcome to the Jungle")
+
+    def test_a_plain_name_is_unchanged(self):
+        """The fix must TIGHTEN, never change behaviour where it was already right."""
+        ex = self._extract()
+        self.assertEqual(ex("Build or skip for Acme?"), "Acme")
+        self.assertEqual(ex("draft the note to Vic at Acme"), "Acme",
+                         "company prepositions must still beat person prepositions")
+
+    def test_it_never_widens_onto_a_non_company_word(self):
+        """⛔ The one thing this edit may not do.
+
+        A width-1 known-name scan tests bare words that greedy multi-word windows never reached.
+        Recognition lists scraped from markdown contain entries that are not companies at all.
+        """
+        ex = self._extract()
+        self.assertEqual(ex("Which company should I screen next?"), "",
+                         "a bare non-company word was promoted to a company name")
+        self.assertEqual(ex("Build or skip for the team?"), "",
+                         "a lowercase joiner with no capitalized token must resolve to nothing")
+
+
+class TestResumeCorePanelIsConfigurable(unittest.TestCase):
+    """The three lenses that ALWAYS run must be the operator's, not the maintainer's.
+
+    ⛔ The kit already states this principle for the OPTIONAL fourth lens: "The kit must not assume
+    what kind of seat you are hunting, so it ships you the mechanism and none of the names." It
+    applies with more force to the three that always run.
+
+    📊 Reported by a partner install: CEO/CTO/CPO is a product-startup executive panel, and against
+    a regulated-industry backlog owner the CPO lens returned "no discovery or roadmap ownership" —
+    a mis-aimed note that would push the operator to add claims their record does not support.
+    """
+
+    def _rr(self, cfg=None):
+        if SCRIPTS not in sys.path:
+            sys.path.insert(0, SCRIPTS)
+        import importlib
+        import kit_config
+        import review_resume
+        if cfg is not None:
+            kit_config.RESUME_CORE_LENSES = cfg
+        importlib.reload(review_resume)
+        return review_resume
+
+    def tearDown(self):
+        import kit_config
+        kit_config.RESUME_CORE_LENSES = {}
+        if SCRIPTS in sys.path:
+            import importlib, review_resume
+            importlib.reload(review_resume)
+
+    def test_the_shipped_default_is_unchanged(self):
+        """⚖️ An install that likes the executive panel must see no difference."""
+        rr = self._rr({})
+        self.assertEqual(sorted(rr.LENSES), ["ceo", "cpo", "cto"])
+
+    def test_a_custom_panel_replaces_the_default(self):
+        rr = self._rr({"hiring_manager": {"title": "THE HIRING MANAGER LENS",
+                                          "asks": ["What would they own on day one?"]}})
+        self.assertEqual(sorted(rr.LENSES), ["hiring_manager"],
+                         "the operator's panel did not take effect; the reviewer would still be "
+                         "critiquing for somebody else's search")
+
+    def test_malformed_config_falls_back_rather_than_running_a_broken_panel(self):
+        """⛔ A resume reviewed by nothing at all would still print a clean report."""
+        for bad in ({"x": "not a dict"}, {"x": {}}, {"x": {"title": "no asks"}}, "not a dict", []):
+            with self.subTest(cfg=bad):
+                rr = self._rr(bad)
+                self.assertEqual(sorted(rr.LENSES), ["ceo", "cpo", "cto"])
+
+    def test_the_expert_hook_is_a_separate_mechanism(self):
+        """The two are complementary: one names a PERSON, the other names a SEAT."""
+        import kit_config
+        self.assertTrue(hasattr(kit_config, "RESUME_EXPERT_LENSES"))
+        self.assertTrue(hasattr(kit_config, "RESUME_CORE_LENSES"))
+        self.assertEqual([], list(getattr(kit_config, "RESUME_EXPERT_LENSES", [])),
+                         "the expert hook must still ship empty")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ingest_export + check_network_freshness. Ported from upstream 2026-08-10, where the two
+# together formed a loop that destroyed data on a schedule: the freshness check compared a PROXY
+# and so stayed permanently red, any job treating red as self-healable re-parsed every run, and
+# the re-parse handed ingest_export its own sanitized output, which blanked every `Has Email`
+# flag while printing a success line.
+# ─────────────────────────────────────────────────────────────────────────────
+# ⛔ NOT a linkedin.com URL, deliberately. The PII gate blocks any LinkedIn profile slug in the
+# kit and cannot tell a fabricated one from a real person's, which is the correct behaviour for a
+# gate that fails closed. A made-up slug here blocked the kit push on 2026-08-10; the fixture only
+# needs a URL-shaped value, so it uses a reserved example domain.
+RAW_EXPORT = (
+    "Notes:\n"
+    '"preamble"\n'
+    "\n"
+    "First Name,Last Name,URL,Email Address,Company,Position,Connected On\n"
+    "Ada,Lovelace,https://example.com/in/ada,ada@example.com,Engines,Engineer,09 Aug 2026\n"
+    "Alan,Turing,https://example.com/in/alan,,Bletchley,Cryptanalyst,08 Aug 2026\n"
+)
+
+
+class TestIngestExportIsNotSelfDestructive(unittest.TestCase):
+    def _ingest(self, root, path):
+        env = dict(os.environ, CLAUDE_PROJECT_DIR=root)
+        return subprocess.run([sys.executable, os.path.join(SCRIPTS, "ingest_export.py"), path],
+                              capture_output=True, text=True, env=env)
+
+    def test_a_raw_export_still_ingests_and_records_the_email_flag(self):
+        """The guard must not cost the real path. Prove green before proving red."""
+        root = tempfile.mkdtemp()
+        try:
+            raw = os.path.join(root, "raw.csv")
+            open(raw, "w").write(RAW_EXPORT)
+            r = self._ingest(root, raw)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            # ⚠️ DERIVED, NOT HARDCODED. This literal was "today" the day the test was written
+            # (2026-08-10) and the suite went red the next morning: `_export_date` falls back to the
+            # CURRENT date when the source filename carries none, so the expected name moves daily.
+            # A test that passes only on the day it was authored is a time bomb, and it fires when
+            # nobody is looking at that file.
+            out = os.path.join(root, "documents", "linkedin-exports",
+                               "Connections-%s.csv" % datetime.date.today().strftime("%m-%d-%Y"))
+            self.assertTrue(os.path.exists(out), r.stdout)
+            body = open(out).read()
+            self.assertIn(",yes,", body, "the Has Email flag was not derived at all")
+            self.assertNotIn("ada@example.com", body, "an email address reached the repo copy")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_re_ingesting_its_own_output_is_REFUSED_not_silently_destructive(self):
+        """⛔ THE ONE THAT COST DATA. Same file in and out: without the guard this rewrites the
+        copy with every flag blanked, and prints '0 email address(es) stripped' as if clean."""
+        root = tempfile.mkdtemp()
+        try:
+            raw = os.path.join(root, "raw.csv")
+            open(raw, "w").write(RAW_EXPORT)
+            self.assertEqual(self._ingest(root, raw).returncode, 0)
+            out = os.path.join(root, "documents", "linkedin-exports",
+                               "Connections-%s.csv" % datetime.date.today().strftime("%m-%d-%Y"))
+            before = open(out).read()
+
+            r = self._ingest(root, out)
+            self.assertEqual(r.returncode, 5, f"expected the refusal exit code: {r.stdout}")
+            self.assertEqual(open(out).read(), before,
+                             "the sanitized export was rewritten by a run that should have refused")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+class TestMutualGroupsAreEvidenceNotATier(unittest.TestCase):
+    """👥 A shared LinkedIn group is the most machine-readable form of `shared-community` there is,
+    and on the day that tier was ruled to open rung 7 it had NO reader at all.
+
+    ⛔ THREE STATES, NEVER TWO. The source sits behind a login, so "nobody opened the profile" and
+    "opened it, no shared groups" are opposite findings. Collapsing them is the same error as an
+    agent reporting "culture clean" when it only reached a 403.
+
+    ⚖️ It records a FACT and never sets a TIER. Closeness stays the owner's answer; this feeds the
+    levelling batch as one more line of evidence, which is what BUG-160 required.
+    """
+
+    def _mod(self):
+        return importlib.import_module("mutual_groups")
+
+    def setUp(self):
+        self.mg = self._mod()
+        self._real = self.mg.STORE
+        self.tmp = tempfile.mkdtemp()
+        self.mg.STORE = os.path.join(self.tmp, "mutual-groups.jsonl")
+
+    def tearDown(self):
+        self.mg.STORE = self._real
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_unchecked_is_None_and_checked_empty_is_a_LIST(self):
+        """The whole point. `None` and `[]` must not compare equal for the caller."""
+        self.assertIsNone(self.mg.groups_for("Nobody Checked", store=self.mg.load()))
+        self.mg.record(["Pat Placeholder=NONE"])
+        self.assertEqual(self.mg.groups_for("Pat Placeholder", store=self.mg.load()), [])
+
+    def test_a_recorded_group_survives_a_reload(self):
+        self.mg.record(["Dana Fixture=Product Managers; Local Tech Meetup"])
+        self.assertEqual(self.mg.groups_for("Dana Fixture", store=self.mg.load()),
+                         ["Product Managers", "Local Tech Meetup"])
+
+    def test_the_store_is_APPEND_ONLY_and_a_later_answer_wins(self):
+        """A correction must not destroy the earlier row; the file is the record."""
+        self.mg.record(["Dana Fixture=NONE"])
+        self.mg.record(["Dana Fixture=Product Managers"])
+        self.assertEqual(self.mg.groups_for("Dana Fixture", store=self.mg.load()),
+                         ["Product Managers"])
+        self.assertEqual(sum(1 for _ in open(self.mg.STORE)), 2, "an earlier row was rewritten")
+
+    def test_a_malformed_line_is_skipped_and_never_rewritten(self):
+        with open(self.mg.STORE, "w") as fh:
+            fh.write("{not json at all\n")
+            fh.write('{"kind":"mutual-groups","name":"Dana Fixture","groups":["G"]}\n')
+        self.assertEqual(self.mg.groups_for("Dana Fixture", store=self.mg.load()), ["G"])
+
+    def test_it_records_a_fact_and_exposes_NO_way_to_set_a_tier(self):
+        """Guard against a future convenience that auto-levels from a group. The closeness answer
+        is the owner's; a group is a reason to ASK, never the answer."""
+        for forbidden in ("set_closeness", "level", "record_tier", "apply_tier"):
+            self.assertFalse(hasattr(self.mg, forbidden),
+                             f"mutual_groups grew {forbidden}; a group is evidence, not a tier")
+
+
+class TestStripNoiseDoesNotManufactureASlash(unittest.TestCase):
+    """🎯 BUG-089. Two ADJACENT stripped regions collapsed into whitespace, and the spaced-slash
+    rule then reported a violation the author never wrote.
+
+    Live instance, in the kit's own `/level-network` doc, line 21:
+
+        `~/Downloads`/`~/Desktop`      →      "            /            "
+
+    Both code spans are blanked, correctly, because a path is an identifier and not prose. The
+    residue is whitespace-slash-whitespace, which is the exact shape the rule hunts. Reported from
+    the kit side by the partner (issue #9, third instance): "the kit's own command names cannot be
+    written into a documents file unless they are wrapped in backticks" — and here, wrapping them
+    in backticks is what CAUSES it.
+
+    ⚖️ The fix is scoped to one rule on purpose. Blanking is right for every word-level check: a
+    code span must not be counted as a word or matched by a banned-word pattern. It is wrong only
+    for a rule that reads the characters BETWEEN words. So `token=True` is opt-in, and making it
+    the default would trade this bug for a worse one.
+    """
+
+    def _mod(self):
+        return importlib.import_module("check_style")
+
+    def _slash_hits(self, text):
+        c = self._mod()
+        r = c.check(text, mode="prose")
+        fails = r[0] if isinstance(r, tuple) else r
+        return [f for f in fails if "slash" in str(f)]
+
+    def test_adjacent_code_spans_separated_by_a_slash_are_not_a_violation(self):
+        self.assertEqual(self._slash_hits("look in `~/Downloads`/`~/Desktop` for it"), [],
+                         "the author wrote no spaces; the stripper created them")
+
+    def test_a_wiki_link_beside_a_code_span_is_the_same_shape(self):
+        """Wiki-links are blanked too, so any two blanked regions can do this, not just code."""
+        self.assertEqual(self._slash_hits("see [[some-slug]]/`a_file.py` for both"), [])
+
+    def test_a_REAL_spaced_slash_still_fails(self):
+        """The rule must not be softened. This is the shape it exists to catch."""
+        self.assertTrue(self._slash_hits("we work in applied-AI / platform roles"))
+        self.assertTrue(self._slash_hits("payments /fintech"))
+
+    def test_token_masking_is_OPT_IN_and_blanking_stays_the_default(self):
+        """If `token` became the default, code spans would turn into words: sentence-length counts
+        would shift and banned-word patterns could match inside identifiers. That is the bug
+        strip_noise exists to prevent, so the default must not move."""
+        c = self._mod()
+        self.assertNotIn("x", c.strip_noise("a `code_span` b"))
+        self.assertIn("x", c.strip_noise("a `code_span` b", token=True))
+
+    def test_a_banned_word_inside_a_code_span_is_still_ignored_under_both_modes(self):
+        """The property that makes blanking correct in the first place, asserted so the fix cannot
+        quietly regress it."""
+        c = self._mod()
+        for tok in (False, True):
+            out = c.strip_noise("run `actually_a_function()` now", token=tok)
+            self.assertNotIn("actually_a_function", out)
+
+
+class TestPortedScriptsDoNotAssumeWhoseSearchItIs(unittest.TestCase):
+    """🛑 Six scripts were ported from upstream on 2026-08-11. Every one of them carried something
+    personal to the upstream operator, and a faithful copy would have shipped it.
+
+    This asserts the MECHANISM, not the shipped defaults: the exclusion must be a NO-OP until an
+    operator configures one, and no ported script may hardcode a path that only exists on one
+    machine. [[the-kit-must-not-assume-whose-search-it-is-running]]
+    """
+
+    PORTED = ["daily-rank.sh", "watch_send_log.sh", "watch_repo.sh",
+              "reconcile_contacts.py", "log_org_reaction.py"]
+
+    def _kit_scripts(self):
+        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
+
+    def test_no_ported_script_hardcodes_a_personal_path_or_name(self):
+        """The upstream copies carried an absolute home directory and a launchd label prefix.
+        A hardcoded home is not a cosmetic leak: it makes the script a no-op on every other
+        machine while still exiting 0, which is the silent-failure shape."""
+        import re as _re
+        bad = _re.compile(r"/Users/[a-z]+|com\.michael\.", _re.I)
+        offenders = []
+        for f in self.PORTED:
+            path = os.path.join(self._kit_scripts(), f)
+            if not os.path.exists(path):
+                offenders.append(f"{f} (MISSING — the port did not land)")
+                continue
+            hits = bad.findall(open(path, encoding="utf-8", errors="ignore").read())
+            if hits:
+                offenders.append(f"{f} -> {sorted(set(hits))}")
+        self.assertEqual(offenders, [], f"ported scripts still assume one machine: {offenders}")
+
+    def test_the_shell_ports_resolve_the_repo_from_the_environment(self):
+        """Every kit shell script uses the same idiom; a port that skipped it would run against
+        whatever directory the caller happened to be in."""
+        for f in ("daily-rank.sh", "watch_send_log.sh", "watch_repo.sh"):
+            body = open(os.path.join(self._kit_scripts(), f), encoding="utf-8").read()
+            self.assertIn("CLAUDE_PROJECT_DIR", body,
+                          f"{f} does not resolve its repo from the environment")
+
+    def test_the_employer_exclusion_is_a_NO_OP_until_configured(self):
+        """Upstream this named one specific former employer. Here it must do nothing at all until
+        the operator fills in EXCLUDED_EMPLOYERS, and it must not raise when they have not."""
+        rc = importlib.import_module("reconcile_contacts")
+        row = {"First Name": "Any", "Last Name": "Person",
+               "Company": "Some Company", "Position": "Chief Executive Officer"}
+        import kit_config
+        if not getattr(kit_config, "EXCLUDED_EMPLOYERS", []):
+            self.assertFalse(rc._excluded_at_source(row),
+                             "nothing is configured, so nobody may be excluded by design")
+
+    def test_the_exclusion_FIRES_once_an_employer_is_configured(self):
+        """The other half: a no-op that stays a no-op when configured is not a mechanism."""
+        import parse_network as pn
+        rc = importlib.import_module("reconcile_contacts")
+        real_emp, real_lead = pn.EXCLUDED_EMPLOYER_RE, pn.EXCLUDED_LEADERSHIP_RE
+        try:
+            pn.EXCLUDED_EMPLOYER_RE = re.compile(r"acme", re.I)
+            pn.EXCLUDED_LEADERSHIP_RE = re.compile(r"chief|vp|director", re.I)
+            boss = {"First Name": "A", "Last Name": "B", "Company": "Acme",
+                    "Position": "Chief Executive Officer"}
+            peer = {"First Name": "C", "Last Name": "D", "Company": "Acme",
+                    "Position": "Software Engineer"}
+            other = {"First Name": "E", "Last Name": "F", "Company": "Other Co",
+                     "Position": "Chief Executive Officer"}
+            self.assertTrue(rc._excluded_at_source(boss), "the leadership tier must be excluded")
+            self.assertFalse(rc._excluded_at_source(peer), "peers stay IN scope, that is the rule")
+            self.assertFalse(rc._excluded_at_source(other), "a different employer is untouched")
+        finally:
+            pn.EXCLUDED_EMPLOYER_RE, pn.EXCLUDED_LEADERSHIP_RE = real_emp, real_lead
+
+
+class TestEveryOfferedTierIsMapped(unittest.TestCase):
+    """🎯 A TIER THE INTERVIEW OFFERS AND THE TABLE DOES NOT CARRY IS A SILENT NO-OP.
+
+    `shared-community` lived in the store's own `_scale`, was offered as an answer, was carried by
+    five real contacts, and appeared in NO row of `closeness.TIERS`. Unknown tiers degrade to the
+    cold floor by design, which is the right failure direction and the wrong outcome here: the owner
+    could answer "I know them from my product manager group" and the gate would still treat them as
+    a stranger.
+
+    Ruled at warm 7 on the method's own ladder: rungs 5 and 6 are situational (they know someone at the
+    target, or they work there), so closeness cannot open them. Only rung 7 turns on standing, and
+    its ask survives a thin tie by construction.
+    """
+
+    def _mod(self):
+        return importlib.import_module("closeness")
+
+    def test_shared_community_opens_the_reduced_rung_7_ask(self):
+        c = self._mod()
+        rung_key, band, ask, _bonus, _flag = c.rung_for(
+            {"closeness": "shared-community", "source": "stated-by-owner"}, "other")
+        self.assertEqual(rung_key, "warm")
+        self.assertEqual(band, "warm 7",
+                         "a shared-group tie that sanctions nothing is the defect this test exists "
+                         "for; it must not fall to the cold floor")
+        self.assertIn("relationships at", ask)
+        self.assertIn("NEVER hire-me", ask,
+                      "the reduced ask must say out loud what it forbids")
+
+    def test_it_does_NOT_reach_rung_5_or_6(self):
+        """Those depend on where the person SITS, never on how well he knows them. Granting them
+        from a closeness tier is how a thin tie becomes an introduction request."""
+        c = self._mod()
+        _k, band, _a, _b, _f = c.rung_for(
+            {"closeness": "shared-community", "source": "stated-by-owner"}, "other")
+        self.assertNotIn("5", band)
+        self.assertNotIn("6", band)
+
+    def test_EVERY_tier_the_interview_offers_has_a_row_in_the_table(self):
+        """The general form of the bug. A new tier added to the interview and not to the table
+        repeats this silently, and the symptom is a correct answer producing a cold verdict."""
+        c = self._mod()
+        lc = importlib.import_module("level_contacts")
+        offered = set(getattr(lc, "STATED_TIERS", ()))
+        self.assertTrue(offered, "the interview offers no tiers, so this test proves nothing")
+        mapped = set(c.TIERS) | set(getattr(c, "TIER_ALIASES", {})) | set(getattr(c, "HOLD_TIERS", ()))
+        missing = sorted(offered - mapped)
+        self.assertEqual(missing, [],
+                         f"offered by the interview but absent from closeness.TIERS: {missing}")
+
+    def test_an_unknown_tier_still_fails_to_the_COLD_floor(self):
+        """The safe direction is unchanged: a typo must never buy a warm ask."""
+        c = self._mod()
+        rung_key, band, _a, _b, flag = c.rung_for(
+            {"closeness": "definitely-not-a-real-tier", "source": "stated-by-owner"}, "other")
+        self.assertNotEqual(band, "warm 7")
+        self.assertIn(rung_key, (None, "cold-stranger", "cold-boss"))
+
+
+class TestLevellingBatchShowsTheEvidence(unittest.TestCase):
+    """🎯 BUG-160. A question you have not given the reader the means to answer is not a question.
+
+    `--batch` marked rows "store flags a two-way thread against this tag" and printed only name,
+    title, company and connect date. The thread that CAUSED the doubt was never shown, so twelve
+    rows at a time the only rational answer was "no". On 2026-08-11 that produced 72 consecutive
+    never-spoke recordings, including a contact who had asked the owner for a shot at a role they
+    were hiring for. The failure is silent and it hardens: the row leaves the queue with
+    source=stated-by-owner and is never asked again.
+    """
+
+    def _mod(self):
+        return importlib.import_module("level_contacts")
+
+    def _capture_batch(self, mod, todo, evidence):
+        import io as _io, contextlib
+        # getattr with a sentinel on purpose: the PRE-FIX module has no _inbound_evidence at all,
+        # and a harness that explodes on the missing name proves only that the name is missing.
+        # The red this test must show is `batch()` RUNNING and printing a doubted row with no
+        # message under it.
+        MISSING = object()
+        real_pending = mod.pending
+        real_ev = getattr(mod, "_inbound_evidence", MISSING)
+        try:
+            mod.pending = lambda *a, **k: todo
+            mod._inbound_evidence = lambda: evidence
+            buf = _io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                mod.batch(12)
+            return buf.getvalue()
+        finally:
+            mod.pending = real_pending
+            if real_ev is MISSING:
+                del mod._inbound_evidence
+            else:
+                mod._inbound_evidence = real_ev
+
+    def test_a_doubted_row_prints_the_inbound_that_caused_the_doubt(self):
+        import datetime as _dt
+        mod = self._mod()
+        quote = ("I popped our chat and your profile after seeing your post regarding some PM "
+                 "positions that will be opening up soon. Very interested.")
+        out = self._capture_batch(
+            mod,
+            [("Dana Fixture", "Northwind Co", "Senior Product Manager", _dt.date(2023, 6, 21),
+              "store flags a two-way thread against this tag — level it")],
+            {"Dana Fixture": ("2024-01-12", quote)})
+        self.assertIn("Dana Fixture", out)
+        self.assertIn("Very interested", out,
+                      "the doubted row was listed WITHOUT the message that caused the doubt, "
+                      "which is the whole defect")
+        self.assertIn("2024-01-12", out)
+
+    def test_a_doubted_row_with_only_pleasantries_says_so_rather_than_going_silent(self):
+        """Silence is indistinguishable from 'the lookup broke'. It has to state the negative."""
+        import datetime as _dt
+        mod = self._mod()
+        out = self._capture_batch(
+            mod,
+            [("Pat Placeholder", "Contoso Financial", "VP, Program Manager", _dt.date(2023, 6, 15),
+              "store flags a two-way thread against this tag — level it")],
+            {})
+        self.assertIn("nothing substantive", out)
+
+    def test_an_unswept_row_needs_no_evidence_line(self):
+        """An unswept row carries no doubt to explain, so it must not gain noise."""
+        import datetime as _dt
+        mod = self._mod()
+        out = self._capture_batch(
+            mod,
+            [("Someone New", "Acme", "PM", _dt.date(2026, 8, 1), "unswept — never asked")],
+            {})
+        self.assertNotIn("💬", out)
+
+    def test_only_THEIR_words_count_as_evidence_never_his_own(self):
+        """His own outbound proves he had their address. It never proves a relationship, and a
+        broadcast he answered is not a two-way thread."""
+        mod = self._mod()
+        rows = [
+            {"FROM": "Jane Doe", "TO": "Pat Q", "CONTENT": "x" * 300,
+             "DATE": "2023-01-01", "IS MESSAGE DRAFT": ""},
+            {"FROM": "Jane Doe", "TO": "Pat Q", "CONTENT": "y" * 300,
+             "DATE": "2023-01-02", "IS MESSAGE DRAFT": ""},
+            {"FROM": "Pat Q", "TO": "Jane Doe", "CONTENT": "Thanks!",
+             "DATE": "2023-01-03", "IS MESSAGE DRAFT": ""},
+        ]
+        import parse_messages
+        real = parse_messages.find_messages
+        try:
+            parse_messages.find_messages = lambda *a, **k: ("fake", rows)
+            ev = mod._inbound_evidence()
+        finally:
+            parse_messages.find_messages = real
+        self.assertNotIn("Pat Q", ev,
+                         "a pleasantry reply to two long outbound messages is not evidence")
+
+    def test_a_draft_is_not_a_conversation(self):
+        mod = self._mod()
+        rows = [
+            {"FROM": "Jane Doe", "TO": "Dana R", "CONTENT": "hi",
+             "DATE": "2023-01-01", "IS MESSAGE DRAFT": ""},
+            {"FROM": "Jane Doe", "TO": "Dana R", "CONTENT": "hi again",
+             "DATE": "2023-01-01", "IS MESSAGE DRAFT": ""},
+            {"FROM": "Dana R", "TO": "Jane Doe", "IS MESSAGE DRAFT": "true",
+             "DATE": "2023-01-04",
+             "CONTENT": "A long unsent draft that should never be treated as something they said "
+                        "to him, because they never actually sent it anywhere at all."},
+        ]
+        import parse_messages
+        real = parse_messages.find_messages
+        try:
+            parse_messages.find_messages = lambda *a, **k: ("fake", rows)
+            ev = mod._inbound_evidence()
+        finally:
+            parse_messages.find_messages = real
+        self.assertNotIn("Dana R", ev)
+
+
+class TestFreshnessMeasuresTheExportNotAProxy(unittest.TestCase):
+    def _mod(self):
+        return importlib.import_module("check_network_freshness")
+
+    def test_an_unranked_newest_connection_does_not_report_the_parse_as_behind(self):
+        """🎯 THE PROXY BUG. warm-network.md only dates the contacts that RANK, so a newest
+        connection who lands only in the undated roster list left the old comparison stuck behind
+        forever — and re-parsing could never move it."""
+        from datetime import date
+        f = self._mod()
+        real = f.recorded_source
+        try:
+            f.recorded_source = lambda path=None: "Connections-08-08-2026.csv"
+            self.assertFalse(f.parse_is_behind("/x/Connections-08-08-2026.csv",
+                                               date(2026, 8, 4), date(2026, 8, 5)))
+        finally:
+            f.recorded_source = real
+
+    def test_a_roster_built_from_an_older_export_IS_reported_as_behind(self):
+        """The direction that must still fire, or the check is decorative."""
+        from datetime import date
+        f = self._mod()
+        real = f.recorded_source
+        try:
+            f.recorded_source = lambda path=None: "Connections-01-01-2020.csv"
+            self.assertTrue(f.parse_is_behind("/x/Connections-08-08-2026.csv",
+                                              date(2026, 8, 4), date(2026, 8, 5)))
+        finally:
+            f.recorded_source = real
+
+    def test_the_header_stamp_carries_a_zip_member_and_still_matches_the_export(self):
+        """🎯 THE SHAPE THE FOUR ORIGINAL CASES NEVER USED. Every case above stamps a bare
+        `Connections-*.csv`, but parse_network writes `<zip>::Connections.csv` for a real LinkedIn
+        archive. Only the export side was split on `::`, so the two basenames could never be equal
+        and the check sat red through a successful parse — the exact stuck-warning failure BUG-146
+        was filed to end, reintroduced by its own fix."""
+        from datetime import date
+        f = self._mod()
+        real = f.recorded_source
+        zipname = "Complete_LinkedInDataExport_08-08-2026.zip (1).zip"
+        try:
+            f.recorded_source = lambda path=None: f"{zipname}::Connections.csv"
+            self.assertFalse(f.parse_is_behind(f"/x/{zipname}", date(2026, 8, 4), date(2026, 8, 5)))
+            # and the real-behind direction still fires through the same shape
+            self.assertTrue(f.parse_is_behind("/x/Complete_LinkedInDataExport_09-09-2026.zip",
+                                              date(2026, 8, 4), date(2026, 8, 5)))
+        finally:
+            f.recorded_source = real
+
+    def test_with_no_header_stamp_it_falls_back_to_dates_rather_than_claiming_fresh(self):
+        """A hand-written warm-network.md has no `Generated by` line. Degrading to the old
+        comparison is imprecise; reporting 'fresh' on no evidence is a false green."""
+        from datetime import date
+        f = self._mod()
+        real = f.recorded_source
+        try:
+            f.recorded_source = lambda path=None: None
+            self.assertTrue(f.parse_is_behind("/x/e.csv", date(2026, 8, 4), date(2026, 8, 5)))
+            self.assertFalse(f.parse_is_behind("/x/e.csv", date(2026, 8, 5), date(2026, 8, 5)))
+        finally:
+            f.recorded_source = real
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# check_job_liveness — a scheduled job that is LOADED is not a job that RAN. durability-check
+# answers the CONFIGURATION question; this answers the REALITY one, and the two come apart
+# silently. Ported from upstream 2026-08-10.
+# ─────────────────────────────────────────────────────────────────────────────
+class TestJobLiveness(unittest.TestCase):
+    def _mod(self):
+        return importlib.import_module("check_job_liveness")
+
+    def test_the_kit_does_not_assume_whose_launchd_labels_these_are(self):
+        """🛑 A hardcoded prefix would match nothing on the operator's machine and report that as
+        'no jobs scheduled' — a misconfiguration wearing the costume of a clean result."""
+        src = open(os.path.join(SCRIPTS, "check_job_liveness.py")).read()
+        self.assertNotIn("com.michael", src, "an owner-specific label prefix shipped in the kit")
+        self.assertIn("JOBKIT_LAUNCHD_PREFIX", src,
+                      "the prefix must come from config, not from a literal")
+
+    def test_the_allowance_is_read_from_the_plist_not_typed_per_job(self):
+        """⛔ A typed cadence per job is how the job list went stale twice upstream. A weekday-only
+        job must be allowed to be silent over a weekend; a daily one must not."""
+        m = self._mod()
+        weekday = {"StartCalendarInterval": [{"Weekday": 1, "Hour": 7}, {"Weekday": 2, "Hour": 7}]}
+        daily = {"StartCalendarInterval": {"Hour": 4, "Minute": 0}}
+        self.assertGreater(m.allowance_days(weekday), m.allowance_days(daily))
+
+    def test_an_unreadable_plist_gets_the_LONGER_allowance_not_the_shorter(self):
+        """Guessing the tighter schedule would manufacture a warning out of missing information,
+        and a check that invents findings is one people stop reading."""
+        m = self._mod()
+        self.assertEqual(m.allowance_days(None), m.allowance_days({"StartCalendarInterval": [{"Weekday": 1}]}))
+
+    def test_no_jobs_at_all_is_reported_as_nothing_to_check_not_as_healthy(self):
+        """A kit user with no scheduling must not read a green 'all jobs ran'."""
+        m = self._mod()
+        real = m._labels
+        try:
+            m._labels = lambda: []
+            self.assertEqual(m.scan(), [])
+        finally:
+            m._labels = real
+
+    def test_a_job_past_its_allowance_is_flagged_silent(self):
+        """The direction that must fire, or the check is decorative."""
+        from datetime import datetime, timezone, timedelta
+        m = self._mod()
+        real_labels, real_plist, real_stamp = m._labels, m._plist, m._stamp_age_days
+        try:
+            m._labels = lambda: ["x.y.zzz"]
+            m._plist = lambda label: {"StartCalendarInterval": {"Hour": 4},
+                                      "ProgramArguments": ["/bin/bash", "/nope.sh"]}
+            m._stamp_age_days = lambda label, now: (99.0, "documents/state/fake.json")
+            rows = m.scan(now=datetime.now(timezone.utc))
+            self.assertTrue(rows[0]["silent"], "a job 99 days silent was not flagged")
+            self.assertEqual(rows[0]["witness_kind"], "stamp")
+        finally:
+            m._labels, m._plist, m._stamp_age_days = real_labels, real_plist, real_stamp
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THE PARTNER-REPORTED BUGS, AND WHY THEIR TESTS BELONG HERE.
+#
+# BUG-101/102/103 were all found by running the pipeline on an install that is not the kit
+# author's, which is the whole value of a second install: every one of them is invisible upstream.
+# `state.py`'s crash needs a record written with no `source_line`; `parse_network.py`'s escape needs
+# a redirected data root; `record_finding.py`'s closed vocabulary needs a `segments.md` that is
+# still the shipped template. The author's own repo produces none of those conditions.
+#
+# ⛔ THE TESTS SHIPPED ONLY UPSTREAM, WHICH IS THE WRONG REPO. They lived in the author's
+# `tests/test_partner_reported_bugs.py` and in neither the kit source nor any install, so the
+# regression guard for a partner-reported bug could not run on a partner's machine. Ported here
+# 2026-08-10 after the reporter asked, on kit issue #1, whether the fix AND its test had landed.
+#
+# ⚠️ AND THE STATUS IS THE POINT. BUG-101 was once marked "RETIRED, fixed upstream in f093e6b" and
+# the reporter deleted their local patch on that basis. It had never been fixed. A claim that a fix
+# landed removed the only protection that existed, so these ship as tests rather than as notes.
+# ─────────────────────────────────────────────────────────────────────────────
+class TestPartnerReportedRegressions(unittest.TestCase):
+    def test_BUG101_state_fmt_rec_survives_a_record_with_no_source_line(self):
+        """`state.py current|history` must render, not crash, on a record missing source_line.
+
+        The original guard read `rec['source_line'] if rec.get('source_line') != '' else ''`, which
+        looks like it handles the absent case and does the opposite: `.get()` returns None,
+        `None != ''` is True, so the truthy branch hard-indexes the missing key.
+        """
+        state = importlib.import_module("state")
+        rec = {"kind": "boss", "key": "zz-co", "as_of": "2026-08-09",
+               "as_of_source": "authored", "source_file": "", "payload": {"name": "ZZ Person"}}
+        try:
+            out = state._fmt_rec(rec)
+        except KeyError as e:
+            self.fail(f"BUG-101: _fmt_rec crashed with KeyError {e} on a record with no "
+                      f"'source_line'. boss_registry.py writes exactly this shape.")
+        self.assertIn("2026-08-09", out)
+        self.assertNotIn("None", out,
+                         "an absent source_line must render as nothing, never the string 'None'")
+
+    def test_BUG101_a_present_source_line_is_still_shown(self):
+        """⛔ The fix must not buy safety by dropping the field when it IS there."""
+        state = importlib.import_module("state")
+        rec = {"as_of": "2026-08-09", "as_of_source": "authored",
+               "source_file": "documents/x.md", "source_line": 42, "payload": {}}
+        self.assertIn(":42", state._fmt_rec(rec))
+
+    def test_BUG101_an_empty_source_line_stays_suppressed(self):
+        state = importlib.import_module("state")
+        rec = {"as_of": "2026-08-09", "as_of_source": "authored",
+               "source_file": "documents/x.md", "source_line": "", "payload": {}}
+        self.assertNotIn("documents/x.md:", state._fmt_rec(rec))
+
+    def test_BUG102_parse_network_honors_the_project_dir_override(self):
+        """A script that ignores CLAUDE_PROJECT_DIR writes into the REAL documents/ from a sandbox,
+        so any test that exercises it mutates live data. Reported from an install where the data
+        root is not beside the scripts."""
+        root = tempfile.mkdtemp()
+        try:
+            env_backup = os.environ.get("CLAUDE_PROJECT_DIR")
+            os.environ["CLAUDE_PROJECT_DIR"] = root
+            try:
+                for mod in ("parse_network",):
+                    sys.modules.pop(mod, None)
+                pn = importlib.import_module("parse_network")
+                self.assertEqual(os.path.realpath(pn.REPO), os.path.realpath(root),
+                                 "BUG-102: parse_network ignored CLAUDE_PROJECT_DIR")
+            finally:
+                if env_backup is None:
+                    os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                else:
+                    os.environ["CLAUDE_PROJECT_DIR"] = env_backup
+                sys.modules.pop("parse_network", None)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUG: the 2-line bullet cap measured nothing on a shipped template and called it a pass
+# (kit issue #18, reported 2026-08-10). The template writes `\item{}`; the checker looked for
+# `\item` followed by WHITESPACE, so a brace matched nothing and the cap printed
+# "all 0 bullets ≤195 chars". The check that exists to stop a three-line bullet reaching a
+# recruiter was dead on that template and green while dead.
+# ─────────────────────────────────────────────────────────────────────────────
+class TestBulletCapMeasuresWhatIsThere(unittest.TestCase):
+    PAT = r'\\item(?![a-zA-Z])\s*(?:\{\})?\s*(.+)'
+
+    def _bullets(self, tex):
+        vr = importlib.import_module("verify_resume")
+        src = open(os.path.join(SCRIPTS, "verify_resume.py"), encoding="utf-8").read()
+        self.assertIn(self.PAT.replace("\\\\", "\\\\"), src.replace("\\\\", "\\\\"),
+                      "the widened bullet pattern is not in verify_resume.py")
+        return [s for s in (re.sub(r'\s+', ' ',
+                                   re.sub(r'\\[a-zA-Z]+\*?(\[[^\]]*\])?', '', m)
+                                   .replace('{', '').replace('}', '')).strip()
+                            for m in re.findall(self.PAT, tex)) if s]
+
+    def test_the_brace_spelling_is_counted(self):
+        """`\\item{}Text` is the shipped template's spelling and must be measured."""
+        self.assertEqual(len(self._bullets(r"\item{}Led the migration of 20 systems")), 1)
+
+    def test_the_whitespace_spelling_still_counted(self):
+        """⛔ The widening must not cost the spelling that already worked."""
+        self.assertEqual(len(self._bullets(r"\item Led the migration of 20 systems")), 1)
+
+    def test_layout_commands_are_NOT_counted_as_bullets(self):
+        """⚠️ The regression the first version of this fix introduced. The old pattern's mandatory
+        whitespace was quietly excluding these; making it optional admitted them, and real résumés
+        gained two phantom bullets each."""
+        for cmd in (r"\itemsep0pt", r"\begin{itemize}", r"\itemize"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self._bullets(cmd), [], f"{cmd} counted as a bullet")
+
+    def test_an_unfilled_skeleton_bullet_is_not_a_bullet(self):
+        """A placeholder must not satisfy the zero-guard."""
+        self.assertEqual(self._bullets(r"\item{}"), [])
+
+    def test_zero_bullets_is_reported_as_a_FAILURE_TO_MEASURE_not_a_pass(self):
+        """⛔ THE HALF THAT MATTERS. A count of zero on a résumé means the checker did not measure,
+        and 'nothing was too long' must never be confused with 'nothing was examined'."""
+        src = open(os.path.join(SCRIPTS, "verify_resume.py"), encoding="utf-8").read()
+        self.assertIn("did NOT measure anything", src,
+                      "no zero-bullet guard: a résumé the checker cannot read still reports PASS")
+        i_guard = src.index("did NOT measure anything")
+        i_pass = src.index('"2-line bullet cap", "PASS"')
+        self.assertLess(i_guard, i_pass,
+                        "the zero-guard must be evaluated BEFORE the PASS branch")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUG: the summary checks keyed on a hardcoded "Summary" heading, so a résumé using OBJECTIVE
+# (the section name the nli-dense source format prescribes, and one this kit points operators at)
+# silently disarmed BOTH of them (kit issue #19, 2026-08-10). "Summary ≤300" degraded to a WARN
+# and "Summary voice (no 1st-person)" emitted NO ROW AT ALL, so its absence was invisible.
+# ⛔ An operator following the kit's own guidance disarmed the kit's own gate, and nothing said so.
+# ─────────────────────────────────────────────────────────────────────────────
+class TestSummaryChecksSurviveTheHeadingName(unittest.TestCase):
+    def _report(self, heading):
+        vr = importlib.import_module("verify_resume")
+        root = tempfile.mkdtemp()
+        try:
+            p = os.path.join(root, "r.tex")
+            head = f"\\section*{{{heading}}}\n" if heading else ""
+            open(p, "w", encoding="utf-8").write(
+                "\\documentclass[10pt,letterpaper]{article}\n\\begin{document}\n\n"
+                + head +
+                ("I drove the turnaround and I led it.\n\n" if heading else "") +
+                "\\href{https://www.example.com}{www.example.com}\n\n"
+                "\\begin{itemize}\n\\item Led the turnaround of a payments platform.\n"
+                "\\end{itemize}\n\\end{document}\n")
+            return {label: (status, detail) for label, status, detail in vr.check(p)}
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_every_accepted_heading_runs_BOTH_checks(self):
+        """Summary, Objective and Profile must behave identically. The bug was that only one did."""
+        for heading in ("Summary", "Objective", "Profile"):
+            with self.subTest(heading=heading):
+                r = self._report(heading)
+                self.assertIn("Summary ≤300", r, f"{heading}: length check did not run")
+                self.assertIn("Summary voice (no 1st-person)", r,
+                              f"{heading}: THE VOICE CHECK VANISHED — a silently disarmed gate")
+                self.assertEqual(r["Summary voice (no 1st-person)"][0], "FAIL",
+                                 f"{heading}: first-person text was not caught")
+
+    def test_a_missing_summary_is_a_FAILURE_TO_EVALUATE_not_a_warn(self):
+        """⛔ The checker cannot tell 'no summary' from 'named something I do not recognize'. The
+        second means two gates went dark, so neither may report soft."""
+        r = self._report(None)
+        self.assertEqual(r["Summary ≤300"][0], "FAIL",
+                         "a résumé with no readable summary still reported a soft WARN")
+        self.assertIn("Summary voice (no 1st-person)", r,
+                      "the voice row must be EMITTED even when it cannot run, or its absence is "
+                      "the thing nobody notices")
+
+    def test_the_accepted_headings_are_named_in_the_failure_text(self):
+        """An operator who used a fourth name needs to know which three were tried."""
+        detail = self._report(None)["Summary ≤300"][1]
+        for h in ("Summary", "Objective", "Profile"):
+            self.assertIn(h, detail)
+
+
+class TestDeclaredWorkdayEndExtendsTheOutboundWindow(unittest.TestCase):
+    """🕰 The outbound-window hour is a FLOOR, never a statement that your day ENDS there.
+
+    ⛔ THE FAILURE THIS CLOSES. `OUTBOUND_WINDOW_CLOSES_ET` says "do not offer stop for the day
+    before this hour". Without a declaration it silently does a second job it was never given:
+    deciding the day is OVER at that hour. One minute past it the derived default flips to
+    "Stop for the day" and stays there, so every picker for the rest of an evening you meant to
+    work leads with an option you already rejected.
+
+    🧪 THE MECHANISM, NOT A SHIPPED HOUR. The clock and the declaration file are both injected, so
+    this asserts that a declaration MOVES the window — it does not bake in any operator's cadence,
+    and it keeps passing for a partner who sets a different hour or disables the window entirely.
+    """
+
+    def setUp(self):
+        import tempfile
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+        import pair_brief
+        self.pb = pair_brief
+        self.tmp = tempfile.mkdtemp(prefix="workday-")
+        self.real = pair_brief.WORKDAY_FILE
+        pair_brief.WORKDAY_FILE = os.path.join(self.tmp, "workday.json")
+
+    def tearDown(self):
+        import shutil
+        self.pb.WORKDAY_FILE = self.real
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _declare(self, day, until):
+        with open(self.pb.WORKDAY_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"date": day, "until_et": until}, fh)
+
+    def test_a_declaration_keeps_the_window_open_past_the_configured_hour(self):
+        from datetime import datetime as dt
+        floor = self.pb.OUTBOUND_WINDOW_CLOSES_ET
+        if not floor:
+            self.skipTest("window disabled in this install; nothing to extend")
+        self._declare("2026-08-05", f"{floor + 4:02d}:30")
+        self.assertTrue(self.pb._outbound_window_open(dt(2026, 8, 5, floor + 2, 0)),
+                        "a declared later end did not keep the window open")
+
+    def test_another_dates_declaration_is_ignored(self):
+        """A late Tuesday must not quietly become a standing rule, so forgetting to clear is safe."""
+        from datetime import datetime as dt
+        floor = self.pb.OUTBOUND_WINDOW_CLOSES_ET
+        if not floor:
+            self.skipTest("window disabled in this install")
+        self._declare("2026-08-04", "23:00")
+        self.assertFalse(self.pb._outbound_window_open(dt(2026, 8, 5, floor + 2, 0)),
+                         "yesterday's declaration governed today")
+
+    def test_a_declaration_can_never_shorten_the_window(self):
+        """Otherwise "I am done at 11" resurrects the premature stop prompt the window prevents."""
+        from datetime import datetime as dt
+        floor = self.pb.OUTBOUND_WINDOW_CLOSES_ET
+        if not floor:
+            self.skipTest("window disabled in this install")
+        self._declare("2026-08-05", "01:00")
+        self.assertTrue(self.pb._outbound_window_open(dt(2026, 8, 5, max(floor - 1, 0), 0)),
+                        "a declaration cut the window below the configured floor")
+
+
+# ⛔ THIS GUARD MUST BE THE LAST THING IN THE FILE, AND IT WAS NOT (fixed 2026-08-11).
+# `unittest.main()` runs and exits at the point it is reached, so every class defined BELOW it
+# was never even defined, let alone run. Measured: the documented invocation
+# `python3 partner-starter/tests/test_gates.py` reported "Ran 362 tests / OK" while pytest
+# collected 464 from the same file. **102 tests, 22% of the suite, were dead** — and
+# /sync-kit names this exact command as the gate that must be green before the kit is pushed,
+# so the verification step carried a silent 22% blind spot.
+# ⚠️ A NEW TEST APPENDED TO THE END OF THIS FILE IS THE NORMAL WAY TO ADD ONE, which is what
+# makes this severe: the more recently a test was written, the more likely it never ran.
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

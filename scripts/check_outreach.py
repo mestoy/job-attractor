@@ -413,6 +413,66 @@ NO_ASK_TYPES = {"reunion", "invitation"}
 # arms a follow-up at all. Two copies of one rule drift, and the copy nobody re-reads is the one
 # that drifts, so tests/test_style.py pins them equal. Change both or change neither.
 WARM_RUNGS = ("warm", "referred", "event", "off-ladder")
+# ── THE RUNG VOCABULARY, and the flag mixup it exists to refuse (kit issue #21, 2026-08-11) ───────
+# `--type` was hardened against unrecognized values on 2026-07-21. `--rung`, parsed eleven lines
+# away, never was: an unrecognized rung was not an error, it was silently "not warm", so the body got
+# the COLD signature profile while mtype stayed "outreach" and the full 7-ingredient + O-A-K block
+# ran. The operator got a confident, detailed, WRONG failure.
+#
+# The reporter staged a no-ask reunion note, ran `--rung reunion`, and was told it was missing an
+# ask, a "what you can offer them" beat and a portfolio sign-off. The obvious repair is to ADD AN ASK
+# TO A NO-ASK NOTE, so the gate would have talked him into breaking the rule the gate enforces.
+#
+# ⛔ THE SET IS log_linkedin_send.RUNGS MINUS `reunion`, AND THAT ONE OMISSION IS THE WHOLE FIX.
+# A reunion is a message TYPE in this script, never a rung: it reaches the no-ask profile through
+# NO_ASK_TYPES. The logger legitimately records a send AT rung reunion, so the two vocabularies
+# diverge here by exactly one word, deliberately, and the parity test below pins the difference so
+# the divergence stays a decision rather than drift.
+#
+# ⚠️ A FIRST DESIGN KEYED ON "was --type also given" AND IT WAS WRONG. It would have refused
+# `--rung reply` with no `--type`, which is a legitimate shape the suite already exercises
+# (test_10_ingredient_failure_names_the_type_flag lints an in-thread body bare on purpose, to prove
+# the failure NAMES the flag that fixes it). Caught by running the suite, not by reading it.
+#
+# ⚠️ Typed here rather than imported from log_linkedin_send: check_outreach is imported by
+# check_style.py, check_preview.py, verify_resume.py and record_decision.py, and widening their
+# import graph to fix a flag is a bigger change than the fix. Drift is covered by a parity test
+# instead, the shape test_07d already uses for WARM_RUNGS.
+KNOWN_RUNGS = frozenset({
+    "cold-boss", "cold-stranger", "warm", "referred", "event", "off-ladder",
+    "reply", "thank-you", "follow-up", "application",
+})
+RUNG_ALIASES = {"followup": "follow-up", "thankyou": "thank-you"}
+
+
+def _validate_rung(raw):
+    """Normalize a --rung value, or refuse with exit 2. Returns the normalized rung.
+
+    ⚖️ Mirrors the --type validation below it: strip/lower, alias at the boundary, membership test,
+    one line to stdout, exit 2. The two siblings now fail the same way.
+
+    ⛔ FALL-THROUGH, stated because a gate written for one rung has bound the wrong rungs three times
+    in this repo: an ABSENT --rung stays legal and unchanged (partner-starter/tests/test_gates.py
+    shells out with no flags at all, and several checklists tell the operator to run it bare). Every
+    one of the ten known rungs passes untouched, with or without a --type. The only value this
+    refuses is one that is not a rung.
+    """
+    rung = (raw or "").strip().lower()
+    if not rung:
+        return ""
+    rung = RUNG_ALIASES.get(rung, rung)
+    if rung not in KNOWN_RUNGS:
+        msg = f"unknown --rung '{rung}'. One of: " + " | ".join(sorted(KNOWN_RUNGS))
+        # Name the likely repair. `reunion`, `invitation`, `bump` and `outreach` are all real
+        # vocabulary in this script, just for the OTHER flag, which is what makes the mixup ordinary
+        # rather than exotic.
+        as_type = TYPE_ALIASES.get(rung, rung)
+        if as_type in KNOWN_TYPES:
+            msg += (f"\n   '{rung}' is a message TYPE here, not a rung. Did you mean "
+                    f"--type {as_type}?")
+        print(msg)
+        sys.exit(2)
+    return rung
 
 
 # ── THE INVITATION NOTE (added 2026-07-27, ruled off the July numbers) ─────────────
@@ -596,6 +656,7 @@ def main():
         if _i + 1 < len(sys.argv):
             rung = sys.argv[_i + 1]
         sys.argv = sys.argv[:_i] + sys.argv[_i + 2:]
+        rung = _validate_rung(rung)
     # MESSAGE-TYPE awareness (added 2026-07-20). The 7-ingredient + O-A-K check is intrinsically
     # about a COLD/WARM INTRO ("why you chose them", "what you can offer", a one-of-a-kind anchor).
     # A thank-you / reply / follow-up-bump has none of those by nature, so running the ingredient
@@ -741,9 +802,19 @@ def main():
     # ⚠️ Derived from the configured identity, never hardcoded. The main pipeline can name one
     # person; a kit cannot, and a hardcoded name here silently fails every signature check
     # for everyone else while reporting a formatting error they cannot fix.
+    # ⛔ THE FULL NAME MUST BE AN ALTERNATIVE, AND IT MUST COME FIRST (fixed 2026-08-09).
+    # This built the alternation from NAME TOKENS ONLY, so a two-word OWNER_NAME produced
+    # `(?:First|Last)` and the joined full name was never an option. A cold-boss email signed
+    # with the FULL name then FAILED the signature gate while a single-token sign-off passed, which
+    # is the opposite of what the comment above this line says cold outreach should use. Reported
+    # from a partner install, which is the only place it could show: an owner whose sign-off is one
+    # token never meets it.
+    # ⚠️ ORDER IS LOAD-BEARING. Python's alternation is first-match with backtracking, so a shorter
+    # token listed first can match and then fail the following `\n`. Putting the longest form first
+    # makes the pattern correct without depending on backtracking to rescue it.
     _parts = [p for p in re.split(r"\s+", OWNER_NAME.strip()) if p]
     _NAME = "(?:" + "|".join(re.escape(x) for x in dict.fromkeys(
-        _parts + [OWNER_FIRST])) + ")" if _parts else r"(?:\w+)"
+        [OWNER_NAME.strip()] + _parts + [OWNER_FIRST])) + ")" if _parts else r"(?:\w+)"
     _WARM_LANE = (rung or "").strip().lower() in WARM_RUNGS
     if not _IN_THREAD:
         _full_block = bool(re.search(r"\n\n\n" + _NAME + r"\n(https?://)?(www\.)?" + re.escape(OWNER_SITE),

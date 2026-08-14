@@ -135,6 +135,11 @@ tightening it again.
 > **Why this section exists:** the two steps that sit BETWEEN screen and send get dropped first under a one-word go-ahead, a long session, or parallel work — precisely the steps whose output is a PAUSE or a STOP, which is what prevents wasted or wrong work.
 - **LIVE-ROLE VERIFY FIRST (`workflow-checklist.md` step 4).** Run `python3 scripts/check_ats.py "<company>"` and confirm against the company's real ATS/careers page BEFORE any scorecard or decision ask. Confirm from the JD text: work-arrangement + travel + comp band + seniority + reporting line + lane match. **A NO-live-role verdict is NOT a drop — it FORCES the RADAR register** ("I'd love to be on your radar") and forbids live-role framing ("I applied", "let's talk about your opening"). If the JD is gated, mark facts **UNVERIFIED**, never assumed.
 - **SCORECARD + PAUSE (`workflow-checklist.md` step 6) — the actual BUILD-GATE.** Present the badge card (🟢SEND/🔵PREP/🟡RADAR/🔴DROP/⚪UNVERIFIED · Boss·Lane line · 2-3 sentence org/product/why-this-boss narrative · check table · `> **👉 YOUR CALL:**`) with all gaps CLOSED, then **WAIT for your explicit build/skip ruling.** No deep-dive, no tab-opening, no praise options, no résumé before that ruling.
+- 🪪 **A CONTACT SCORECARD IS OWED BEFORE ANY CO-CREATION PICKER, AT EVERY RUNG (ruled 2026-08-11).** Run `python3 scripts/contact_card.py "<Full Name>" --record` and SHOW the card before opening any picker that co-creates outreach text for a person.
+  **THE HOLE IT CLOSED.** The rung 1-2 and warm exemptions are right that a zero-ask note needs no BUILD ruling, and were wrong that it therefore needs no INFORMATION. Upstream on 2026-08-11 the ranker offered a contact at "score 39.6" as the day's pick when SIX rows scored 39.6 and five carried a byte-identical reason. That contact was first in a six-way tie broken by connect date, shown as a #1 verdict, and three notes had already gone out with the owner never told who the person was.
+  **The card carries:** why them plus everyone tied within 0.1 with the tiebreak NAMED, live-verified title and employer (never the export snapshot, which freezes a title at the connect date), rung and what it sanctions, the evidence behind the tier, and the company screen merged in when the target is a boss.
+  ⚖️ INFORMATION, not authorization. It carries no MAC. The ruling stays the owner's.
+  ⏳ One card opens ONE picker, within 2h, matched to `record_scorecard.TTL_SECONDS`. Override is a per-person `card_override` in `contact-closeness.json` carrying BOTH a `ruled_on` and a `reason`.
 - **ONE scorecard = ONE build. Never batch-build off a table "accept"** — the group table is the overview + the recommendation; each individual scorecard is the build-gate. Present "1 of N" and rule one at a time.
 - **A short go-ahead is NOT a scorecard ruling.** "build", "prep these", "go" authorize the ACTIVITY, not a specific boss. **If no scorecard was presented and ruled for THIS company, the gate has not passed** — regardless of what was said.
 - ⛔ **NEVER make you repeat a decision to satisfy a mechanism.** If a gate blocks an instruction you already gave plainly, **the GATE is wrong — fix the gate.** A gate exists to stop the assistant skipping your judgment; the moment it demands you re-express judgment you already gave, it has inverted its purpose. Report gate mechanics only when they change YOUR decision, never as your homework. Chat rulings are captured by `scripts/record_chat_ruling.py` (UserPromptSubmit hook).
@@ -217,3 +222,20 @@ fail silently through a broad `except` and proves nothing.
 ## 💾 PUSH ALWAYS
 Run `./scripts/backup.sh` (commit + push) **after every meaningful change — as soon as you can**, not just at end-of-block. Frequent small pushes > one big end-of-session push.
 **Durability check:** proactively SUGGEST running `scripts/durability-check.sh` (audits the durability layers) after any workflow/rule/skill change AND at every handoff — a default action, not on request. (The kit does not ship OS-level scheduling; wire a daily run yourself if you want one.)
+
+## 📐 Picker shape
+
+- 📐 **PICKER SHAPE, so nobody re-derives it every session (added 2026-08-10, asked for by a partner install).**
+  - ⛔ **NO `preview` ON A NEXT-STEP PICKER, ever.** A preview on ANY option flips the whole component
+    into the narrow side-by-side layout: a thin label column on the left, the preview panel on the
+    right. Reaching for `preview` to make rows *bigger* makes the list **smaller**, which is the trap
+    a partner hit twice in one session. Previews are for comparing concrete artifacts (mockups, code,
+    diagram variants), never for a next-move choice.
+  - **The `description` IS the row.** Two to four sentences, roughly 150 to 320 characters. Under
+    ~120 the row renders as a thin strip and reads compact no matter what; past ~350 it wraps into a
+    wall nobody reads at a glance. Option 1 carries Kuya Andy's read, which naturally lands in range.
+  - **`label` stays short**, two to five words plus its emoji. The label is the scannable handle; the
+    description is where the reasoning goes.
+  - ⚠️ **Some of "compact" is terminal width and cannot be controlled from here.** Say so rather than
+    re-tuning copy against a rendering the picker does not own. The lever this side is: no previews,
+    and descriptions long enough to fill the row.

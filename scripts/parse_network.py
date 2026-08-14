@@ -112,7 +112,18 @@ EXCLUSION_CONFIGURED = bool(EXCLUDED_EMPLOYER_RE or EXCLUDED_PEOPLE_RE)
 SENIOR = re.compile(
     r"\b(founder|co-?founder|ceo|cto|coo|cpo|chief|vp\b|vice president|head of|"
     r"director|president|partner|principal|owner)\b", re.I)
-CONNECTOR = re.compile(r"\b(recruit|talent|people ops|hr\b|human resources|staffing|search)\b", re.I)
+# ⛔ TRAILING-\b ON A STEM (kit issue #27, FIXED 2026-08-11). This read `\b(recruit|…)\b`, and the
+# closing \b meant the `recruit` alternative matched only the BARE word. No real title says
+# "Recruit". So `Recruiter`, `Senior Recruiter`, `Technical Recruiter` and `Recruiting Manager` all
+# fell through classify() into "other" — and "other" is the one bucket parse_network never writes a
+# table for, so rank_criteria._people_rows() cannot see it. The bucket labelled "Connectors —
+# recruiters, talent, people-ops" structurally could not hold a recruiter; its members had all
+# entered through `talent`, `staffing` or `hr`.
+# 🧪 Third instance of the identical defect in this kit. When a stem is what real data SUFFIXES,
+# spell the suffixes.
+# ⚠️ `search` is left as-is on purpose: it fails the OTHER way (too broad), a separate ruling.
+CONNECTOR = re.compile(
+    r"\b(recruit(?:ers?|ing|ment)?|talent|people ops|hr\b|human resources|staffing|search)\b", re.I)
 
 
 _EXPORT_NAME_DATE = re.compile(r"(\d{2})-(\d{2})-(\d{4})")
@@ -473,6 +484,16 @@ def main():
     print(f"contacts with an email exposed: {n_email}")
     for k in ("product", "senior", "connector", "other"):
         print(f"  {k:10} {len(buckets[k])}")
+    # 📊 THE CONSEQUENCE OF "other", SAID OUT LOUD (kit issue #27, 2026-08-11). Only the product,
+    # senior and connector tables are written below, and rank_criteria._people_rows() reads exactly
+    # those three sections. So an uncategorised contact is unrankable AND unmentioned at the same
+    # time, and a silent filter is indistinguishable from a thin network. Some of these drops are
+    # correct ("PSO Senior Consultant" is neither a leadership title nor a connector title), which
+    # is the reason to DISCLOSE the number rather than loosen the categories: the operator can then
+    # question a pool whose denominator he can see.
+    _pool_n = sum(len(buckets[k]) for k in ("product", "senior", "connector"))
+    print(f"  ranker pool: {_pool_n} of {len(rows)} contacts "
+          f"({len(buckets['other'])} uncategorised, not rankable)")
 
     excl_note = ""
     if EXCLUSION_CONFIGURED:
@@ -491,6 +512,15 @@ def main():
             "run the script locally to see them.",
             "> 🔴 = company on the blocked list · 🟡 = company already contacted (a warm intro there "
             "is a re-touch, not a fresh lead).",
+            # 📊 kit issue #27. The three tables below ARE the ranker's pool; everyone else is only
+            # in the full roster at the bottom. Printing the denominator here is the difference
+            # between a filter and a thin network.
+            f"> 📊 **Ranker pool: {_pool_n} of {len(rows)} contacts.** The three tables below are the "
+            f"only sections `rank_criteria.rank_people()` reads. The other "
+            f"{len(buckets['other'])} carry a title that is neither a leadership title nor a "
+            f"connector title, so they are **not rankable**. They appear ONLY in the full "
+            f"1st-degree roster at the bottom of this file. Some of those are close relationships; "
+            f"if you spot one, say so and it can be worked by name.",
             "> **Known since** ranks relationship DISTANCE, which is the axis LaCivita's ladder is "
             "built on: 🟢 3+ years · 🟡 under 3 years · 🔴 connected during the search (on/after your "
             "configured search-start date), so almost certainly search networking rather than a "

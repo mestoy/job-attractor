@@ -93,12 +93,16 @@ def parse_samples(text):
     """
     samples = {}
     # Split on every level-2 header, KEEPING the header text (capturing group).
-    parts = re.split(r"(?m)^(##\s+.*)$", text)
+    # ⛔ LEVEL 2 OR 3. This matched `^##\s` only, so a corpus written with `### Sample 1` never
+    # matched: after two hashes came a third rather than whitespace. The reader then reported the
+    # corpus EMPTY against a file holding eight real sent emails. The corpus file's own "How to add
+    # a sample" section never states a heading level, so nothing told the writer which to use.
+    parts = re.split(r"(?m)^(#{2,3}\s+.*)$", text)
     # parts = [preamble, header1, body1, header2, body2, ...]
     for i in range(1, len(parts), 2):
         header = parts[i].strip()
         body = parts[i + 1] if i + 1 < len(parts) else ""
-        m = re.match(r"##\s+Sample\s+(\d+)\s*[—–-]?\s*(.*)$", header)
+        m = re.match(r"#{2,3}\s+Sample\s+(\d+)\s*[—–-]?\s*(.*)$", header)
         if not m:
             continue
         num = int(m.group(1))
@@ -260,11 +264,28 @@ def main(argv):
     # first-run message kept pointing at a sample nobody has.
     have = [n for n in TYPE_MAP[mtype] if n in samples]
     if not have:
-        print("⚠️ Your corpus is empty, so there are no samples to read yet. Everything below is "
-              "the universal rules.")
-        print("   Fill it in about 15 minutes with `/voice-setup`. Until you do, outreach drafts "
-              "come out in a generic register, which is the one thing that makes a message look "
-              "automated.")
+        # ⛔ ABSENCE OF A MATCH IS NOT ABSENCE OF CONTENT, and saying the second when the first is
+        # true sends the operator to redo work already done. This branch used to announce the
+        # corpus EMPTY and prescribe fifteen minutes of filling, against a file that already held
+        # eight verbatim sent emails the reader simply could not see.
+        try:
+            with open(SAMPLES_PATH, encoding="utf-8") as _fh:
+                _lines = len(_fh.read().splitlines())
+        except OSError:
+            _lines = 0
+        if samples:
+            print(f"⚠️ No sample is mapped to '{mtype}' yet, though the corpus holds "
+                  f"{len(samples)} sample(s). Everything below is the universal rules.")
+        elif _lines > 5:
+            print(f"⚠️ NO sample headers matched in a corpus of {_lines} lines. That is a PARSE "
+                  f"result, not an empty file: check the sample headings are `## Sample N` or "
+                  f"`### Sample N`. Everything below is the universal rules.")
+        else:
+            print("⚠️ Your corpus is empty, so there are no samples to read yet. Everything below "
+                  "is the universal rules.")
+            print("   Fill it in about 15 minutes with `/voice-setup`. Until you do, outreach "
+                  "drafts come out in a generic register, which is the one thing that makes a "
+                  "message look automated.")
     else:
         print("Read these samples FRESH before drafting: Sample " +
               ", ".join(str(n) for n in TYPE_MAP[mtype]) + ".")

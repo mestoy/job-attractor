@@ -919,6 +919,28 @@ def _alias_index(kind):
     return index
 
 
+# Every time a recorded alias overrode a row that existed under that same spelling. Kept as data so
+# a caller can report it, and warned ONCE per pair on stderr so a wrong merge cannot hide inside a
+# ranking loop that calls resolve() thousands of times.
+ALIAS_OVERRIDES = []
+_ALIAS_WARNED = set()
+
+
+def _note_alias_override(kind, scraped_key, canonical_key):
+    pair = (kind, scraped_key, canonical_key)
+    ALIAS_OVERRIDES.append(pair)
+    if pair in _ALIAS_WARNED:
+        return
+    _ALIAS_WARNED.add(pair)
+    try:
+        sys.stderr.write(
+            f"ℹ️  state.resolve: recorded alias overrode an existing {kind} row — "
+            f"{scraped_key!r} → {canonical_key!r}. If those are DIFFERENT companies, the alias on "
+            f"{canonical_key!r} is wrong; fix the alias, never the matcher.\n")
+    except Exception:
+        pass
+
+
 def resolve(kind, raw):
     """The canonical key for a raw name, or None when the store has never heard of it.
 
@@ -927,13 +949,36 @@ def resolve(kind, raw):
     COMPARING: two unknown companies both get a key, both keys are non-empty, and a caller that
     treats "key_for returned something" as "the store knows this" will happily compare two guesses.
     `resolve()` answering None is how a caller can tell the difference.
+
+    ⚖️ A RECORDED ALIAS OUTRANKS AN INCIDENTALLY-SCRAPED ROW. This used to return `k` the moment `k`
+    existed, and consulted aliases only for keys the store had never seen. That inverted the
+    module's own principle, stated above: a spelling collapse is meant to be a RECORDED RULING and
+    not a read-time guess. A scraped spelling gets its own row BECAUSE a sweep banked it, which is
+    exactly when the collapse is wanted, so the ruling lost to the scrape every time it mattered.
+
+    📊 The receipt from the tree this shipped in: six already-contacted companies were sitting in the
+    screening queue under variant spellings, and every leak was a VARIANT rather than an exact miss
+    (a domain-suffixed name against a bare one, a full legal name against a short one, and so on).
+    Exact-key matches: zero. One of those companies had already received a cold-boss email with a
+    resume attached, three weeks before the board offered it back as fresh.
+
+    ⛔ THIS IS NOT FUZZY MATCHING and the refusal above still stands. Nothing collapses unless a row
+    explicitly listed the other spelling in `payload.aliases`; `_alias_index` never self-maps, so an
+    alias always points somewhere deliberate. What changed is only WHICH of two recorded facts wins.
+    ⚠️ An override is LOGGED rather than silent, because the failure mode of this rule is merging two
+    genuinely different companies, and that must be visible in the run that does it.
     """
     k = key_for(kind, raw)
     if not k:
         return None
+    aliased = _alias_index(kind).get(k)
+    if aliased and aliased != k:
+        if k in _known_keys(kind):
+            _note_alias_override(kind, k, aliased)
+        return aliased
     if k in _known_keys(kind):
         return k
-    return _alias_index(kind).get(k)
+    return None
 
 
 def register(kind, name, alias=None, as_of=None, as_of_source=None, **fields):

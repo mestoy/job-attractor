@@ -1,6 +1,6 @@
 ---
 name: boss-hunt-message
-description: Draft a boss-hunt outreach email to a specific hiring decision-maker in Andrew LaCivita's structure and YOUR voice, with your honesty guardrails and a public-facts-only social deep-dive. Output is a draft for you to review; never send.
+description: Draft a boss-hunt outreach email to a specific hiring decision-maker in Andrew LaCivita's structure and YOUR voice, with your honesty guardrails and a public-facts-only social deep-dive. Built WITH you beat by beat through pickers, never handed over as a finished draft; never send.
 ---
 
 # Boss-Hunt Message skill (generic starter)
@@ -48,3 +48,21 @@ Apply YOUR guardrails from `documents/PROFILE.md` (verified figures only; correc
 
 ## Output
 Return **To**, **Subject**, **Body** (résumé attached), plus a 2–3 line "why this match." **Do not send. Do not auto-open email without your go.**
+
+## ⛔ CO-CONSTRUCTION IS THE METHOD, not a finished draft (ruled 2026-08-10)
+
+This skill's description used to say *"Output is a draft for you to review."* **That was wrong and it
+is retired.** It contradicted `lacivita-line-by-line-outreach` in the same kit, and a partner's
+picker asserted the losing doctrine in front of their user because the two shipped side by side.
+
+**The message is built WITH you, in stages:** angle concepts with sample lines → you pick → phrasings
+in your voice → you pick → assemble → you send. Every type, including follow-ups, replies and warm
+intros. A batch of finished drafts handed over as text is the forbidden pattern.
+
+⚖️ **Why this is the canonical half.** The method's whole claim is that the message sounds like YOU,
+and a draft written for your approval regresses to the assistant's register no matter how good the
+voice sample is. Picking the angle and the phrasing is what keeps it yours. It is slower on purpose.
+
+⚠️ **Prefilled delivery is a DIFFERENT stage and does not contradict this.** Once the beats are
+picked and assembled, the finished message ships as a prefilled draft in your mail client rather than
+as text to copy. Co-construction is how it gets WRITTEN; prefilling is how it gets DELIVERED.

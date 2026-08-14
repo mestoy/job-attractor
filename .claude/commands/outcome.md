@@ -96,7 +96,7 @@ Update the matched row's `status` column (e.g. `applied` → `interview` → `of
 Count the `outcome.md` files under `documents/applications/` with a **final** status (not `in_progress`).
 
 - If 3 or more are resolved (or 2+ share a pattern - same role type rejected twice, same sector going silent), suggest:
-  > "You now have <N> resolved applications on record. Run `/setup` (Path A) to fold them into your evaluation framework - it calibrates fit scoring from what actually got interviews, and mines your interview feedback for STAR examples."
+  > "You now have <N> resolved applications on record. Run `/setup` (Path A) to fold them into your evaluation framework - it calibrates fit scoring from what got interviews, and mines your interview feedback for STAR examples."
 - Do **not** write anything into `04-job-evaluation.md` or other skill files yourself. `/setup` Path A owns that merge - it is read-before-write and idempotent, and duplicating its logic here would race it.
 
 ---

@@ -126,6 +126,27 @@ def _blocked():
         if not line.strip().startswith(("-", "*")):
             continue
         head = re.sub(r"^\s*[-*]\s*", "", line)
+        # ⛔ TAKE THE BOLDED SPAN FIRST. `- **Name** …` is the dominant entry shape and the writer
+        # that produces it (`reconcile_findings.py`) emits `- **Name** (lane, YYYY-MM-DD). Sentence.`
+        # NEITHER delimiter below fires on that: the parenthetical split needs the text after `(`
+        # to start uppercase, a digit, a domain or one of the named tokens, and a lane slug is
+        # lowercase; the second split needs a hyphen with spaces on BOTH sides, which the written
+        # form lacks. So the whole description was absorbed into the company name.
+        #
+        # 📊 TWO DISTINCT FAILURES, and the second is the dangerous one. A LONG description blew the
+        # 40-character guard below and the entry was discarded in silence. A SHORT one PASSED the
+        # guard and registered a bogus key that matches no company, so nothing tripped at all.
+        # Measured on a partner install: the reader parsed 26 names, all hand-written legacy
+        # entries, and ZERO of the 31 entries the reconciler had written moments earlier. Every
+        # automated DROP was invisible to this ranker.
+        #
+        # This function's own docstring already names the failure mode: "A blocked-list parser that
+        # silently drops entries is the worst possible failure here: the list reads correct to a
+        # human and does nothing." Take the bold span first; the splits below then run on a clean
+        # name and are harmless.
+        bold = re.match(r"\*\*(.+?)\*\*", head)
+        if bold:
+            head = bold.group(1)
         head = re.split(r"\s*\((?=[A-Z0-9]{2,}|[a-z]+\.[a-z]{2,}|POLITICAL|REMOTE|PE-|INHERITED)", head)[0]
         head = re.split(r"\s+[—-]\s+", head)[0]
         for alias in re.split(r"\s*/\s*", head):

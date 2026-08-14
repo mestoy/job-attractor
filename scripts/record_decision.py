@@ -177,6 +177,51 @@ def _is_build_context(*texts: str) -> bool:
     return any(bool(t) and bool(BUILD_CONTEXT.search(str(t))) for t in texts)
 
 
+# ── AN OPTION NUMBER IS A RULING (reported by a partner install, kit issue #15) ───────────────
+#
+# ⛔ THE DEFECT. `classify_answer` reads the ANSWER TEXT and never the SELECTED OPTION LABEL. So
+# answering a scorecard picker with "#1" records `ruling: OTHER` and authorizes nothing, even though
+# option 1 is labelled "Build it" and that exact label classifies as BUILD. Measured here:
+#     'Build it (Recommended)'           -> BUILD
+#     '#1'                               -> OTHER
+#     '#1 but please research him first' -> OTHER
+#
+# ⚖️ WHY THIS IS WORSE THAN A PARSE BUG: it inverts the gate's purpose. HARD-INVARIANTS carries an
+# explicit counter-rule, "NEVER make you repeat a decision to satisfy a mechanism. If a gate
+# blocks an instruction you already gave plainly, the GATE is wrong, fix the gate." Answering by
+# number is a normal thing to do, and operators do it. The failure is SILENT at the moment of the ruling
+# and only surfaces a step later, at a gate that then names the wrong cause.
+#
+# ⛔ IT RESOLVES, IT NEVER INVENTS. The number must LEAD the answer and must index a real option on
+# that question; anything else is left exactly as typed. And the appended free text is KEPT and
+# classified alongside the label, so the strict negation veto still applies: "#1 but skip it" must
+# not become a BUILD. An instruction appended to a choice MODIFIES the build; it does not withdraw
+# one, but only the veto gets to decide that.
+_OPTION_REF = re.compile(r"^\s*(?:option\s*)?#?\s*([1-9])\s*(?=$|[\s.,;:)\]-])", re.I)
+
+
+def resolve_option_answer(answer, question):
+    """Answer text with a leading option reference replaced by that option's LABEL.
+
+    Returns the answer unchanged when there is no leading reference, no options, or the index does
+    not exist. Pure and total: never raises, never guesses beyond the options actually present.
+    """
+    a = str(answer or "")
+    m = _OPTION_REF.match(a)
+    if not m:
+        return a
+    opts = (question or {}).get("options") or []
+    idx = int(m.group(1)) - 1
+    if not (0 <= idx < len(opts)):
+        return a
+    opt = opts[idx]
+    label = str((opt or {}).get("label") or "").strip() if isinstance(opt, dict) else str(opt)
+    if not label:
+        return a
+    rest = a[m.end():].strip()
+    return f"{label} {rest}".strip() if rest else label
+
+
 def classify_answer(answer: str, *context: str) -> str:
     """Ruling for an answer, using the question/header as build CONTEXT. Exact rulings and negations
     are unchanged from classify(); only a free-text OTHER answer that AFFIRMS proceeding INSIDE a
@@ -207,12 +252,69 @@ def extract_company(*texts: str) -> str:
     Prepositions that usually precede a COMPANY (for/at/on) are tried before ones that often
     precede a PERSON (to/with), so "draft the note to Vic at Acme" resolves 'Acme', not 'Vic'.
     """
+    # ── KNOWN NAME FIRST, LONGEST MATCH WINS ─────────────────────────────────────────────────
+    # The proper-noun heuristic below TRUNCATES any company whose name carries a lowercase
+    # connector, because it requires every following word to be capitalized:
+    #     "Build or skip for Pay with Spire?"        -> "Pay"       (stopped at "with")
+    #     header "Pay with Spire"                    -> "Spire"     (started at the last capital)
+    #     "Build or skip for Welcome to the Jungle?" -> "Welcome"   (stopped at "to")
+    # Both halves of that first pair were recorded live against a real ruling.
+    #
+    # ⚠️ THIS IS A SAFETY FIX, NOT A CONVENIENCE ONE. `check_preview` binds authorization to a NAMED
+    # company, so a truncated name does not merely look untidy: it scopes a ruling to a company the
+    # human did not rule on. "Welcome" is not "Welcome to the Jungle". A stray match against a real
+    # company of that shorter name is cross-company authorization leakage.
+    #
+    # ⛔ IT TIGHTENS, IT NEVER WIDENS. A name the pipeline ALREADY KNOWS is authoritative over a
+    # guess, and a LONGER name matches strictly fewer things than the prefix it replaces. Where no
+    # known name is present, behaviour is byte-for-byte what it was.
+    #
+    # ⚠️ THE RECOGNITION LIST IS POLLUTED, AND A LONGEST-MATCH SCAN EXPOSES IT. Names scraped from
+    # markdown include entries that are not companies at all ("company", "remote", bare digits). The
+    # OLD fallback never tripped on them by luck: its greedy multi-word windows meant a bare
+    # "company" was never tested alone. A width-1 scan tests it, and a first draft of this scoped
+    # "Which company should I screen next?" to a company literally named "company", which is the one
+    # thing this edit may not do.
+    #
+    # The guard is POSITIONAL rather than a denylist, because a denylist rots as the list does: a
+    # SINGLE-word known name only counts where a company actually sits, directly after a company
+    # preposition or standing alone as the whole text. Multi-word known names need no guard; they
+    # are too specific to collide.
+    known = _known_companies()
+    if known:
+        for t in texts:
+            s_txt = str(t or "")
+            if not s_txt:
+                continue
+            best = ""
+            # 6 words is well past the longest real name in the list and keeps the scan cheap.
+            for width in range(6, 0, -1):
+                pat = r"\b([A-Za-z][\w&.\-]*(?:\s+[\w&.\-]+){%d})" % (width - 1)
+                for m in re.finditer(pat, s_txt):
+                    cand = m.group(1).strip().rstrip(".,!?;:")
+                    if cand.lower() not in known or len(cand) <= len(best):
+                        continue
+                    if width == 1:
+                        before = s_txt[:m.start()].rstrip()
+                        anchored = bool(re.search(r"\b(?:for|at|on|to|with)$", before, re.I))
+                        if not (anchored or cand == s_txt.strip().rstrip(".,!?;:")):
+                            continue
+                    best = cand
+            if best:
+                return best
+
     for prep in (r"for|at|on", r"to|with"):
         for t in texts:
             if not t:
                 continue
+            # CONNECTOR-TOLERANT PROPER-NOUN RUN. Same truncation as above, for a company the
+            # pipeline has NOT met yet, so the known-name pass cannot help it. Only a closed set of
+            # lowercase joiners is allowed, and each must still be followed by a capitalized token,
+            # so "for the team" and "for a minute" still resolve to nothing.
             m = re.search(
-                r"\b(?:" + prep + r")\s+([A-Z][\w&.\-]*(?:\s+[A-Z][\w&.\-]*){0,2})", str(t))
+                r"\b(?i:" + prep + r")\s+([A-Z][\w&.\-]*"
+                r"(?:(?:\s+(?:of|the|with|and|for|to|at|by|on|in|de|la))*"
+                r"\s+[A-Z][\w&.\-]*){0,3})", str(t))
             if m:
                 return m.group(1).strip().rstrip(".,!?;:")
 
@@ -274,6 +376,10 @@ def main() -> None:
             qtext = str(q.get("question", ""))
             header = str(q.get("header", ""))
             answer = str(answers.get(qtext, "") or "")
+            # Resolve "#1" to the label the assistant authored, BEFORE classifying. The label comes
+            # from a known vocabulary; the free-text answer is the operator writing in their own
+            # words and will never enumerate.
+            _for_class = resolve_option_answer(answer, q)
             rows.append(
                 {
                     "ts": ts,

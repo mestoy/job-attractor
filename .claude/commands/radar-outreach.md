@@ -52,7 +52,7 @@ Draft in the candidate's own register — read `03-writing-style.md` and `02-beh
 - **Voice:** plain, warm, concrete, first-person. Understated wit **baked into** plain statements, never announced ("here's my pitch," "funny thing" — cut these). No jargon dumps or parenthetical credential lists.
 - **Content:** one plain line on what the candidate does (make it easy to say yes) + one genuine, specific reason *this* company draws them. **Verify any company-specific claim** before including it.
 - **Deliver two lengths:** a **≤300-character** version (LinkedIn connection note) and a **fuller** version (LinkedIn message or email body).
-- **Alternate register available:** a pure-curiosity opener with no pitch ("I really like what you're building — how does your product team actually work day to day?") for relationship-first outreach to a peer.
+- **Alternate register available:** a pure-curiosity opener with no pitch ("I really like what you're building — how does your product team work day to day?") for relationship-first outreach to a peer.
 
 ## Step 5: Decide the Channel Together (LinkedIn / email / both)
 

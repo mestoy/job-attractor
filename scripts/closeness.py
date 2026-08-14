@@ -193,18 +193,38 @@ _HOLD_TIER_RE = re.compile(r"^(paused|declined|do-?not-?contact|known-DO-NOT-CON
 # second spelling here would silently split the ladder's denominator, which has already happened
 # once upstream with followup/follow-up.
 TIERS = {
-    "worked-together":    ("warm",          "warm 5-7",  "full warm ask, introduction is fair",              "strong"),
-    "know-well":          ("warm",          "warm 5-7",  "full warm ask, introduction is fair",              "strong"),
-    "personal-friend":    ("warm",          "warm 5-7",  "full warm ask; confirm the ask shape first",       "strong"),
-    "classmate":          ("warm",          "warm 5-7",  "full warm ask, a real relationship",               "strong"),
+    # ⚠️ THE BAND SAYS "warm 7 (5-6 if positioned)" AND THE PARENTHESIS IS THE POINT (2026-08-11).
+    # It used to read a flat "warm 5-7", which promised two rungs no closeness answer can grant.
+    # Read Andy's ladder: rung 5 is *they know someone at the target*, rung 6 is *they work at the
+    # target*. Both turn on where the person SITS, which is a fact about their employer, not about
+    # how well the owner knows them. Only rung 7 turns on standing, so rung 7 is the ceiling any tier
+    # here can reach on its own. A strong tie makes the INTRODUCTION ask fair the moment the
+    # position fact is true, and says nothing about it when it is not.
+    # ⛔ Nothing branches on this string — `rank_criteria` unpacks it and never reads it, and
+    # `check_preview` never touches it — so it is a label for a HUMAN, which is exactly why a label
+    # that overstates access is worth fixing. The same category error in its load-bearing form was
+    # BUG-161. [[shared-community-opens-rung-7]]
+    "worked-together":    ("warm",          "warm 7 (5-6 if positioned)", "full warm ask; the rung 5-6 INTRODUCTION ask needs the position fact (they know someone at the target, or work there)", "strong"),
+    "know-well":          ("warm",          "warm 7 (5-6 if positioned)", "full warm ask; the rung 5-6 INTRODUCTION ask needs the position fact (they know someone at the target, or work there)", "strong"),
+    "personal-friend":    ("warm",          "warm 7 (5-6 if positioned)", "full warm ask; confirm the ask shape first, then the position fact for rungs 5-6", "strong"),
+    "classmate":          ("warm",          "warm 7 (5-6 if positioned)", "full warm ask; the rung 5-6 INTRODUCTION ask needs the position fact (they know someone at the target, or work there)", "strong"),
     # THE REDUCED-ASK RULE: friendly-but-thin is a warm rung whose ask must EARN the request. You
     # cannot ask an acquaintance to hire you. Note what this does NOT do: the person stays
     # rank-worthy. "What you may ask" and "whether they are worth reaching" are two columns, never
     # one, and collapsing them is how a useful contact gets silently dropped.
     "know-not-close":     ("warm",          "warm 7",    'reduced ask only: "do you have relationships at [targets]?" NEVER hire-me', "thin"),
-    # Shared community/school/group identity: a warm OPENER even after years of silence, but it is
-    # the ladder's rung 10 (met at a shared context), not a rung 5-7 relationship.
-    "shared-community":   ("event",         "rung 10",   "reconnect plus a leave-behind, not a warm ask",    "thin"),
+    # ⭐ RE-RULED to warm 7 on 2026-08-11. This used to read rung 10 on the reasoning that a shared
+    # context is where you MET rather than a relationship. The occasion for revisiting it: the same
+    # tier was MISSING from the upstream table entirely, so upstream it fell to the cold floor while
+    # here it opened rung 10, and the two copies gave opposite answers to the same question.
+    # 🧭 Settled at Kuya Andy's read, from his own ladder. Rungs 5 and 6 are SITUATIONAL (they know
+    # someone at the target / they work there), so neither is something a closeness tier can grant.
+    # Only rung 7 turns on standing, and its ask survives a thin tie by construction: not "vouch for
+    # me" but "do you have relationships at these three?" Andy: "It doesn't have to be perfect
+    # alignment to your target unit. You just need an 'in.'" A shared group is an in, not a
+    # reference. Rung 10 was rejected because it is for someone met briefly with no thread, and
+    # these contacts wrote real paragraphs.
+    "shared-community":   ("warm",          "warm 7",    'reduced ask only: "do you have relationships at [targets]?" NEVER hire-me', "thin"),
     "best-friend-lapsed": ("reunion",       "off-ladder","reunion with NO ask; outreach later, separately",  "strong"),
     "known-level-tbd":    ("warm",          "BLOCKED",   "ask the level before building anything",           "thin"),
     "never-spoke":        (None,            None,        None,                                               "none"),

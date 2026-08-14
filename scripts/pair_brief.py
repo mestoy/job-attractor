@@ -139,7 +139,74 @@ def _outbound_window_open(now=None):
             # A missing tzdb must not answer in the permissive direction. Failing CLOSED would
             # suppress the stop option forever; failing OPEN costs at most one extra send offered.
             return True
+    # 🕰 A DECLARED END-OF-DAY BEATS THE HOUR CONSTANT.
+    # ⛔ WHY THE CONSTANT ALONE IS NOT ENOUGH. `OUTBOUND_WINDOW_CLOSES_ET` is a FLOOR — do not offer
+    # "stop for the day" before it — and without this it silently does a second job it was never
+    # given: deciding the day ENDS at that hour. One minute past the floor the derived default flips
+    # to "Stop for the day" and stays there, so every picker for the rest of an evening you meant to
+    # work leads with an option you already rejected.
+    # ⚖️ Raising the constant would fix one evening and hide the real gap, which is that there is no
+    # way to SAY when your day ends. This reads a declaration, so a late day and an early one are
+    # both expressible and neither needs a code change.
+    end = _declared_workday_end(now)
+    if end is not None:
+        return now.hour + now.minute / 60.0 < end
     return now.hour < OUTBOUND_WINDOW_CLOSES_ET
+
+
+WORKDAY_FILE = os.path.join(REPO, "documents", "state", "workday.json")
+
+
+def _declared_workday_end(now):
+    """The hour (float, local) you said today ends, or None when you have not said.
+
+    ⚠️ TODAY ONLY, ON PURPOSE. The row carries the date it was declared for and is ignored on any
+    other date, so a late Tuesday cannot quietly become a standing rule. Forgetting to clear it is
+    the likely failure, and this makes forgetting harmless.
+    """
+    try:
+        with open(WORKDAY_FILE, encoding="utf-8") as fh:
+            row = json.load(fh)
+    except Exception:
+        return None
+    if str(row.get("date") or "") != now.strftime("%Y-%m-%d"):
+        return None
+    try:
+        hh, _, mm = str(row.get("until_et") or "").partition(":")
+        end = int(hh) + (int(mm) / 60.0 if mm else 0.0)
+    except ValueError:
+        return None
+    # ⛔ NEVER SHORTEN THE FLOOR. A declaration may extend the outbound window, never cut it below
+    # the configured hour — otherwise "I am done at 11" resurrects the premature stop prompt that
+    # the window exists to prevent.
+    return max(end, float(OUTBOUND_WINDOW_CLOSES_ET))
+
+
+def _set_working_until(value):
+    """Record when TODAY ends. `clear` removes the declaration. Prints what it did."""
+    if str(value).strip().lower() == "clear":
+        try:
+            os.remove(WORKDAY_FILE)
+            print(f"🕰 workday declaration cleared — the {OUTBOUND_WINDOW_CLOSES_ET}:00 floor "
+                  f"governs again.")
+        except FileNotFoundError:
+            print("🕰 nothing to clear.")
+        return
+    try:
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:
+        today = datetime.now().strftime("%Y-%m-%d")
+    hh, _, mm = str(value).partition(":")
+    try:
+        hh, mm = int(hh), int(mm or 0)
+    except ValueError:
+        print(f"🔴 could not read {value!r} as HH:MM — nothing recorded.")
+        return
+    os.makedirs(os.path.dirname(WORKDAY_FILE), exist_ok=True)
+    with open(WORKDAY_FILE, "w", encoding="utf-8") as fh:
+        json.dump({"date": today, "until_et": f"{hh:02d}:{mm:02d}"}, fh, indent=2)
+    print(f"🕰 today ends {hh:02d}:{mm:02d}. 'Stop for the day' will not be derived before then.")
 
 
 PRIORITIES = ["P0", "P1", "P2", "P3", "P4"]
@@ -1094,7 +1161,12 @@ def main(argv=None):
     ap.add_argument("--full", action="store_true", help="whole ladder table (session open)")
     ap.add_argument("--json", action="store_true", help="machine-readable, for hooks and tests")
     ap.add_argument("--stamp", action="store_true", help="the stamp line alone")
+    ap.add_argument("--working-until", metavar="HH:MM",
+                    help="declare when TODAY ends so 'stop for the day' is not derived "
+                         "before it. Today only; ignored on any other date. 'clear' removes it.")
     a = ap.parse_args(argv)
+    if a.working_until:
+        _set_working_until(a.working_until)
     if a.stamp:
         print(stamp())
     elif a.json:

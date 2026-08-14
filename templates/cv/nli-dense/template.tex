@@ -1,0 +1,149 @@
+% =====================================================================
+%  TEMPLATE: nli-dense  —  a TIGHTER one-page variant
+%
+%  WHEN TO USE THIS INSTEAD OF plain-professional:
+%  Two cases. (1) Your one-pager reads sparse or top-heavy: this
+%  variant buys vertical room. (2) Your history genuinely needs two
+%  pages: this format PERMITS 1 OR 2, where plain-professional is a
+%  strict one-pager.
+%
+%  It is NOT "better". It trades breathing room for density.
+%
+%  Derived from the structure of a widely circulated PM resume template.
+%
+%  ⚠️ PACKAGE GUARDS, and they matter. This variant wants `ragged2e`
+%  and `needspace`, which a minimal TinyTeX may not carry. Both are
+%  loaded ONLY if present, each with a plain-LaTeX fallback, so the
+%  file compiles either way. Do not "simplify" the guards away: a
+%  template that fails to compile on the recipient's install is worse
+%  than one that renders slightly plainer.
+% =====================================================================
+% PAGE-LIMIT: 1-2   % this format permits one or two pages; verify_resume reads this line
+\documentclass[10pt,letterpaper]{article}
+
+\usepackage[left=0.75in,right=0.75in,top=0.55in,bottom=0.55in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[scaled]{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{titlesec}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, urlcolor=black, linkcolor=black, pdftitle={[YOUR_NAME] - CV}}
+
+% Ragged right (no hyphenation) if ragged2e is installed; plain \raggedright otherwise.
+\IfFileExists{ragged2e.sty}{%
+  \usepackage[document]{ragged2e}%
+  \setlength{\RaggedRightRightskip}{0pt plus 2.5cm}%
+}{%
+  \raggedright%
+}
+% Keeps a role block from splitting across the page. No-op if needspace is absent.
+\IfFileExists{needspace.sty}{\usepackage{needspace}}{\providecommand{\needspace}[1]{}}
+
+\setlength{\parindent}{0pt}
+% ⭐ THE `plus` IS THE POINT. Stretchable glue lets LaTeX distribute leftover
+% vertical space across every paragraph break, so a SHORT history opens up on
+% its own instead of stacking at the top and leaving a gap at the bottom.
+% Do not replace it with a flat length, and do not hand-tune margins per resume:
+% that makes every build a one-off and you lose "they all look the same".
+\setlength{\parskip}{3pt plus 1pt}
+
+\titleformat{\section}{\bfseries\fontsize{11}{13}\selectfont}{}{0em}{}[\vspace{-4pt}\hrule height 0.6pt]
+\titlespacing*{\section}{0pt}{6pt}{3pt}
+
+\let\olditemize\itemize \let\endolditemize\enditemize
+\renewenvironment{itemize}
+  {\begin{olditemize}\setlength{\itemsep}{1pt}\setlength{\parskip}{0pt}\setlength{\topsep}{0pt}\setlength{\leftmargini}{1.1em}}
+  {\end{olditemize}}
+
+% A role heading that will not be left stranded at the foot of the page.
+\newcommand{\subblock}[1]{\needspace{5\baselineskip}\vspace{1pt}\textit{\textbf{#1}}\vspace{-6pt}}
+
+% ⛔ THE UNFILLED SKELETON MUST COMPILE. The [PLACEHOLDER] tokens carry underscores, and a bare `_`
+% is a math subscript in LaTeX, so this file failed with ~95 errors before a single field was
+% filled in — while install.sh tells you to compile it as your smoke test and /add-template
+% requires a test compile before registering. `underscore` makes `_` behave as text; the catcode
+% fallback does the same on an install that lacks the package. Harmless once your real content is
+% in: a resume has no math.
+\IfFileExists{underscore.sty}{\usepackage{underscore}}{\catcode`\_=12\relax}
+
+\begin{document}
+
+% ============================================================
+%     HEADER  — the title line under the name is this variant's tell
+% ============================================================
+{\fontsize{20}{22}\selectfont\bfseries [YOUR_NAME]}\\[2pt]
+{\fontsize{11}{13}\selectfont [YOUR_TARGET_TITLE]}\\[3pt]
+[YOUR_LOCATION] $\cdot$ [YOUR_REMOTE_STATUS] $\mid$ [YOUR_PHONE] $\mid$ [YOUR_EMAIL] $\mid$ [YOUR_LINKEDIN] $\mid$ [YOUR_WEBSITE]
+
+% ============================================================
+%     SUMMARY  (hard cap: 300 characters)
+% ============================================================
+\section*{Summary}
+[PROFILE_SUMMARY_MAX_300_CHARS]
+
+% ============================================================
+%     CORE SKILLS
+% ============================================================
+\section*{Core Skills}
+\textbf{[SKILL_CATEGORY_1]:} [skills, comma separated]\\
+\textbf{[SKILL_CATEGORY_2]:} [skills, comma separated]\\
+\textbf{[SKILL_CATEGORY_3]:} [skills, comma separated]
+
+% ============================================================
+%     EXPERIENCE  — reverse chronological, ALWAYS. Tailor by rewriting
+%     the summary and bullets, NEVER by reordering the timeline.
+% ============================================================
+\section*{Experience}
+
+% ⭐ THE ACHIEVEMENTS / RESPONSIBILITIES SPLIT IS THE SUBSTANTIVE HALF OF THIS FORMAT, and until
+% 2026-08-10 this skeleton shipped without it (kit issue #19). `\subblock` was defined above and
+% never used, so the template carried the LAYOUT (margins, parskip, needspace) and none of the
+% STRUCTURE, while its name promised the format. An operator following it believed they were using
+% the format and were using the margins.
+%
+% 📊 WHY IT IS WORTH THE LINES, measured by the partner who reported it: restructuring identical
+% content into this shape took a page from 69.8% full to about 83%, because sub-headings consume
+% space structurally instead of by padding. Nothing was invented and no line was added.
+%
+% ⚖️ ACHIEVEMENTS FIRST, and keep it shorter than Responsibilities. Achievements are outcomes with
+% a number attached; Responsibilities are scope, and follow the formula ACTION + KEYWORDS + SCOPE +
+% IMPACT. If a role has no achievement worth a number, that is worth knowing before the résumé goes
+% out — do not pad the section to fill it.
+\noindent\textbf{[COMPANY_1]} \hfill [LOCATION_1] $\cdot$ [DATES_1]\\
+\textit{[TITLE_1]} \hfill \textit{[DOMAIN_TAG_1]}
+% \item{} — the empty group stops LaTeX reading a [BRACKETED] placeholder as the
+    % item's optional LABEL, which silently renders the bullet with no marker.
+\subblock{Achievements}
+\begin{itemize}
+    \item{} [ACHIEVEMENT_1]
+    \item{} [ACHIEVEMENT_2]
+\end{itemize}
+\subblock{Responsibilities}
+\begin{itemize}
+    \item{} [BULLET_1]
+    \item{} [BULLET_2]
+    \item{} [BULLET_3]
+\end{itemize}
+
+\noindent\textbf{[COMPANY_2]} \hfill [LOCATION_2] $\cdot$ [DATES_2]\\
+\textit{[TITLE_2]} \hfill \textit{[DOMAIN_TAG_2]}
+\subblock{Achievements}
+\begin{itemize}
+    \item{} [ACHIEVEMENT_1]
+\end{itemize}
+\subblock{Responsibilities}
+\begin{itemize}
+    \item{} [BULLET_1]
+    \item{} [BULLET_2]
+\end{itemize}
+
+% ============================================================
+%     EDUCATION & CERTIFICATIONS
+% ============================================================
+\section*{Education \& Certifications}
+% \newline, not \\: a line break followed by a [BRACKETED] placeholder makes LaTeX read the
+% placeholder as \\'s optional vertical-space argument, and the skeleton fails to compile.
+\textbf{[SCHOOL]} --- [DEGREE]\newline
+[CERTIFICATION], [ISSUING_BODY], [YEAR]
+
+\end{document}

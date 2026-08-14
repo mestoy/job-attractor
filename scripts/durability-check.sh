@@ -26,7 +26,21 @@ hdr "1. Scheduled jobs (auto-backup + prep + durability check survive a reboot)"
 # "NOT loaded". It hit whichever label sits earliest in launchctl's output (consistencycheck),
 # which is why that one looked permanently missing while the others passed. Snapshot once, then grep.
 LC_SNAPSHOT="$(launchctl list 2>/dev/null || true)"
-JOBS=("$LAUNCHD_PREFIX.backup" "$LAUNCHD_PREFIX.prep" "$LAUNCHD_PREFIX.durabilitycheck" "$LAUNCHD_PREFIX.consistencycheck")
+# ⛔ DERIVE THE JOB LIST; NEVER TYPE ONE. A typed list drifted twice upstream (autosweep
+# 2026-08-05, dailyrank 2026-08-10) and each time the new job was the one nothing verified. It is
+# worse in the kit: a typed list also decides FOR you that your only jobs are these four, so a
+# fifth job you schedule yourself is unmonitored by construction.
+#
+# Three sources, because each sees a failure the others cannot: the mirrored plists are what a
+# rebuild would restore, the loaded labels are what is actually running, and git is the memory —
+# a plist tracked in the repo but gone from the worktree is exactly "a rebuild would lose this",
+# and a list built only from what exists right now would report zero jobs and call that clean.
+JOBS=()
+while IFS= read -r _lab; do [ -n "$_lab" ] && JOBS+=("$_lab"); done < <(
+  { ls "scripts/launchd/$LAUNCHD_PREFIX."*.plist 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.plist$//'
+    git ls-files "scripts/launchd/$LAUNCHD_PREFIX.*.plist" 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.plist$//'
+    printf '%s\n' "$LC_SNAPSHOT" | grep -o "$(printf '%s' "$LAUNCHD_PREFIX" | sed 's/[.[\*^$]/\\&/g')\.[A-Za-z0-9._-]*" || true
+  } | sort -u)
 # A CHECK THAT CAN NEVER PASS IS NOT A CHECK. The kit ships no scripts/launchd/ plists, and
 # scheduling is optional, so this loop used to emit eight warnings on every run for every user
 # and pin the overall result at "at risk" permanently. A report that is always red teaches people
@@ -34,7 +48,7 @@ JOBS=("$LAUNCHD_PREFIX.backup" "$LAUNCHD_PREFIX.prep" "$LAUNCHD_PREFIX.durabilit
 # set up scheduling at all, say so once, as information. Once ANY plist or loaded label exists,
 # scheduling is something you rely on, and every missing piece of it is a real warning again.
 _sched_any=0
-for job in "${JOBS[@]}"; do
+for job in ${JOBS[@]+"${JOBS[@]}"}; do   # empty-array guard: bash 3.2 + set -u errors on "${JOBS[@]}" when unset
   if [ -f "scripts/launchd/$job.plist" ] || printf '%s\n' "$LC_SNAPSHOT" | grep -q "$job"; then
     _sched_any=1
   fi
@@ -44,7 +58,7 @@ if [ "$_sched_any" = "0" ]; then
   printf "     plists under scripts/launchd/ named %s.<backup|prep|durabilitycheck|consistencycheck>.plist\n" "$LAUNCHD_PREFIX"
   printf "     and load them with launchctl. Until then, run scripts/backup.sh by hand.\n"
 else
-  for job in "${JOBS[@]}"; do
+  for job in ${JOBS[@]+"${JOBS[@]}"}; do   # empty-array guard: bash 3.2 + set -u errors on "${JOBS[@]}" when unset
     if printf '%s\n' "$LC_SNAPSHOT" | grep -q "$job"; then pass "$job loaded"; else warn "$job NOT loaded (run: launchctl load ~/Library/LaunchAgents/$job.plist)"; fi
     [ -f "scripts/launchd/$job.plist" ] && pass "$job plist mirrored in repo" || warn "$job plist NOT mirrored (run scripts/backup.sh, schedule config would be lost on rebuild)"
   done

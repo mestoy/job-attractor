@@ -14,13 +14,25 @@ and a brief was written describing him in the present tense off it.
 is append-only, dated, sourced, and survives.
 
   record_role.py --name "Dana Reyes" --title "Associate Director, Technology" \
-                 --company "Vaco by Highspring" --source "linkedin.com/in/..., experience section"
+                 --company "Northwind Health" --source-type company-page \
+                 --source "https://example.com/leadership, retrieved 2026-08-11"
 
   record_role.py --name "Jane Doe" --left --source "linkedin.com/in/..., experience section" \
                  --note "that role ran Jan 2019 to Feb 2020"
 
 ⚖️ A SOURCE IS MANDATORY, for the same reason the employer cache demands one: an unsourced
 verification is a memory, and a memory is what produced the defect.
+
+⚖️ AND THE SOURCE NEEDS A TYPE (2026-08-11, partner issue #26). `--source` was free text, so a
+confirmation read off a company's own leadership page or a dated press release either had to
+masquerade as the LinkedIn read `/verify-titles` asked for, or be dropped on the floor. On the
+partner's install that day, 4 of 6 boss rows verified from company pages and a press release and
+**0** from LinkedIn, because LinkedIn answers HTTP 999 to every automated fetch. A store that
+cannot tell those apart cannot tell a strong confirmation from a weak one.
+
+⛔ THE VOCABULARY IS IMPORTED FROM `boss_registry`, NEVER RETYPED. `boss_registry.VERIFIED` already
+defines it, and this repo has repeatedly paid for two writers of one definition. If the registry
+grows a source type, this script gets it for free.
 """
 import argparse
 import json
@@ -30,6 +42,19 @@ from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import contact_signals as cs   # noqa: E402
+import boss_registry as br     # noqa: E402  (the ONE definition of the source vocabulary)
+
+# ⛔ An ALIAS, not a copy. Rebinding the name keeps the reader honest about where it came from.
+# (boss_registry's `_VERIFIED_FAMILY` — the map from source type to `state.py` provenance family —
+# is a LOCAL inside `cmd_add` and cannot be imported. Rather than retype it here and create the
+# second writer this comment exists to forbid, this store records the typed source and leaves the
+# family derivation to the one place that already owns it.)
+SOURCE_TYPES = br.VERIFIED
+
+# What an OMITTED --source-type means. Not a claim of anything: the caller told us where they
+# looked but not what kind of thing it was, and the honest label for that is "unverified". Every
+# pre-existing invocation keeps working and simply lands here.
+DEFAULT_SOURCE_TYPE = "unverified"
 
 
 def main():
@@ -39,6 +64,12 @@ def main():
     ap.add_argument("--title", default="", help="their CURRENT title (omit with --left)")
     ap.add_argument("--company", default="", help="their CURRENT company (omit with --left)")
     ap.add_argument("--source", required=True, help="where you looked; an unsourced check is a memory")
+    # ⛔ NOT argparse `choices=`. An unknown value must be REFUSED loudly, in this script's own
+    # words, naming the whole vocabulary — the same shape boss_registry.cmd_add uses. argparse's
+    # usage dump is a worse error at the exact moment someone is guessing at the vocabulary.
+    ap.add_argument("--source-type", default="",
+                    help="what KIND of source: " + " | ".join(SOURCE_TYPES) +
+                         f" (omitted = {DEFAULT_SOURCE_TYPE})")
     ap.add_argument("--note", default="", help="anything the next reader needs, e.g. the real dates")
     ap.add_argument("--left", action="store_true",
                     help="the stored role has ENDED; they are no longer where the pipeline thinks")
@@ -50,9 +81,20 @@ def main():
         print("⛔ give --title/--company, or --left if they have moved on", file=sys.stderr)
         return 2
 
+    stype = (a.source_type or "").strip()
+    if stype and stype not in SOURCE_TYPES:
+        print(f"⛔ BLOCKED: --source-type {stype!r} is not one of: {', '.join(SOURCE_TYPES)}",
+              file=sys.stderr)
+        print("   This vocabulary is boss_registry.VERIFIED, shared on purpose. Do not invent a "
+              "value here; a type nobody reads is worse than an honest 'unverified'.",
+              file=sys.stderr)
+        return 4
+    if not stype:
+        stype = DEFAULT_SOURCE_TYPE
+
     row = {"name": a.name.strip(), "title": a.title.strip(), "company": a.company.strip(),
            "still_there": not a.left, "verified_on": a.date or str(date.today()),
-           "source": a.source.strip(), "note": a.note.strip()}
+           "source": a.source.strip(), "source_type": stype, "note": a.note.strip()}
 
     if a.dry_run:
         print(json.dumps(row, ensure_ascii=False))
@@ -61,7 +103,8 @@ def main():
     with open(cs.ROLE_CACHE, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
     state = "ROLE ENDED" if a.left else f"{row['title']} @ {row['company']}"
-    print(f"✅ recorded {row['name']}: {state}  (verified {row['verified_on']})")
+    print(f"✅ recorded {row['name']}: {state}  "
+          f"(verified {row['verified_on']}, source-type {row['source_type']})")
     # Read it straight back through the real reader, so a key mismatch shows up HERE rather than
     # as a silently-unapplied verification in tomorrow's briefing. A credential suffix already
     # caused exactly that once.

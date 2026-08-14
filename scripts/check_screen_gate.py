@@ -132,10 +132,86 @@ def veto_hits(name, text=""):
     return sorted(hits)
 
 
+# ── STRUCTURAL PARSE ARTIFACTS, shipped with the CODE and never with the config ───────────────
+#
+# ⛔ WHY THESE ARE NOT IN kit_config. `kit_config.py` is the recipient's parameterization layer and
+# `backup.sh` copies it IF-ABSENT so a filled-in copy is never clobbered. That is correct for
+# preferences, and WRONG for a fact about markdown parsing. Shipping these as config means an
+# install that already has a `kit_config.py` never receives them, while any test asserting them
+# arrives on schedule and fails.
+#
+# 📊 That is not hypothetical: it happened on 2026-08-10, hours after the patterns were first
+# shipped as config. A partner install pulled the sync, ran the suite, and reported six failures,
+# one per fragment: "Culture 3.1 reached the pool as an employer", and the same for WLB 3.8,
+# Career 3.9, D&I 3.9, PE and 4.2. Their config was untouched by design, so they received the test
+# and not the data it needed. **A preference is configurable; a parser fact is not.**
+#
+# WHAT THEY CATCH. Banked-candidate files are `·`-separated name lists, and a screen write-up with
+# bolded sub-bullets ("**Culture:** Glassdoor 3.7, 66% recommend, WLB 3.8") gets split on the same
+# separator, so a write-up's SUB-FIELDS are promoted to employers.
+# ⚖️ ANCHORED ON A KNOWN SUB-RATING LABEL, never on the bare decimal, so a real company with a
+# version-shaped name (Web 3.0 Labs) is untouched.
+_STRUCTURAL_ARTIFACTS = [
+    r"^(culture|career|wlb|work[- ]?life( balance)?|d&i|diversity|comp|compensation|leadership|"
+    r"senior leadership|mgmt|management|benefits|rec|recommend)\b[\s:]*\d+(\.\d+)?$",
+    r"^pe$", r"^\d+(\.\d+)?$",
+]
+
+
 def is_artifact(name):
-    """True when a pool row is a page title or ATS boilerplate rather than a company."""
+    """True when a pool row is a page title, ATS boilerplate, or a write-up sub-field.
+
+    Reads the configured list AND the structural one above, so a stale `kit_config.py` can weaken
+    the owner's own additions but can never lose the parser facts.
+    """
     low = (name or "").strip().lower()
-    return any(re.search(p, low) for p in NOT_A_COMPANY)
+    return any(re.search(p, low) for p in list(NOT_A_COMPANY) + _STRUCTURAL_ARTIFACTS)
+
+def industry_resolution(name, text=""):
+    """('vetoed'|'resolved'|'unknown', detail) — was this company's INDUSTRY ever established?
+
+    ⛔ WHY `veto_hits` IS NOT ENOUGH. `veto_hits` matches industry words against the company NAME,
+    so it only ever stops a company that spelled its industry into its own name. On one measured
+    sweep, the handful of employers carrying "Bank", "Fintech" or "Defense" in the name were
+    caught, while a large majority of financial firms — whose names say nothing about what they
+    do — reached the banked pool of an operator whose FIRST hard filter was financial services.
+    An empty `veto_hits` has always meant "no veto term appeared", never "this company was
+    screened". This function is the difference between those two, said out loud.
+
+    ⛔ A TIGHTER REGEX CANNOT FIX IT. On the same measurement, the overwhelming majority of
+    employers were unresolvable from the name alone: household payments and AI names all read
+    unknown, and a name like `PaymentVerse` fails the word boundary. Tightening one pattern only
+    trades one failure for another. Industry needs real data, not name matching.
+
+    ⚖️ THE RULING: an unknown industry **RANKS, carrying a visible mark**, and the veto moves to
+    the SEND. Blocking everything unresolved would hold back nearly the whole pool and collapse it.
+
+    ⚠️ SOURCED CACHE FIRST, NAME PATTERNS SECOND, and 'unknown' is a real answer rather than a
+    failure to compute. Delegates to `contact_signals.segment_read`, which owns the tri-state, so
+    there is ONE definition of "do we know what this company does".
+    """
+    hits = veto_hits(name, text)
+    if hits:
+        return "vetoed", ", ".join(hits)
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import contact_signals
+        seg, detail = contact_signals.segment_read(company=name or "", extra=text or "")
+    except Exception as e:                                   # pragma: no cover - import guard
+        # A missing cache must not silently upgrade an unknown company to resolved. Degrade to
+        # unknown, which is the conservative side of this ruling: it marks and gates, it never
+        # blocks the board.
+        return "unknown", f"segment cache unreadable ({e.__class__.__name__})"
+    # ⛔ OFF-SEGMENT IS *RESOLVED*, NOT VETOED. `segment_read`'s "off" means "outside the target
+    # segments you configured", which is a thesis-fit answer. A deal-breaker is a different axis
+    # entirely, and `veto_hits` above is the only thing that decides it. Mapping "off" to "vetoed"
+    # made a company in an ordinary unrelated industry read identically to a defense contractor,
+    # and would have suppressed perfectly sendable companies on a preference. The question THIS
+    # function answers is "do we know what they do", and for an off-segment company that is yes.
+    if seg in ("off", "relevant"):
+        return "resolved", detail or ("off-segment" if seg == "off" else "in a target segment")
+    return "unknown", None
+
 
 def main():
     if len(sys.argv) < 2:
@@ -155,6 +231,21 @@ def main():
     _veto = sorted({re.search(v, low).group(0) for v in INDUSTRY_VETO if re.search(v, low)})
     if _veto and not any(re.search(c, low) for c in INDUSTRY_CLEARED):
         missing.append(f"deal-breaker INDUSTRY term(s) present {_veto} with no 'INDUSTRY: CLEARED' verdict — screen the industry and state the verdict (see INDUSTRY_VETO in kit_config.py)")
+
+    # G1b — THE INDUSTRY MUST BE STATED, not merely free of trigger words.
+    # ⛔ G1 ABOVE ONLY FIRES WHEN A VETO WORD APPEARS, so a scorecard that never mentions the
+    # industry at all sails through it. "No veto term appeared" is not "we screened the industry",
+    # and treating them alike is how a run of financial firms reached a partner's banked pool
+    # against an operator whose FIRST hard filter was financial services. Every one of them was
+    # silent on the veto list; that silence was the whole problem.
+    # ⚖️ THE VETO BELONGS HERE, AT THE SEND. An unresolved industry still RANKS and still carries
+    # its board mark, because the great majority of employers are unresolvable from the name alone
+    # and blocking them would collapse the pool. What it may not do is go out unscreened.
+    if not _veto and not any(re.search(c, low) for c in INDUSTRY_CLEARED):
+        missing.append("the INDUSTRY is never stated — no deal-breaker term appears, which is not "
+                       "the same as a screen. Say what this company actually does and give the "
+                       "verdict ('INDUSTRY: CLEARED — <what they do>'). A company can only reach "
+                       "this gate unscreened by being silent, which is exactly how a bank passes")
 
     # G5 — remote/politics must reflect the VERDICT, not merely mention the topic
     if any(re.search(d, low) for d in REMOTE_DISQUAL) and not any(re.search(c, low) for c in REMOTE_CONFIRM):

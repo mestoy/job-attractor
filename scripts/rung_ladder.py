@@ -45,12 +45,13 @@ from log_linkedin_send import LEGACY_RUNG, NOT_DELIVERED, RUNGS  # noqa: E402
 # Display order = LaCivita's ladder, cold at the bottom to warm at the top, then the off-ladder
 # kinds. Sorting by volume instead would bury the rungs that matter under cold-boss every time.
 LADDER_ORDER = [
-    "cold-stranger", "cold-boss", "warm", "referred", "event",
+    "cold-stranger", "cold-boss", "cold-boss-unequipped", "warm", "referred", "event",
     "follow-up", "reply", "thank-you", "reunion", "off-ladder", "application",
 ]
 RUNG_LABEL = {
     "cold-stranger": "1-2  cold stranger",
     "cold-boss": "3-4  cold boss",
+    "cold-boss-unequipped": "3-4  cold boss (no boss named, no praise)",
     "warm": "5-7  warm 1st-degree",
     "referred": "8-9  referred",
     "event": "     event",
@@ -139,6 +140,22 @@ def tally(rows, include_undelivered=False):
             dropped += 1
             continue
         k = normalize_rung(r.get("rung"))
+        # ⛔ SPLIT THE UNEQUIPPED COLD-BOSS SENDS ONTO THEIR OWN LINE.
+        # Rungs 3-4 mean writing directly to a NAMED boss, and the template is built on a SOURCED
+        # praise hook: `log_linkedin_send.py` marks `--boss` REQUIRED on this rung, and the
+        # invitation-note evidence measured 0 accepts on mail-merged openers against a healthy rate
+        # on personalized ones. A cold-boss row with neither a boss nor a praise beat is the rung
+        # fired without either of the two things that make it the rung.
+        # ⚖️ THE POINT IS NOT TO FLATTER THE NUMBER. On the install where this was found, one burst
+        # of unpersonalized volume dominated the rung and its low rate was being read as "cold boss
+        # does not work". It could not support that: the properly equipped sample was n=1. Splitting
+        # lets an equipped send be measured against its own record instead of inheriting a verdict.
+        # ⛔ DEFINED BY THE MISSING FIELDS, NEVER BY A DATE, so a well-built cold-boss send lands on
+        # the real line automatically and this cohort can only ever shrink.
+        # The log is never rewritten; this is a READER's split.
+        if k == "cold-boss" and not str(r.get("boss") or "").strip() \
+                and str(r.get("praise_tier") or "none").lower() in ("", "none"):
+            k = "cold-boss-unequipped"
         slot = agg.setdefault(k, [0, 0])
         slot[0] += 1
         if r.get("replied"):
@@ -146,8 +163,17 @@ def tally(rows, include_undelivered=False):
     return agg, dropped
 
 
+# ⛔ THE FIVE CORE RUNGS ALWAYS RENDER, ZEROS INCLUDED (2026-08-10, reported by a partner install).
+# `render()` only emitted a line for a rung that had at least one send, so at low volume the ladder
+# printed a nearly blank table and a brand-new log printed an empty body. The zeros ARE the signal:
+# "referred still 0" is the entire point of the 8-9 nudge, and it vanished exactly when it mattered
+# most, which is early. The off-ladder kinds (follow-up, reply, thank-you, reunion, application)
+# stay conditional, because a zero there is noise rather than a nudge.
+CORE_RUNGS = ["cold-stranger", "cold-boss", "warm", "referred", "event"]
+
+
 def _order(agg):
-    known = [k for k in LADDER_ORDER if k in agg]
+    known = [k for k in LADDER_ORDER if k in agg or k in CORE_RUNGS]
     unknown = sorted(k for k in agg if k not in LADDER_ORDER)
     return known + unknown
 
@@ -160,9 +186,12 @@ def render(agg, dropped, quiet=False):
         out.append(f"{'rung':24} {'sent':>5} {'replied':>8} {'rate':>7}")
         out.append("─" * 47)
         for k in _order(agg):
-            s, rp = agg[k]
+            s, rp = agg.get(k, (0, 0))
             label = RUNG_LABEL.get(k, f"     {k}")
-            flag = "" if k in RUNGS or k == "?" else "  ⚠️ unknown rung"
+            # `cold-boss-unequipped` is a READER-side split of a real rung, not a
+            # value any writer emits, so it is known here and absent from `RUNGS`.
+            flag = "" if k in RUNGS or k in ("?", "cold-boss-unequipped") \
+                else "  ⚠️ unknown rung"
             out.append(f"{label:24} {s:5} {rp:8} {(100 * rp / s if s else 0):6.1f}%{flag}")
         out.append("─" * 47)
     out.append(f"{'TOTAL':24} {sent:5} {replied:8} {(100 * replied / sent if sent else 0):6.1f}%")

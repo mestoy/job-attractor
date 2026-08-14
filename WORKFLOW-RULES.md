@@ -73,6 +73,29 @@ stale count is worse than none.
 itself; a LinkedIn message does not, so log it with `scripts/log_linkedin_send.py` or the day's count,
 your reply rate and the burned-target guard all read low.
 
+### LinkedIn delivery: navigate to the page, YOU type the words
+
+**The assistant opens the profile or thread, hands you the body as plain text, and stops. You paste,
+you edit, you send.** This is the default for every LinkedIn message, not a fallback.
+
+- ⛔ **The assistant never types into the compose box and never drives the send.** Two reasons, and
+  the second is the load-bearing one. First, cost: LinkedIn renders the compose box outside the
+  accessibility tree, so `form_input` fails and it degrades to simulated typing plus a verification
+  screenshot per paragraph, roughly fifteen tool calls for an outcome identical to you pasting.
+  Second, safety: it is your live account, and a stray keystroke in a real compose box can send.
+- ✍️ **You edit at the moment of sending, and that is a feature.** The corpus shows the last-second
+  edit is often the best line in the message, so the workflow has to leave room for it.
+- 📋 **Hand the body over as PLAIN TEXT with no quotation marks wrapped around it**, so what you
+  select is what you paste. Keep the blank lines between beats intact; they are the one-beat-per-
+  paragraph rule and they do not survive a collapsed render.
+- ⚠️ **Verify the thread header names the intended person before handing over a body.** A messaging
+  view can open on a different conversation than the one you targeted, and a warm note pasted into
+  a recruiter's thread cannot be recalled.
+- **UNCHANGED by this rule:** email still goes through `scripts/mail-draft.sh`, which is the one
+  email mechanism. Every LinkedIn body is still linted with `check_outreach.py --rung <rung>` before
+  it is shown, because LinkedIn bypasses the mail-draft gate entirely. Beats are still built with
+  you one at a time, and the send is still logged.
+
 ### Queue depth is a different axis
 
 **Target queue depth = 50 approval-pending matches; run discovery continuously while below 50.**

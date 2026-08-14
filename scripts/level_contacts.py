@@ -53,6 +53,7 @@ import glob
 import io
 import json
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -237,6 +238,103 @@ def _raw_messages_rows():
             return list(csv.DictReader(fh))
     except Exception:
         return []
+
+
+# ── the EVIDENCE the picker owes the reader (BUG-160, 2026-08-11) ───────────────────────────
+# 🎯 A QUESTION YOU HAVE NOT GIVEN THE READER THE MEANS TO ANSWER IS NOT A QUESTION.
+# `--batch` used to mark a row "store flags a two-way thread against this tag" and then print only
+# name, title, company and connect date. The thread that CAUSED the doubt was never shown. Twelve
+# rows at a time with no way to tell a recruiter blast from a real conversation, the rational
+# answer to every row is "no", and on 2026-08-11 that is exactly what happened: 72 rows recorded
+# never-spoke in six rounds, including one contact who had written *"I popped our chat and your
+# profile after seeing your post regarding some PM positions that will be opening up soon. Very
+# interested."* The OWNER was the one with the job, so the goodwill ran in that contact's
+# direction, and the interview filed them as a stranger.
+#
+# ⛔ The failure mode is the dangerous one: it does not error, it produces a false negative wearing
+# the costume of diligence. The row leaves the queue, gains source=stated-by-owner, and is never
+# asked again, so a wrong answer hardens into an owner-stated one.
+
+# Openers and sign-offs that carry no relationship information. Matched against the WHOLE message,
+# so a long note that merely begins "Thanks" is still surfaced.
+_PLEASANTRY = re.compile(
+    r"^(thanks?|thank you|glad to connect|wonderful|see you( later)?|you.re welcome|sure|ok(ay)?|"
+    r"great|nice to (meet|connect)( you)?|likewise|absolutely|of course|no problem|hi|hello|hey|"
+    r"congrats|congratulations|welcome|cheers|same here|will do|sounds good)"
+    r"[\s!.,:;\-\u2019'\w]{0,24}$", re.I)
+
+
+def _inbound_evidence():
+    """{contact name: (date, strongest inbound line)} — what THEY wrote to him, longest first.
+
+    Only their side is considered. What the owner sent proves they had the address, never that a
+    relationship exists; a thread is two-way or it is a broadcast they answered.
+    """
+    try:
+        import parse_messages
+        _path, rows = parse_messages.find_messages()
+        if not rows:
+            rows = _raw_messages_rows()
+        if not rows:
+            return {}
+        owner = parse_messages._owner_names(rows)
+    except Exception:
+        return {}
+    best = {}
+    for r in rows:
+        try:
+            if (r.get("IS MESSAGE DRAFT") or "").strip().lower() in ("true", "yes", "1"):
+                continue
+            frm = (r.get("FROM") or "").strip()
+            if not frm or frm == owner:
+                continue                      # his own words are not evidence of THEIR interest
+            body = " ".join((r.get("CONTENT") or "").split())
+            if not body or _PLEASANTRY.match(body):
+                continue
+            when = (r.get("DATE") or "")[:10]
+            prev = best.get(frm)
+            if prev is None or len(body) > len(prev[1]):
+                best[frm] = (when, body)
+        except Exception:
+            continue
+    return best
+
+
+def _groups_for(name):
+    """[groups] · [] checked-and-none · None not-checked. Degrades to None when the store is absent."""
+    try:
+        sys.path.insert(0, HERE)
+        import mutual_groups
+        return mutual_groups.groups_for(name)
+    except Exception:
+        return None
+
+
+def _evidence_for(name, evidence):
+    """Match a store/export name against the messages.csv sender spelling."""
+    if not evidence:
+        return None
+    hit = evidence.get(name)
+    if hit:
+        return hit
+    want = closeness.normalize_name(name)
+    for sender, val in evidence.items():
+        if closeness.normalize_name(sender) == want:
+            return val
+    return None
+
+
+def why_name(name):
+    """--why <name>: dump their whole side of the thread, for one contact, on demand."""
+    hit = _evidence_for(name, _inbound_evidence())
+    print(f"contact: {name}")
+    if not hit:
+        print("  no substantive inbound message found — nothing they wrote survives the "
+              "pleasantry filter, so the thread is not evidence of a relationship.")
+        return 0
+    when, body = hit
+    print(f"  strongest inbound [{when}]:\n    {body}")
+    return 0
 
 
 # ── the machine pass ─────────────────────────────────────────────────────────────────────────
@@ -460,10 +558,33 @@ def batch(size):
         return 0
     print(f"levelling queue: {len(todo)} remaining. Next batch of {min(size, len(todo))} "
           f"(oldest connection first):\n")
+    evidence = _inbound_evidence()
     for i, (name, co, pos, conn, why) in enumerate(todo[:size], 1):
         when = conn.isoformat() if conn else "????-??-??"
         line = f"  {i:2}. {name:<26} {(pos or '')[:28]:<28} @ {(co or '-')[:22]:<22} {when}"
         print(line + (f"   [{why}]" if "unswept" not in why else ""))
+        # BUG-160: a doubted row MUST carry the thread that caused the doubt, or the question
+        # cannot be answered and every batch quietly returns never-spoke.
+        if "unswept" not in why:
+            hit = _evidence_for(name, evidence)
+            if hit:
+                mdate, body = hit
+                print(f'        💬 [{mdate}] them: "{body[:240]}'
+                      f'{"…" if len(body) > 240 else ""}"')
+            else:
+                print("        💬 nothing substantive from them — pleasantries only")
+        # 👥 SHARED GROUPS, the second evidence lane (2026-08-11). A group is the most
+        # machine-readable form of `shared-community` there is, and that tier opens rung 7
+        # ([[shared-community-opens-rung-7]]). It shows on EVERY row, not only doubted ones,
+        # because a group can level someone the message lane knows nothing about: upstream, a
+        # contact with NO message history at all was moved from cold to warm 7 by one shared group.
+        # ⛔ THREE STATES, NEVER TWO. "not checked" is not "none": the source is behind a login,
+        # so an unchecked profile and an empty one are opposite findings and the line says which.
+        gset = _groups_for(name)
+        if gset:
+            print(f"        👥 shares: {'; '.join(gset)}")
+        elif gset is None:
+            print("        👥 groups not checked — scripts/mutual_groups.py --queue")
     print("\n  picker semantics (verbatim, non-negotiable):")
     print("  • every batch carries an explicit 'none of these' option")
     print("  • an EMPTY answer records never-spoke for the WHOLE batch — it never means 'skipped'")
@@ -507,6 +628,12 @@ def main():
         for e in errors:
             print(f"  🔴 {e}")
         return 0 if not errors else 2
+    if "--why" in args:
+        i = args.index("--why")
+        if i + 1 >= len(args):
+            print('usage: --why "Contact Name"')
+            return 3
+        return why_name(args[i + 1])
     if "--name" in args:
         i = args.index("--name")
         if i + 1 >= len(args):

@@ -275,7 +275,19 @@ def check(tex_path):
                         "an honesty check cannot be waived by a QA-OK marker"))
 
     # 1. Summary length (article template)
-    m = re.search(r'\\section\*?\{Summary\}\s*\n(.+?)\n\s*\n', src, re.S)
+    # ⛔ THE HEADING NAME WAS HARDCODED TO "Summary" AND THAT SILENTLY DISARMED TWO GATES (kit
+    # issue #19, reported 2026-08-10). A résumé whose section is called OBJECTIVE — which is what
+    # the `nli-dense` source format prescribes, and what this kit points operators at — took the
+    # else branch: "Summary ≤300" degraded to a WARN and **"Summary voice (no 1st-person)"
+    # produced no line at all**, so its absence was invisible in the report. Exit stayed 0.
+    #
+    # ⚠️ THE WORST HALF IS THE SECOND. A check that FAILS is loud; a check that silently stops
+    # existing leaves a report that looks complete, with no way for the reader to notice the
+    # missing row. Measured on the reporting install: "Summary voice" appeared once for the
+    # Summary version and zero times for the OBJECTIVE version, both exit 0.
+    _SUMMARY_HEADS = ("Summary", "Objective", "Profile")
+    m = re.search(r'\\section\*?\{(?:' + "|".join(_SUMMARY_HEADS) + r')\}\s*\n(.+?)\n\s*\n',
+                  src, re.S)
     if m:
         t = re.sub(r'\\[%$&]', lambda x: x.group()[1], m.group(1)).strip()
         t = re.sub(r'\s+', ' ', t)
@@ -290,7 +302,19 @@ def check(tex_path):
                         "subject-dropped, matches bullets" if not fp
                         else f"first-person in Summary {sorted(set(fp))} — rewrite subject-dropped to match the bullets"))
     else:
-        results.append(("Summary ≤300", "WARN", "no Summary section found"))
+        # ⛔ A MISSING SUMMARY IS A FAILURE TO EVALUATE, NOT A SOFT WARN. The checker cannot tell
+        # "no summary" from "named something I do not recognize", and the second means two gates
+        # went dark. Naming the headings it looked for turns an invisible skip into an action.
+        results.append(("Summary ≤300", "FAIL",
+                        "no summary section found (looked for "
+                        + "/".join(_SUMMARY_HEADS)
+                        + "). Two checks depend on it, including the no-first-person voice rule, "
+                          "and both are UNRUN — this is a failure to evaluate, not a pass."))
+        # ⚠️ EMIT THE VOICE ROW EVEN WHEN IT CANNOT RUN, so its absence is never again the thing
+        # nobody notices. A report that silently drops a row is worse than one that says plainly
+        # that the row could not be computed.
+        results.append(("Summary voice (no 1st-person)", "FAIL",
+                        "not evaluated — no summary section to read"))
 
     # content = source minus LaTeX comments (comments don't render)
     content = re.sub(r'(?<!\\)%.*', '', src)
@@ -356,9 +380,37 @@ def check(tex_path):
             t = re.sub(r'\\([%$&#])', r'\1', t)                 # unescape \% \$ \& \#
             return re.sub(r'\s+', ' ', t).strip()
         CAP = 195
-        items = [_vis(it) for it in re.findall(r'\\item\s+(.+)', content)]
+        # ⛔ `\item{}` IS A REAL BULLET AND `\item\s+` COULD NOT SEE IT (kit issue #18, reported
+        # 2026-08-10 with the measurement: 6 `\item{}` in the file, 0 matched, and the check printed
+        # "all 0 bullets ≤195 chars" as a PASS). The pattern required whitespace after the command,
+        # and a brace is not whitespace.
+        #
+        # ⚖️ THE EMPTY GROUP IS DELIBERATE, so widen the READER and leave the template alone. A bare
+        # `\item [BULLET_1]` makes LaTeX read the bracketed placeholder as the item's optional
+        # LABEL, and every bullet then renders with no marker, silently, visible only in the PDF.
+        # `\item{}` is what protects the unfilled skeleton.
+        #
+        # ⚠️ `(?![a-zA-Z])` is load-bearing. The old mandatory `\s+` was accidentally excluding
+        # `\itemsep` and `\itemize`; making the whitespace optional without this admitted both, and
+        # bullet counts on real résumés jumped by two as the checker invented bullets out of layout
+        # commands. Widening a reader can break it in the other direction.
+        items = [_vis(it) for it in
+                 re.findall(r'\\item(?![a-zA-Z])\s*(?:\{\})?\s*(.+)', content)]
+        # An UNFILLED skeleton bullet renders empty here. It is a placeholder, not a bullet, and
+        # counting it would let a blank template satisfy the zero-guard below.
+        items = [s for s in items if s]
         longs = [s for s in items if len(s) > CAP]
-        if longs:
+        # ⛔ ZERO BULLETS IS NEVER A LEGITIMATE PASS ON A RÉSUMÉ, and this half matters more than
+        # the pattern. The widened regex fixes today's spelling; this fixes every spelling nobody
+        # has thought of yet. A count of zero means the check FAILED TO MEASURE, and a checker that
+        # cannot tell "nothing was too long" from "nothing was examined" is reporting success about
+        # a measurement it never took.
+        if not items:
+            results.append(("2-line bullet cap", "FAIL",
+                            "0 bullets found — the cap did NOT measure anything. A résumé with no "
+                            "\\item is either a broken build or a spelling this checker cannot see; "
+                            "either way this is a failure to measure, not a pass."))
+        elif longs:
             results.append(("2-line bullet cap", "WARN",
                             f"{len(longs)} bullet(s) >{CAP} chars (likely >2 lines): "
                             + " | ".join(f'"{s[:45]}…" ({len(s)})' for s in longs)))
@@ -393,13 +445,41 @@ def check(tex_path):
             if txt is None:
                 raise RuntimeError("pdftotext unavailable")
             pages = txt.count("\f")
+            # ── THE PAGE LIMIT IS A PROPERTY OF THE FORMAT, NOT A GUESS ABOUT THE CLASS ─────
+            # This read `want = 2 if moderncv else 1`, which inferred the limit from the document
+            # class. That held while there were exactly two formats. It broke the moment a third
+            # arrived: a denser format can be `article` and still want two pages, so the rule wanted 1 and a
+            # legitimate 2-page résumé FAILED the tripwire, which the apply-checklist treats as blocking export.
+            # ⚠️ Found the hour a 1-or-2 page format became somebody's default: every build would
+            # have been blocked by a gate asserting a limit the format never claimed.
+            # A .tex may now DECLARE its own limit, and the old rule remains the fallback so
+            # nothing that declares nothing changes behavior:
+            #     % PAGE-LIMIT: 1        exactly one page
+            #     % PAGE-LIMIT: 1-2      one or two, both acceptable
+            # ⚠️ Read from `src`, the RAW source, never `content`: `content` is src with
+            # LaTeX comments stripped, and this declaration IS a comment.
             want = 2 if moderncv else 1
+            # ⚠️ TRAILING TEXT IS ALLOWED AFTER THE NUMBER, and that is not laxness. The first
+            # version anchored with `\s*$`, so the moment the declaration carried an explanatory
+            # comment (`% PAGE-LIMIT: 1-2   % why`) it stopped matching and the gate silently fell
+            # back to the old rule while the file plainly declared otherwise. A declaration nobody
+            # can annotate is a declaration people get wrong.
+            _declared = re.search(r"^%+\s*PAGE-LIMIT:\s*(\d+)(?:\s*-\s*(\d+))?\b",
+                                  src, re.M | re.I) if src else None
+            _range = None
+            if _declared:
+                lo = int(_declared.group(1))
+                hi = int(_declared.group(2)) if _declared.group(2) else lo
+                _range = (min(lo, hi), max(lo, hi))
+                want = _range[0] if pages < _range[0] else (_range[1] if pages > _range[1] else pages)
             _hit = next((k for k in _rules if k.lower().startswith("page count")), None)
-            if pages != want and _hit:
+            if not ((_range[0] <= pages <= _range[1]) if _range else (pages == want)) and _hit:
                 results.append(("page count", "WARN",
                                 f"{pages} (want {want}) — RULED: {_rules[_hit]}"))
             else:
-                results.append(("page count", "PASS" if pages == want else "FAIL", f"{pages} (want {want})"))
+                _ok = (_range[0] <= pages <= _range[1]) if _range else (pages == want)
+                _wanted = f"{_range[0]}-{_range[1]}" if _range and _range[0] != _range[1] else str(want)
+                results.append(("page count", "PASS" if _ok else "FAIL", f"{pages} (want {_wanted})"))
         except Exception:
             results.append(("page count", "WARN", "pdftotext unavailable"))
         try:

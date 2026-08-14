@@ -237,15 +237,68 @@ WARN_PATTERNS = [
 FENCE_RE = re.compile(r"(?ms)^[ \t]{0,3}(?P<f>```|~~~).*?(?:^[ \t]{0,3}(?P=f)[^\n]*$|\Z)")
 
 
-def strip_noise(text):
+_COMMANDS_CACHE = None
+
+
+def _command_names():
+    """Slash-command names that exist on disk, in whichever layout this install uses.
+
+    ⚖️ READ, NEVER TYPED. A typed list goes stale the moment a command is added, and the new
+    command's own doc would be the thing that failed — which is the defect being fixed. Both
+    layouts are checked because the assembled kit keeps commands at `commands/` while a Claude Code
+    checkout keeps them at `.claude/commands/`, and an install may be either.
+
+    Degrades to an EMPTY set when no such directory exists. Empty means "exempt nothing", so the
+    rule keeps its old behaviour rather than silently going quiet.
+    """
+    global _COMMANDS_CACHE
+    if _COMMANDS_CACHE is not None:
+        return _COMMANDS_CACHE
+    names = set()
+    for sub in ("commands", os.path.join(".claude", "commands")):
+        try:
+            for entry in os.listdir(os.path.join(REPO, sub)):
+                if entry.endswith(".md"):
+                    names.add(entry[: -len(".md")])
+        except OSError:
+            continue
+    for sub in ("skills", os.path.join(".claude", "skills")):
+        d = os.path.join(REPO, sub)
+        try:
+            for entry in os.listdir(d):
+                if os.path.isdir(os.path.join(d, entry)):
+                    names.add(entry)
+        except OSError:
+            continue
+    # Longest first, so `/no-slop` is consumed before a hypothetical `/no` could bite into it.
+    _COMMANDS_CACHE = sorted(names, key=len, reverse=True)
+    return _COMMANDS_CACHE
+
+
+def strip_noise(text, token=False):
     """Remove regions that quote other people or hold code, replacing them with blanks.
 
-    Blockquotes are where this file stores verbatim drafts and other people's words;
+    Blockquotes are where this file stores the owner's verbatim drafts and other people's words;
     linting them means telling a source it wrote badly. Fenced/inline code and link targets hold
     identifiers, not prose. Newlines are preserved so line-anchored patterns stay accurate.
+
+    ⛔ `token=True` REPLACES WITH `x` INSTEAD OF SPACES, and it exists for one rule (BUG-089).
+    Blanking is correct for every word-level check: a code span is not prose and should not be
+    counted or matched. But it is WRONG for any rule that reads the characters BETWEEN words,
+    because two adjacent stripped regions collapse into whitespace and manufacture a hit that the
+    author never wrote. The live instance, in the kit's own `/level-network` doc:
+
+        `~/Downloads`/`~/Desktop`      →      "            /            "
+
+    which the spaced-slash rule then reports as spaces around a slash. The author wrote no spaces.
+    ⚠️ Do NOT make `token` the default. Turning code spans into words would change sentence-length
+    counts and let banned-word patterns match inside identifiers, which is the bug this whole
+    function exists to prevent. One rule needs the gap preserved; the rest need it gone.
     """
+    fill = "x" if token else " "
+
     def blank(m):
-        return re.sub(r"[^\n]", " ", m.group(0))
+        return re.sub(r"[^\n]", fill, m.group(0))
 
     text = re.sub(r"^---\n.*?\n---\n", blank, text, count=1, flags=re.S)   # YAML frontmatter
     text = re.sub(FENCE_RE, blank, text)                                    # fenced code
@@ -260,6 +313,19 @@ def strip_noise(text):
     # function's own docstring already states.
     text = re.sub(r"\[\[[^\]\n]+\]\]", blank, text)                         # wiki-link targets
     text = re.sub(r"https?://\S+", blank, text)                             # bare URLs
+    # ⛔ A SLASH-COMMAND NAME IS AN IDENTIFIER, exactly like a wiki-link slug or a code span, and
+    # this function's own docstring already states the principle. Measured upstream 2026-08-10: ALL
+    # 19 shipped command docs failed the spaced-slash rule, every one on its own title line
+    # (`# /apply`, `# /rank`, …), because `\S\s+/\S` reads the `# ` plus `/a` as a spaced slash. A
+    # command doc's title has to name the command, so the rule was unfollowable for the whole file
+    # type — the same "a shipped command prescribes wording its own gate then blocks" shape the
+    # partner channel reported as kit issue #9.
+    #
+    # 🎯 RESOLVED AGAINST THE REAL COMMAND LIST, never a generic `/[a-z-]+` pattern. A blanket
+    # pattern would also swallow `payments /fintech`, a genuine typo this rule exists to catch. Only
+    # a name that IS a command on disk is an identifier; anything else stays prose and stays linted.
+    for _name in _command_names():
+        text = re.sub(r"(?<![A-Za-z0-9_-])/" + re.escape(_name) + r"(?![A-Za-z0-9_-])", blank, text)
     return text
 
 
@@ -317,6 +383,20 @@ def strip_latex(text):
     # without its sign and the retired-figure rule never sees it.
     text = text.replace(r"\$", "\x00")
     text = re.sub(r"\\([%&#_{}])", r"\1", text)
+    # ⛔ TeX DIMENSION KEYWORDS DIE WITH THE COMMAND THAT TOOK THEM (2026-08-09).
+    # `\hrule height 0.6pt` is a rule specification, not prose. The bare-command sweep above removes
+    # `\hrule` and the length sweep below removes `0.6pt`, but `height` is a plain word and survived
+    # into the reader-text signature. The PDF has no such word, so the source and the render
+    # disagreed and a FRESHLY COMPILED résumé tripped STALE BUILD at 99.88% against a 99.9% floor.
+    # ⚠️ Preamble rules dodged it entirely, because the preamble is discarded wholesale, so this
+    # only ever bit a hand-built file with a body-level rule. That asymmetry is why it went unseen:
+    # every template-built résumé passed. Reported from a partner install.
+    # ⛔ MATCHED AS A WHOLE CONSTRUCT, NEVER AS BARE WORDS. A first attempt stripped a standalone
+    # `height|width|depth` anywhere, which also deleted them from real prose: "increased height of
+    # the funnel" lost its noun, and every downstream prose rule then read corrupted text. The
+    # keyword only dies when it is attached to the rule command that owns it.
+    text = re.sub(r"\\[hv]rule\s*(?:(?:height|width|depth)\s*-?\d*\.?\d*(?:pt|em|ex|in|cm|mm)?\s*)*", " ", text)
+
     # 7. leftovers: bare commands (\hfill, \item, \\), math delimiters, orphan braces, lengths
     text = re.sub(r"\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?", " ", text)
     text = re.sub(r"\\\\(?:\[[^\]]*\])?", " ", text)
@@ -350,7 +430,10 @@ def check(text, mode="prose", is_markdown=True):
     # — precedence-table rules (his voice wins, and it is stricter than APA) —
     if "—" in body:
         fails.append('em dash present (his hard rule: commas, ellipses, or parentheses)')
-    if re.search(r"\S\s+/\s+\S|\S\s+/\S|\S/\s+\S", body):
+    # BUG-089: read the TOKEN-masked body, so a stripped region cannot collapse into a slash the
+    # author never wrote. Everything else keeps the blank-masked body on purpose.
+    _slash_body = strip_noise(text, token=True) if is_markdown else body
+    if re.search(r"\S\s+/\s+\S|\S\s+/\S|\S/\s+\S", _slash_body):
         fails.append("spaces around a slash (write applied-AI/platform, never ' / ')")
 
     # — shared hard-block vocabulary (the check_outreach core, proper-noun aware) —

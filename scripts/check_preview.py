@@ -403,7 +403,7 @@ def _rung12_person_is_first_degree(name):
 
     Unlike the WARM-RUNG anchor, this does NOT consult the closeness store: rung 1-2 is a zero-ask
     connect note, the floor of the ladder, and by design carries no scorecard/closeness expectation
-    (HARD-INVARIANTS SCREEN-DEPTH-BY-RUNG). A missing closeness row must not fail this closed.
+    (HARD-INVARIANTS §"SCREEN DEPTH IS TIERED BY RUNG"). A missing closeness row must not fail this closed.
     """
     repo = os.environ.get("CLAUDE_PROJECT_DIR") or \
         os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -456,40 +456,16 @@ def _rung12_person_is_first_degree(name):
     return False
 
 
-def _is_rung12_zero_ask_note(tool_input):
-    """LaCivita rung 1-2: a zero-ask common-interest note to a recorded 1st-degree connection.
-
-    Added after the 4th+ recurrence of "BUILD gate blocks mid-coconstruction" (a rung 1-2 note to a
-    recorded connection, blocked as though it were a cold boss draft). HARD-INVARIANTS SCREEN-DEPTH-BY-RUNG rules that rung 1-2 has NO scorecard and
-    NO BUILD ruling by design; requiring one here is the same category of defect the WARM-RUNG,
-    FOLLOWUP and REFERRED exemptions already fix for their own rungs.
-
-    NON-FORGEABLE anchor, mirroring the other three exemptions — ALL must hold:
-      (a) an explicit `RUNG12: <Full Name>` marker in the question framing,
-      (b) that person appears in documents/state/contact.jsonl (kind=contact) or the newest
-          documents/linkedin-exports/Connections-*.csv (a 1st-degree connection is proven by
-          EITHER source; no closeness row is required — rung 1-2 is the floor ask shape, and unlike
-          WARM it must not fail closed on a missing closeness record), AND
-      (c) NONE of the drafted option/preview text matches ask-shaped vocabulary (the
-          check_outreach._INVITATION_ASK list plus intro/referral/hiring/role/opening/position) —
-          a rung 1-2 note that carries a pitch is not rung 1-2 regardless of the label.
-    A cold-boss draft cannot wear this label: naming a scorecard, a build ruling, or `--rung
-    cold-boss` context anywhere in the blob forces the normal gate even if (a)-(c) all hold, so the
-    exemption cannot be laundered onto content that is plainly cold-boss shaped.
-    """
-    blob = " ".join(str(t) for _, t in _strings_from_questions(tool_input or {}))
-    m = re.search(r"(?i:rung12:)\s*([A-Z][\w'\-]*(?:\s+[A-Z][\w'\-]*){1,3})", blob)
-    if not m:
-        return False
-    name = " ".join(m.group(1).split())
-    low = blob.lower()
-    if "cold-boss" in low or "scorecard" in low or "build ruling" in low:
-        return False
-    if not _rung12_person_is_first_degree(name):
-        return False
-    if _rung12_text_has_ask(blob):
-        return False
-    return True
+# ⛔ A DEAD DUPLICATE OF `_is_rung12_zero_ask_note` LIVED HERE and was removed 2026-08-11.
+# The function was defined TWICE in this file, and the two bodies were functionally identical while
+# their docstrings differed: the later copy had been through a style pass (em dashes removed). A
+# kit sync had APPENDED the rewritten version instead of replacing the original, so Python used the
+# second and the first sat here misleading every reader of the file.
+# ⚠️ Nothing behaved wrongly, which is exactly why it survived: a shadowed definition produces no
+# error, no warning and no failing test. It is found by reading, or not at all. Reported by the
+# partner-side audit, not by anything in the suite.
+# 🩹 If you are adding a condition to the rung 1-2 exemption, the LIVE definition is the later one
+# in this file. There is now only one.
 
 
 def _is_reply_to_captured_inbound(tool_input):
@@ -718,6 +694,71 @@ def _is_warm_rung_to_known_contact(tool_input):
     return True
 
 
+def _contact_card_shown(name):
+    """True when a CONTACT SCORECARD was shown for this person and is still spendable.
+
+    ⭐ THE OPERATOR'S RULING, 2026-08-11, verbatim: *"You should give me a scorecard on a contact
+    before starting the co-creation picker. This should be our operating model."*
+
+    🔴 THE HOLE IT CLOSES. The BUILD gate demands a scorecard before any COMPANY or BOSS work, and
+    the rung 1-2 and warm-rung exemptions skip it entirely. Three notes were co-created on
+    2026-08-11 with the owner never shown who the person was. The exemptions are RIGHT about
+    AUTHORIZATION — a zero-ask note needs no build ruling — and were WRONG about INFORMATION.
+
+    📊 THE RECEIPT. `rank_criteria --pool people` offered a named contact at "score 39.6" as the
+    day's pick. SIX rows all scored 39.6 and FIVE carried a byte-identical reason. That contact was
+    not the highest ranked; they were first in a six-way tie broken by connect date, presented as a
+    #1 verdict. Nothing in the flow would have said so.
+
+    ⚖️ THE CARD IS INFORMATION, NOT AUTHORIZATION. It carries no MAC and cannot promote itself. It
+    records that they were SHOWN who this person is. Their ruling stays theirs.
+
+    ⛔ OVERRIDE, same idiom as the reunion override above so there is ONE override shape in this
+    file rather than two: a per-person `card_override` object in contact-closeness.json naming a
+    `ruled_on` date and a `reason`. No global switch, no wildcard.
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import contact_card
+        if contact_card.was_shown(name):
+            return True
+    except Exception:
+        # Fail OPEN on a missing/broken card module, never closed. This precondition exists to
+        # INFORM him, and a crash here would block outreach entirely over a reporting tool.
+        # The BUILD gate's own protections are unchanged either way.
+        return True
+    return bool(_card_override_for(name))
+
+
+def _card_override_for(name):
+    """The owner's explicit per-person waiver of the card requirement, read from the RAW json.
+
+    ⚠️ RAW, not `row`. `closeness.load()` normalizes onto a fixed key set and silently DROPS
+    anything else, so an override written into contact-closeness.json never reaches a caller
+    through the loaded record. That cost an hour on 2026-08-04 with the reunion override.
+    """
+    # ⛔ RESOLVE FROM __file__, exactly like `_reunion_override_for` above. The first cut of this
+    # used a module-level `REPO` that DOES NOT EXIST in this file; the NameError was swallowed by
+    # the except and the override silently never fired. A bare except that hides a typo is how a
+    # working feature reads as a broken one — caught only because a test asserted the override
+    # clears the gate and it did not.
+    try:
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "documents", "contact-closeness.json")
+        raw = json.load(open(path, encoding="utf-8")).get("contacts", {})
+        import closeness as _cl
+        want = _cl.normalize_name(name)
+        for k, v in raw.items():
+            if _cl.normalize_name(k) != want:
+                continue
+            ov = v.get("card_override")
+            if isinstance(ov, dict) and ov.get("ruled_on") and ov.get("reason"):
+                return ov
+    except Exception:
+        return None
+    return None
+
+
 def _is_referred_via_known_introducer(tool_input):
     """A REFERRAL (LaCivita rung 8/9) is BUILD-gate-EXEMPT. The contact is 2nd-degree by definition,
     so the anchor is the INTRODUCER, not the stranger. Anchors, ALL must hold: (a) an explicit
@@ -801,14 +842,32 @@ def _rung12_ask_patterns():
 # Extra ask-shape vocabulary named in the rung 1-2 spec that _INVITATION_ASK does not already cover
 # (intro/referral/hiring/role/opening/position are ask-shaped in a rung 1-2 note even though they
 # never appear in a LinkedIn invitation, which has no room for them).
+# 🔴 THESE USED TO BE BARE NOUNS AND THE GATE MEASURED THE WRONG SPEAKER (fixed 2026-08-11).
+# The list was `hiring`, `role`, `opening`, `position`, `intro`. A bare noun cannot tell *you asking
+# for a job* from *the recipient's own subject matter*, and for a RECRUITER those are the same
+# words. Three rung 1-2 zero-ask notes to a staffing-firm partner were all blocked on `\bhiring\b`
+# alone, present only because HIS OWN POST was about hiring.
+#
+# 💥 Recruiters are usually the highest-converting people you can write to, because their job is
+# placing candidates. A gate that structurally refuses notes to them is not strict, it is aimed at
+# the wrong target.
+#
+# ⛔ THE PATTERNS ARE NOT DELETED, THEY ARE MADE CONSTRUCTIONAL. RUNG12 exists to stop a real ask
+# riding in under a zero-ask marker, and that job still gets done. An ask is a REQUEST directed at
+# the recipient about your candidacy, so match the CONSTRUCTION ("any openings", "keep me in mind",
+# "introduce me") rather than the topic noun. A question about how someone does their own work is
+# not an ask, however many domain nouns it carries.
 _RUNG12_EXTRA_ASK = [
     re.compile(r"\bintroduce me\b", re.I),
-    re.compile(r"\breferral\b", re.I),
-    re.compile(r"\bhiring\b", re.I),
-    re.compile(r"\brole\b", re.I),
-    re.compile(r"\bopening\b", re.I),
-    re.compile(r"\bposition\b", re.I),
-    re.compile(r"\bintro\b", re.I),
+    re.compile(r"\brefer(?:ral|ring) me\b|\ba referral\b", re.I),
+    re.compile(r"\bare you hiring\b|\byou'?re hiring\b|\bhiring for\b|\bwho'?s hiring\b", re.I),
+    re.compile(r"\bany (?:openings?|roles?|positions?|opportunit)", re.I),
+    re.compile(r"\bopen (?:roles?|positions?|reqs?|headcount)\b", re.I),
+    re.compile(r"\bkeep me in mind\b|\bthink of me\b|\bconsider me\b", re.I),
+    re.compile(r"\blet me know if (?:you|anything|there)", re.I),
+    re.compile(r"\bi'?m looking\b|\bi am looking\b|\bmy (?:resume|résumé|cv)\b", re.I),
+    re.compile(r"\bintro to\b|\ban intro\b", re.I),
+    re.compile(r"\ba (?:role|position|seat|opening) for me\b", re.I),
 ]
 
 
@@ -823,7 +882,7 @@ def _rung12_person_is_first_degree(name):
 
     Unlike the WARM-RUNG anchor, this does NOT consult the closeness store: rung 1-2 is a zero-ask
     connect note, the floor of the ladder, and by design carries no scorecard/closeness expectation
-    (HARD-INVARIANTS SCREEN-DEPTH-BY-RUNG). A missing closeness row must not fail this closed.
+    (HARD-INVARIANTS §"SCREEN DEPTH IS TIERED BY RUNG"). A missing closeness row must not fail this closed.
     """
     repo = os.environ.get("CLAUDE_PROJECT_DIR") or \
         os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -879,7 +938,7 @@ def _rung12_person_is_first_degree(name):
 def _is_rung12_zero_ask_note(tool_input):
     """LaCivita rung 1-2: a zero-ask common-interest note to a recorded 1st-degree connection.
 
-    HARD-INVARIANTS SCREEN-DEPTH-BY-RUNG rules that rung 1-2 has NO scorecard and NO BUILD ruling by
+    HARD-INVARIANTS §"SCREEN DEPTH IS TIERED BY RUNG" rules that rung 1-2 has NO scorecard and NO BUILD ruling by
     design; requiring one here is the same category of defect the WARM-RUNG, FOLLOWUP and REFERRED
     exemptions already fix for their own rungs (a legitimate zero-ask connect note kept hitting the
     BUILD gate with no exemption available).
@@ -908,6 +967,12 @@ def _is_rung12_zero_ask_note(tool_input):
     if not _rung12_person_is_first_degree(name):
         return False
     if _rung12_text_has_ask(blob):
+        return False
+    # ⭐ THE CARD PRECONDITION (2026-08-11). Attached HERE rather than at the call site on purpose:
+    # `tests/test_gates.py` asserts the literal string `"not _is_rung12_zero_ask_note(tool_input)"`
+    # appears in the gate chain, so that line must survive verbatim. The resolved `name` is already
+    # in scope here and is the person the card must exist for.
+    if not _contact_card_shown(name):
         return False
     return True
 

@@ -327,6 +327,7 @@ BLOCK_REASON = {
     "ladder-moved": "the ladder moved after the last NEXT-STEP picker, so the numbers you "
                     "last saw are stale",
     "work-since-pair": "work of record landed after the last NEXT-STEP picker",
+    "choice-in-prose": "this turn ended by putting a choice to you in PROSE, with no picker under it",
 }
 
 
@@ -484,6 +485,83 @@ def hook_ask():
 
 
 # ── MODE B: Stop ──────────────────────────────────────────────────────────────────────────────
+# ── THE DECISION-IN-PROSE CHECK (2026-08-10) ───────────────────────
+#
+# ⛔ WHAT THIS CLOSES, and the gap was STRUCTURAL rather than a lapse of attention. `pair_owed`
+# charges a pair when the LADDER MOVES, and the ladder is `sent`/`replied` from the send log. A
+# whole session of deskwork moves neither. So turn after turn can end by putting a real choice to
+# you in ordinary prose while this hook stays correctly quiet: by its own measure nothing happened.
+# Measured in the field on 2026-08-10, repeatedly, in one session. A gate that depends on the
+# assistant remembering is not a gate.
+#
+# ⚖️ THE MEASURE IS THE VIOLATION ITSELF, not a proxy. Not "has time passed", not an mtime sweep
+# (tried and reverted 2026-08-08, see pair_owed). The question is narrow and answerable: did this
+# turn END by putting a choice to you in PROSE, with no AskUserQuestion anywhere in it?
+DECISION_IN_PROSE = [
+    r"\byour call\b", r"\bsay the word\b", r"\bwant me to\b", r"\bshall i\b",
+    r"\bwould you (?:like|prefer|rather)\b", r"\bdo you want\b", r"\bwhich (?:one|would|do)\b",
+    r"\blet me know\b", r"\bup to you\b", r"\bif you want\b",
+    r"\bI did not (?:fix|do|decide)\b.{0,80}\brather than deciding\b",
+    r"\bwant your call\b", r"\bneeds? (?:your|a) ruling\b", r"\byour ruling\b",
+]
+
+
+def turn_put_a_choice_in_prose(transcript_path):
+    """(violated, quote). True when the turn's LAST assistant text asks you to decide and no
+    AskUserQuestion was used since your last message.
+
+    ⚠️ SCOPED TO THE FINAL MESSAGE ON PURPOSE. Mid-turn narration often says "want me to" about a
+    step the model then takes itself; only the last thing on screen is what leaves him holding a
+    question with no picker under it.
+    """
+    if not transcript_path:
+        return False, ""
+    path = os.path.expanduser(transcript_path)
+    if not os.path.exists(path):
+        return False, ""
+    last_text, asked = "", False
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                try:
+                    ev = json.loads(line)
+                except Exception:
+                    continue
+                t = ev.get("type")
+                if t == "user":
+                    # A REAL user message resets the window. Tool results also arrive typed as
+                    # "user", so require actual text content, or one tool result mid-turn would
+                    # clear the AskUserQuestion that had already happened.
+                    content = (ev.get("message") or {}).get("content") or []
+                    if isinstance(content, str) and content.strip():
+                        last_text, asked = "", False
+                    elif any(isinstance(c, dict) and c.get("type") == "text" and c.get("text", "").strip()
+                             for c in content):
+                        last_text, asked = "", False
+                    continue
+                if t != "assistant":
+                    continue
+                content = (ev.get("message") or {}).get("content") or []
+                for c in content:
+                    if not isinstance(c, dict):
+                        continue
+                    if c.get("type") == "tool_use" and c.get("name") == "AskUserQuestion":
+                        asked = True
+                    elif c.get("type") == "text" and c.get("text", "").strip():
+                        last_text = c["text"]
+    except Exception:
+        return False, ""
+    if asked or not last_text:
+        return False, ""
+    tail = last_text[-1200:]
+    for pat in DECISION_IN_PROSE:
+        m = re.search(pat, tail, re.I)
+        if m:
+            i = max(0, m.start() - 60)
+            return True, tail[i:m.end() + 60].replace("\n", " ").strip()
+    return False, ""
+
+
 def hook_stop():
     try:
         payload = json.load(sys.stdin)
@@ -504,9 +582,18 @@ def hook_stop():
         if pair_brief is None or not pair_brief.ladder_health()[0]:
             sys.exit(0)
         owed, reason = pair_owed(payload.get("session_id", ""))
+        quote = ""
+        if not owed:
+            # SECOND TRIGGER, independent of the ladder. See turn_put_a_choice_in_prose.
+            owed, quote = turn_put_a_choice_in_prose(payload.get("transcript_path"))
+            reason = "choice-in-prose"
         if not owed:
             sys.exit(0)
         msg = block_message(reason, compact=True)
+        if quote:
+            msg += (f"\n\n⛔ This turn ended by putting a choice to you in prose: \"{quote}\"\n"
+                    "   A question with no picker under it is the shape this gate exists to stop. "
+                    "Recompute `python3 scripts/pair_brief.py` and ASK IT WITH AskUserQuestion.")
         if gate == "warn":
             print(msg)
             sys.exit(0)

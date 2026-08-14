@@ -44,3 +44,20 @@ if git push -q 2>/dev/null; then
 else
   echo "[i] no push (read-only clone or offline) — your local documents/ snapshot above is your backup."
 fi
+
+# 📝 GIT NOTES DO NOT TRAVEL WITH A NORMAL PUSH, and that silence is the whole problem.
+# Notes live under refs/notes/commits, which `git push` never includes, so a note stays on the
+# machine that wrote it while the commit it annotates sits on the remote without it.
+# 🔴 WHY THIS MATTERS MORE THAN IT SOUNDS. A note is how you correct a commit message you cannot
+# amend because it is already pushed. If the note never travels, the remote keeps the wrong claim
+# and the retraction is invisible to everyone but you. A correction nobody can read is not a
+# correction.
+# ⚖️ Its own line, and NEVER fatal: most repos have no notes, and one that does not must not fail a
+# backup over it. The failure branch is LOUD on purpose, because silence is the failure mode.
+if git rev-parse --quiet --verify refs/notes/commits >/dev/null 2>&1; then
+  if git push -q origin refs/notes/commits 2>/dev/null; then
+    echo "[ok] pushed git notes (corrections attached to commits)."
+  else
+    echo "[!] git notes push failed. Any correction you attached is still LOCAL ONLY."
+  fi
+fi

@@ -136,6 +136,56 @@ def _store_coverage():
     return out
 
 
+def _export_taken_date(path):
+    """When the export was TAKEN, from its filename, falling back to its mtime. None if unknown.
+
+    Reuses `parse_network.export_date_from_name`, which already encodes why the FILENAME beats the
+    mtime: an extracted `Connections.csv` inherits LinkedIn's own archive timestamp, which can be
+    older than a stale zip sitting beside it.
+    """
+    if not path:
+        return None
+    try:
+        sys.path.insert(0, HERE)
+        from parse_network import export_date_from_name
+        real = str(path).split("::", 1)[0]          # zips arrive as `<zip>::<member>`
+        d = export_date_from_name(real)
+        if d:
+            return d
+        return date.fromtimestamp(os.path.getmtime(real))
+    except Exception:
+        return None
+
+
+def parse_is_behind(exp_path, newest, exp_newest):
+    """Was warm-network.md built from an OLDER export than the newest one on disk?
+
+    🎯 MEASURE THE THING, NOT A PROXY. This compared `max(date in warm-network.md)` against the
+    newest connection in the export, and those are not the same question. warm-network.md only
+    carries dates for contacts that RANK into one of its sections; everyone else lands in the
+    undated full-roster list at the bottom. So a newest connection who does not rank is parsed
+    correctly, written correctly, and still leaves the proxy stuck one day behind FOREVER.
+
+    ⛔ WHAT THAT COSTS. Any job that treats exit 1 as "self-healable" will re-parse on a schedule,
+    report that it re-parsed, and never clear a condition re-parsing does not affect. Measured
+    upstream 2026-08-10: it also held open a re-ingest path that silently blanked 35 `Has Email`
+    flags on every run.
+
+    The header line is the honest answer: parse_network stamps the export it read, so ask that.
+    """
+    src = recorded_source()
+    if src and exp_path:
+        # BOTH sides carry `<zip>::<member>` in the wild — parse_network stamps the header with the
+        # member it read, so the split has to happen on the header too or the two never match and
+        # the check is stuck red forever (BUG-159, the fix for BUG-146 reintroducing BUG-146).
+        def _archive(p):
+            return os.path.basename(str(p).split("::", 1)[0])
+        return _archive(exp_path) != _archive(src)
+    # No header stamp (a hand-written or pre-existing warm-network.md). Fall back to the old date
+    # comparison, which is imprecise but is strictly better than reporting "fresh" on no evidence.
+    return bool(newest and exp_newest and exp_newest > newest)
+
+
 def scan(today=None):
     """Pure scan. Returns a dict; prints nothing. consistency-check step [18] calls this.
 
@@ -151,7 +201,19 @@ def scan(today=None):
         "export_newest_connection": exp_newest,
         "export_path": exp_path,
         "export_lag_days": (today - exp_newest).days if exp_newest else None,
-        "parse_is_behind_export": bool(newest and exp_newest and exp_newest > newest),
+        "parse_is_behind_export": parse_is_behind(exp_path, newest, exp_newest),
+        # ── WHEN THE EXPORT WAS TAKEN, a DIFFERENT question from what is inside it ──
+        # Receipt from a live install: the card said "warm-network data is 32 days old · fix:
+        # download a fresh LinkedIn export", against an export taken FOUR DAYS earlier holding zero
+        # connections after that date. The operator answered that they had already refreshed it,
+        # and they were right. Downloading again cannot change that number.
+        # ⛔ THE CONFLATION: `data_lag_days` is days since the newest CONNECTION, which is two facts
+        # wearing one number — "your export is stale" and "you have not connected with anyone
+        # lately". Only the first is actionable, and only the export's own TAKEN date separates
+        # them. Same no-op the docstring above already fixed for re-PARSE, left live for re-DOWNLOAD.
+        "export_taken": _export_taken_date(exp_path),
+        "export_taken_days": ((today - _export_taken_date(exp_path)).days
+                              if _export_taken_date(exp_path) else None),
         "source": recorded_source(),
     }
     out.update(_store_coverage())
@@ -207,11 +269,25 @@ def main():
         lines.append("closeness store: ABSENT — warm rungs locked; run /level-network to create it")
 
     # A re-parse can only help when disk actually holds something newer than the parse.
+    _taken_days = s.get("export_taken_days")
     if s["parse_is_behind_export"]:
         code = 1
-        head = (f"🟠 warm-network is BEHIND an export already on disk "
-                f"({s['newest_connection']} parsed vs {s['export_newest_connection']} available)")
+        # ⚖️ REPORT THE COMPARISON YOU ACTUALLY MADE. This printed two CONNECTION dates no matter
+        # what triggered it. Once the trigger became "which export was this built from", that line
+        # could print a parsed date NEWER than the available one and still say BEHIND — a message
+        # arguing against its own verdict. Name the exports, because those are what is compared.
+        _on_disk = os.path.basename((s["export_path"] or "").split("::", 1)[0]) or "?"
+        _built = os.path.basename(s.get("source") or "") or "?"
+        head = (f"🟠 warm-network was built from `{_built}` but `{_on_disk}` is on disk")
         fix = "   fix: python3 scripts/parse_network.py    (no download needed)"
+    elif _taken_days is not None and _taken_days <= warn_days:
+        # ⛔ THE EXPORT ON DISK IS FRESH; THE OPERATOR SIMPLY HAS NOT CONNECTED WITH ANYONE.
+        # Telling them to download again is a no-op, and blaming them for stale data that is not
+        # stale is how a check gets ignored. Say what is true and prescribe nothing.
+        code = 0
+        head = (f"✅ warm-network is current — export taken {_taken_days}d ago; "
+                f"no new connections since {s['newest_connection']} ({lag}d)")
+        fix = None
     elif lag >= fail_days:
         code = 2
         head = f"🔴 warm-network data is {lag} days old and no newer export exists on disk"

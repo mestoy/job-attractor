@@ -96,7 +96,7 @@ except Exception:  # standalone fallback — generic examples; [] would silently
 # boilerplate that are not employers at all, and the rule for what counts as a company belongs in the
 # same module as the rule for what counts as vetoed.
 try:
-    from check_screen_gate import VETO_EMPLOYERS, veto_hits, is_artifact
+    from check_screen_gate import VETO_EMPLOYERS, veto_hits, is_artifact, industry_resolution
 except Exception:  # standalone fallback — no squashed pass, and no artifact filter
     VETO_EMPLOYERS = []
 
@@ -106,6 +106,13 @@ except Exception:  # standalone fallback — no squashed pass, and no artifact f
 
     def is_artifact(name):
         return False
+
+    def industry_resolution(name, text=""):
+        # ⛔ THE FALLBACK MUST NOT UPGRADE. With no gate module there is no segment cache either,
+        # so every company here is genuinely unresolved unless a veto term fired. Answering
+        # "resolved" would let the mark disappear exactly where the least is known.
+        return ("vetoed", ", ".join(veto_hits(name, text))) if veto_hits(name, text) \
+            else ("unknown", None)
 
 # ── SCORING WEIGHTS — YOUR employer-criteria matrix, parameterized ──────────────────────────────
 # The weights that turn recorded signals into a rank. These are the ONE thing a different user must
@@ -349,7 +356,30 @@ class _BlockedText(str):
 
 
 def blocked_set():
-    """Blocked-list text with word-bounded membership. See _BlockedText for why it is not a str."""
+    """Word-bounded blocked membership. See `_BlockedText` for why it is not a plain str.
+
+    ⚠️ THE TEXT IS NOT THE AUTHORITY AND IS NOT READ. `_BlockedText.__contains__` answers entirely
+    from `screen_sweep.blocked_keys_from_list()`, i.e. the REGISTRY. Proven by wrapping a blocked
+    list that names NOBODY and asking for a registry key: it still answers True. That is the ruling
+    working as intended — the registry is the screening authority and `blocked-employers-list.md` is
+    a generated render, read by humans and parsed by nothing — but the old signature said otherwise,
+    so a SEEDED or hand-appended list looked authoritative and silently was not. The text is still
+    passed because `_BlockedText` subclasses `str` and several call sites use `in`; it is carried,
+    never consulted.
+
+    ⛔ DO NOT "FIX" THIS BY MAKING THE TEXT A MATCH SURFACE. That re-creates the false-block class
+    that hid a batch of ordinary short brand names, and it would block a company that is not blocked
+    at all whenever its name appears once as prose inside another company's reason ("same failure
+    class as Thirdco").
+
+    🔬 A DIVERGENCE WARNING WAS TRIED HERE AND REJECTED ON MEASUREMENT. Comparing the markdown's
+    names against the registry to catch "a block that never landed" reported dozens of divergences,
+    nearly all of them prose fragments the scraper lifted out of reason text (review counts, city
+    names, industry words). Routing them through the shipped `is_artifact` removed exactly one. A
+    warning that is almost entirely noise trains its reader to ignore it, and the reason it cannot
+    be built is the reason the registry exists: the markdown is not a parseable source. The place to
+    catch an unlanded block is at the WRITE, via `employers.declare_blocked`.
+    """
     return _BlockedText(rd("documents/blocked-employers-list.md").lower())
 
 
@@ -517,7 +547,149 @@ def score_board_record(rec):
     )
 
 
-def _score_fields(company, lane, remote, culture, nonpe, boss, praise):
+# ── DESK-ANSWERABLE CRITERIA ─────────────────────────────────────────────────────────────────
+#
+# ⛔ THE PROBLEM THIS SOLVES, measured rather than assumed. In the tree this shipped from, the board
+# held 37 scored companies and **36 of them sat at exactly the same score**. The reasons line on
+# every one read the same three things: WLB not scored, recommend-rate not scored, leadership
+# unproven. The scorer was not failing to discriminate because its criteria list was too short. It
+# was STARVED: those are all CULTURE criteria, `_screened_fields` returns `culture` EMPTY for every
+# ledger row on purpose (the review sites block automated readers, so an agent reporting "culture
+# clean" may only be reporting "culture unreachable"), and the quick culture peek belongs to the
+# human. So the only inputs that could move a screened row were unavailable BY DESIGN, and every
+# screened company collapsed to one number.
+#
+# 📊 THE WASTE THIS RECOVERS. A single screening session recorded comp bands, live product seats,
+# reporting lines, ownership shape and IC-versus-management titles for 20 companies, and NONE of it
+# reached the score. Companies screened that day against their own job boards ranked identically to
+# companies screened weeks earlier on far thinner evidence.
+#
+# ⚖️ WHY THESE CRITERIA AND NOT EVERY CRITERION. The method this kit follows splits desk work from
+# hand-to-hand: company, industry, function and location are answerable from your desk; culture,
+# people, comp and travel are "decide once engaged". Most rows in a full criteria matrix are the
+# second kind, and scoring those from a desk would be inventing answers. Everything below is a fact
+# already printed on a job posting, so it needs no new research and cannot be guessed.
+#
+# ⛔ ADDITIVE AND TRANSPARENT ONLY. Nothing here subtracts and nothing here VETOES. A missing field
+# scores zero and says so in its own reason line, so "unscored" never masquerades as "bad". The hard
+# filters stay where they are, in the gates.
+#
+# 🔧 PARAMETERIZED: the salary floor and target come from `kit_config`, never a hardcoded number.
+_IC_TITLE = re.compile(r"\b(senior|sr\.?|staff|principal|lead)\s+(product\s+)?(manager|owner|pm)\b", re.I)
+_MGMT_ONLY = re.compile(r"\b(director|head of|vp|vice president|chief)\b", re.I)
+_SEAT_TITLE = re.compile(r"product\s+(manager|owner|lead)|head of product", re.I)
+_REPORTS_TO_TOP = re.compile(r"report(s|ing)?\s+to\s+the\s+(ceo|founder|cpo|coo)", re.I)
+_MONEY = re.compile(r"\$\s?([0-9]{2,3})(?:,([0-9]{3}))?\s?(k\b)?", re.I)
+
+# ⛔ THE FLOOR IS NOT A BAND, and this cost a false positive on the first run. The comp evidence a
+# screener writes routinely NAMES the floor while saying the band is unknown: "UNVERIFIED. No band
+# in the posting. The $170K floor is unconfirmed." A bare money regex read that floor out of the
+# sentence and scored two companies as publishing a band that cleared it, when neither had published
+# anything at all. The number was in the text; it was not the employer's number.
+_NOT_A_BAND = re.compile(r"\bunverified\b|\bno band\b|\bnot published\b|\bunpublished\b", re.I)
+_FLOOR_FIGURE = re.compile(r"\$\s?[0-9]{2,3}(?:,[0-9]{3})?\s?k?\s*(floor|target)\b|"
+                           r"\b(floor|target)\s*(is|of|at)?\s*\$\s?[0-9]{2,3}(?:,[0-9]{3})?\s?k?", re.I)
+
+
+def _salary_floor():
+    """(floor, target) from `kit_config.COMP_FLOOR`, the knob the batch screen already uses.
+
+    ⛔ REUSES THE EXISTING KNOB rather than adding a second one. `COMP_FLOOR` already drives the
+    mechanical comp screen, and two settings for one fact is how they drift apart. `COMP_FLOOR = 0`
+    means "no comp filtering" there, and it means "do not score comp" here, which is the same
+    intent expressed once.
+    """
+    try:
+        import kit_config
+        floor = int(getattr(kit_config, "COMP_FLOOR", 0) or 0)
+        target = int(getattr(kit_config, "COMP_TARGET", 0) or 0)
+    except Exception:
+        floor, target = 0, 0
+    # A target above the floor lets a strong band outscore a merely-adequate one. Derived when
+    # unset so the kit works with the single knob most owners will configure.
+    return floor, (target or (int(floor * 1.3) if floor else 0))
+
+
+def _money_max(text):
+    """Largest dollar figure in a comp string, normalized to whole dollars. None when absent.
+
+    Refuses the whole field when it declares itself unverified, and strips figures that are
+    explicitly the FLOOR or the TARGET rather than the employer's posted band.
+    """
+    text = text or ""
+    if _NOT_A_BAND.search(text):
+        return None
+    text = _FLOOR_FIGURE.sub(" ", text)
+    best = None
+    for m in _MONEY.finditer(text):
+        head, tail, kilo = m.group(1), m.group(2), m.group(3)
+        if tail:
+            val = int(head) * 1000 + int(tail)
+        elif kilo:
+            val = int(head) * 1000
+        else:
+            continue          # a bare "$93" is not a salary; require thousands or a k suffix
+        if val >= 40_000 and (best is None or val > best):
+            best = val
+    return best
+
+
+def _desk_points(desk):
+    """Points and reason lines from criteria a JOB POSTING already answers. Never vetoes."""
+    pts, reasons = 0.0, []
+    if not desk:
+        return pts, reasons
+    comp = str(desk.get("comp") or "")
+    pm_req = str(desk.get("pm_req") or "")
+    note = str(desk.get("note") or "")
+    owner = str(desk.get("ownership") or "")
+    floor, target = _salary_floor()
+
+    # Comp against the configured floor. A PUBLISHED band is the strongest desk fact available,
+    # because it is the one criterion that otherwise only surfaces after an interview.
+    top = _money_max(comp)
+    if top is not None and floor:
+        if target and top >= target:
+            pts += 10; reasons.append(f"comp ${top:,} published, clears the target (10/10)")
+        elif top >= floor:
+            pts += 7; reasons.append(f"comp ${top:,} published, clears the floor (7/10)")
+        else:
+            reasons.append(f"comp ${top:,} published, UNDER the floor (0)")
+    else:
+        reasons.append("comp unpublished (not scored)")
+
+    # IC track. Some owners would rather not formally people-manage; when that is not your
+    # preference, set the weight to 0 in kit_config rather than deleting the signal.
+    if _IC_TITLE.search(pm_req):
+        pts += 8; reasons.append("IC-track seat open (+8)")
+    elif _MGMT_ONLY.search(pm_req):
+        pts += 2; reasons.append("management title only (+2, partial)")
+
+    # Live product seats — actionability, the same idea as the boss+email readiness point.
+    seats = len(set(_SEAT_TITLE.findall(pm_req)))
+    if seats:
+        p = min(seats * 2, 6)
+        pts += p; reasons.append(f"{seats} live product seat kind(s) (+{p})")
+
+    # A named reporting line straight to the top IS the boss hunt, at a company small enough for the
+    # chief executive to be the hiring manager.
+    if _REPORTS_TO_TOP.search(note + " " + pm_req):
+        pts += 4; reasons.append("reporting line to the top named (+4, boss hunt shortened)")
+
+    # Calm pace, read from OWNERSHIP shape rather than culture text.
+    # ⛔ ONE AWARD ONLY. `_score_fields` may already grant this from the culture/ownership text, and
+    # on the first run one company collected it twice, printing two calm-pace lines on the same row
+    # for double the points of a single criterion.
+    if desk.get("_calm_already"):
+        pass
+    elif re.search(r"bootstrap|no funding|founder-owned|angel", owner, re.I):
+        pts += 8; reasons.append("bootstrapped or angel-funded (+8, calm pace)")
+    elif re.search(r"hypergrowth|founding (pm|product)", note + " " + pm_req, re.I):
+        reasons.append("hypergrowth shape flagged (no points)")
+    return pts, reasons
+
+
+def _score_fields(company, lane, remote, culture, nonpe, boss, praise, desk=None):
     """The scoring core, shared by the positional and the state-store readers.
 
     Extracted so the two paths cannot drift. Every threshold, weight and veto below is unchanged
@@ -591,9 +763,17 @@ def _score_fields(company, lane, remote, culture, nonpe, boss, praise):
 
     # confidence discount on the culture-derived score keeps an unproven row from topping a verified
     # one on a lone high number — but the tier is ALSO the primary sort key, so this is secondary.
+    # ── DESK-ANSWERABLE CRITERIA ──
+    # Added AFTER the culture block and BEFORE the confidence discount, deliberately. These are
+    # posting facts, not culture inferences, so they must not be scaled by a culture-confidence
+    # multiplier that exists to stop an unproven row topping a verified one on a lone high rating.
+    _dp, _dr = _desk_points(dict(desk or {},
+                                 _calm_already=any("calm" in r for r in reasons)))
+    reasons.extend(_dr)
+
     conf = CONFIDENCE_MULTIPLIER.get(tier, 0.5)
     return {
-        "company": company, "lane": lane, "tier": tier, "pts": round(pts * conf, 1),
+        "company": company, "lane": lane, "tier": tier, "pts": round(pts * conf + _dp, 1),
         "reasons": reasons, "boss": boss.strip(), "source": "green board",
     }, None
 
@@ -804,6 +984,60 @@ def _screened_lane(row, remote, nonpe):
     return f"SCREENED {when} · OWED culture+boss · {got} ✅"
 
 
+# ── OPEN SEATS AS A TIEBREAK AMONG UNSCREENED ROWS (2026-08-10) ──────────────────────────────
+#
+# ⛔ THE PROBLEM THIS SOLVES, measured rather than assumed. The 2026-08-10 sweep banked 182
+# companies. `banked_topup` correctly refuses to grant any of them a screened verdict, so every one
+# arrives at the SAME pts=0.5, and the board showed 142 rows tied. A tie that large is not an
+# ordering, it is an alphabetical accident, and it made "screen the top of the pool" meaningless:
+# there was no top.
+#
+# ⚖️ THIS DOES NOT UPGRADE ANY ROW. The lane text, the tier and the 0.5 all stand, because none of
+# them has been earned. What changes is only the order WITHIN the tie, and only by a fact the sweep
+# already collected: how many distinct product seats that employer has open right now.
+#
+# 📊 WHY SEAT COUNT AND NOT SOMETHING ELSE. It is the one signal on hand that is about the employer
+# rather than the posting, it needs no lookup, and it was the field that separated the pool the
+# first time anyone looked: ordering by it put Virtusa (9 seats), GitHub (7), Couchbase (7) and Ping
+# Identity (5) on top, and THREE OF THOSE FOUR turned out to be PE-owned buyouts. So it surfaces
+# large, acquisition-shaped employers early, which is where the cheap kills are.
+#
+# ⚠️ IT IS A TIEBREAK, NOT A FIT SIGNAL. A company with nine openings is not a better match; it is
+# a company worth screening SOONER because the answer is cheap and it clears more of the pool.
+def _open_seat_counts(repo=None):
+    """{company_lower: distinct open product seats} from the newest sweep file. {} on any failure."""
+    # ⛔ MATCH THE DATED JOB SWEEP ONLY, NEVER `sweep-*`. `sorted(glob("sweep-*.jsonl"))[-1]` sorts
+    # LEXICALLY, so any same-prefixed neighbour whose next character outranks a digit wins the sort.
+    # In the tree this shipped from, a `sweep-chambers-…` file (a local business directory of 2,279
+    # names, nothing to do with job postings) beat every `sweep-YYYY-MM-DD` file, so the "newest
+    # sweep" was never the newest sweep. No banked employer appeared in it, every row scored 0 seats,
+    # and the tiebreak ordered nothing while looking like it worked.
+    # 📌 A tiebreak that returns a constant for every row is a bug wearing the badge of a tie.
+    import glob as _glob
+    import re as _re
+    repo = repo or REPO
+    files = [f for f in _glob.glob(os.path.join(repo, "documents", "sweep-*.jsonl"))
+             if _re.match(r"^sweep-\d{4}-\d{2}-\d{2}", os.path.basename(f))]
+    # Sort on the DATE the name carries, so a future suffix cannot reorder the list again.
+    files.sort(key=lambda f: os.path.basename(f))
+    if not files:
+        return {}
+    counts = {}
+    try:
+        with open(files[-1], encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                co = (d.get("company") or "").strip().lower()
+                if co:
+                    counts.setdefault(co, set()).add(d.get("id") or d.get("url") or d.get("title"))
+    except OSError:
+        return {}
+    return {c: len(v) for c, v in counts.items()}
+
+
 def banked_topup(have, done, blocked, need):
     """Fill from the agent-screened BANKED files before falling back to raw discovery.
 
@@ -820,18 +1054,22 @@ def banked_topup(have, done, blocked, need):
     """
     out = []
     survivors = survivor_rulings()
+    _seat_counts = _open_seat_counts()
     havenames = {c["company"].lower() for c in have}
     for path in banked_sweep_files():
         try:
             text = open(path, encoding="utf-8", errors="ignore").read()
         except Exception:
             continue
+        skipped_by_shape = 0
+        parsed_lines = 0
         for line in text.splitlines():
-            if len(out) >= need:
-                return out
             # rows look like:  Company A · Company B · **Company C** ·  (batch lists)
             if not line.strip() or line.lstrip().startswith(("#", ">", "|", "-")):
+                if line.strip():
+                    skipped_by_shape += 1
                 continue
+            parsed_lines += 1
             for chunk in line.split("·"):
                 co = chunk.strip().strip("*~ ").strip()
                 co = re.sub(r"\s*\(.*?\)\s*$", "", co).strip()
@@ -861,26 +1099,56 @@ def banked_topup(have, done, blocked, need):
                 if row is not None:
                     remote, nonpe, boss = _screened_fields(row)
                     lane = _screened_lane(row, remote, nonpe)
-                    scored, _why = _score_fields(co, lane, remote, "", nonpe, boss, "")
+                    # The ledger row already holds comp, the seat titles, ownership shape and the
+                    # note. Pass them through so the desk criteria can score; the BOARD path
+                    # deliberately does not, because a board row has no such columns.
+                    _desk = {"comp": row.get("comp"), "pm_req": row.get("pm_req"),
+                             "ownership": row.get("ownership"), "note": row.get("note")}
+                    scored, _why = _score_fields(co, lane, remote, "", nonpe, boss, "", desk=_desk)
                     if scored:
                         scored["source"] = os.path.basename(path)
                         out.append(scored)
                         havenames.add(low)
-                        if len(out) >= need:
-                            return out
                         continue
                     # A screened row that the scorer VETOES is a real disagreement between the
                     # ledger and the gates, not a reason to go quiet. Fall through to the default so
                     # the company still appears and can be looked at.
                 out.append({"company": co, "lane": "MECHANICAL gates only, NOT screened",
                             "tier": 1, "pts": 0.5,
+                            # ⚖️ A TIEBREAK INSIDE THE 0.5, never an addition to it.
+                            "seats": _seat_counts.get(low, 0),
                             "reasons": ["BANKED sweep: mechanical gates only. Remote, PE, culture "
                                         "and boss ALL still owed. Worth screening, never worth sending."],
                             "boss": "", "source": os.path.basename(path)})
                 havenames.add(low)
-                if len(out) >= need:
-                    return out
-    return out
+        # ⛔ "UNREADABLE" AND "EMPTY" MUST NOT PRINT THE SAME SENTENCE. The caller's "0 rankable
+        # candidate(s) — the board + discovery are thin" is what a genuinely thin file AND a file in
+        # the wrong shape both produced, because this reader could not tell them apart.
+        # `screen_sweep.py --bank` writes a dot-separated batch list; a discovery AGENT writing the
+        # same file by hand writes prose, where companies are `## 1. SomeCo (STRONG, send-ready)`
+        # headings and every attribute is a `-` bullet. That is every line, so every line is
+        # skipped, and fully screened companies sat unseen in a file the board had just opened and
+        # called thin.
+        # 🎯 THE PREDICATE IS THE SHAPE, NOT THE COUNT. Zero parsed lines WITH skipped content is a
+        # shape failure; zero parsed lines and nothing skipped is an empty file, which is not this
+        # warning's business. A file that parsed fine and simply held nothing new stays silent too,
+        # because `parsed_lines` is non-zero there. No second parser, one honest sentence.
+        if parsed_lines == 0 and skipped_by_shape:
+            print(f"  ⚠️  {os.path.basename(path)}: all {skipped_by_shape} non-blank line(s) matched "
+                  f"the header/bullet skip pattern (#, >, |, -), so this file is in a shape "
+                  f"banked_topup CANNOT READ, not a file with nothing eligible in it. Expected the "
+                  f"dot-separated batch list `screen_sweep.py --bank` writes; this looks like prose.",
+                  file=sys.stderr)
+    # ⛔ SORT BEFORE TRUNCATING. This used to return the first `need` rows in FILE ORDER and stop,
+    # so whether a company had been SCREENED had no bearing on whether it was ever reached: only
+    # where its name sat in a dot-separated batch list. Measured on the maintainer's board, it was
+    # showing 8 unscreened rows at 0.5 while 140 recorded SURVIVOR rulings sat unshown, including
+    # the highest-scoring company on file. Collect the whole eligible pool, order it, THEN cut.
+    #
+    # ⚖️ Screened rows keep precedence because `pts` is the first key; `seats` only decides the
+    # order INSIDE a tie, which is where the unscreened rows all sit by construction.
+    out.sort(key=lambda r: (r.get("pts", 0), r.get("seats", 0)), reverse=True)
+    return out[:need]
 
 
 def discovery_topup(have, done, blocked, need):
@@ -946,6 +1214,23 @@ def rank(n=10):
     # per-tier multiplier in score_board_row). A verified clean row therefore floats up on merit
     # rather than by fiat, and the number the user reads is the number they are sorted by — no
     # "why is #1 below #2 in score" confusion. Tier stays a visible tag. Ties broken by tier.
+    # 🏷 INDUSTRY RESOLUTION, MARKED ON THE ROW. `veto_hits` matching industry words against a
+    # company NAME only ever stops a company that spelled its industry into its own name: a run of
+    # financial firms reached a partner's banked pool against an operator whose first hard filter
+    # was financial services. An empty veto has always meant "no veto term appeared", never "this
+    # company was screened", and nothing said so.
+    # ⚖️ THESE ARE NOT BLOCKED. The great majority of employers are unresolvable from the name
+    # alone, so an unknown industry RANKS carrying a visible mark and the veto moves to the SEND.
+    # This ADDS A REASON and changes no score and no order.
+    for c in cands:
+        try:
+            _state, _detail = industry_resolution(c.get("company", ""), c.get("lane", ""))
+        except Exception:
+            continue
+        if _state == "unknown":
+            c["industry_unresolved"] = True
+            c.setdefault("reasons", []).append(
+                "🏷 industry UNRESOLVED — never established, so this cannot be sent to yet")
     cands.sort(key=lambda c: (c["pts"], c["tier"]), reverse=True)
     # DEDUPE BY COMPANY. The pool is built from BOTH the ACTIVE board and the BANKED tier, and a
     # company promoted from banked to active exists in both — so one company could occupy TWO of a
@@ -1127,6 +1412,163 @@ except Exception:
 # few discrete bonuses over a large population WILL pile up on one value; a ceiling that announces
 # itself is found the same day rather than weeks later by eye.
 PLATEAU_WARN_AT = 5
+# Above this share of the shown top band being indistinguishable, the #1 row is a coin flip.
+TIE_RATE_WARN_AT = 0.50
+
+
+def reason_terms(why):
+    """A reason string reduced to its SCORING terms, provenance stripped.
+
+    `🔬 employer resolved (<url>)` is provenance, not a term that ordered anything, and leaving it
+    in makes every row look unique — which would let a tie hide behind a URL. One definition,
+    shared by the tie tripwire below and by `contact_card.py`, so the two cannot drift.
+
+    Accepts a string or the row's `reasons` list, so callers need not agree on the join.
+    """
+    if isinstance(why, (list, tuple)):
+        why = " · ".join(str(w) for w in why)
+    return " ".join(re.sub(r"·?\s*🔬 employer resolved \([^)]*\)", "", why or "").split())
+
+
+def top_band_tie(ranked):
+    """How much of a shown ranking is indistinguishable from its own top rows?
+
+    Returns `(n_rows, n_score_tied, score, n_reason_tied, reason, n_tied)`, where `n_tied` is the
+    UNION of the two groups — the rows whose position is a tiebreak rather than a verdict — CELL COUNTS, never a bare
+    percentage.
+
+    ⚠️ WHOLE POINTS, NOT 0.1: a continuous tenure term spreads a functionally identical band across
+    50.2/50.1/49.8 and defeats an exact-match counter. ⚖️ The reason string is the sharper half —
+    identical stated grounds means no feature separates those rows at all.
+    """
+    rows = list(ranked or [])
+    if not rows:
+        return 0, 0, None, 0, "", 0
+    sc = collections.Counter(round(float(c.get("pts") or 0)) for c in rows)
+    score, n_score = sc.most_common(1)[0]
+    rs = collections.Counter(reason_terms(c.get("reasons") or c.get("why") or "") for c in rows)
+    reason, n_reason = rs.most_common(1)[0]
+    # THE UNION, and it must be the union rather than either count alone. Either condition on its
+    # own already makes a row's position a tiebreak, and taking only the larger group understates
+    # a band that is tied on score in one half and on stated grounds in the other.
+    tied = sum(1 for c in rows
+               if (n_score > 1 and round(float(c.get("pts") or 0)) == score)
+               or (n_reason > 1 and reason_terms(c.get("reasons") or c.get("why") or "") == reason))
+    return len(rows), n_score, score, n_reason, reason, tied
+
+
+def print_tie_tripwires(ranked, tiebreak):
+    """Announce a band the ranker cannot tell apart, for ANY ranked list it shows.
+
+    ⛔ WHY THIS IS A FUNCTION AND NOT TWO COPIES. Both tripwires were written for the PEOPLE board,
+    after a cluster of contacts tied on the same score and row 1 was presented as a verdict. They
+    were wired into that branch only. The COMPANY board — same module, same `pts`/`reasons` shape,
+    same failure — printed its rows and stopped, so it went on showing most of its top ten tied at
+    one score, several of them stating byte-identical grounds, and said nothing.
+
+    ⚠️ THE COMPANY TIE WAS ALREADY KNOWN. A sweep had banked most of its companies at one identical
+    score, leaving the majority of rows in an alphabetical accident. The response was a BETTER
+    TIEBREAK (open seats), which changes who wins a coin flip without ever telling the reader a coin
+    was flipped. A tiebreak is not a disclosure. This is the disclosure.
+
+    `tiebreak` names what actually decided the order, so the warning is specific about which
+    accident the reader is looking at.
+    """
+    n, cnt, top, rcnt, rwhy, tied = top_band_tie(ranked)
+    if cnt > PLATEAU_WARN_AT:
+        print(f"  ⚠️  PLATEAU: {cnt} of {n} shown rows score within a point of "
+              f"{top}. Ties this wide mean the ordering below them is a tiebreak, not a "
+              f"ranking.")
+    if n and tied and tied / n > TIE_RATE_WARN_AT:
+        print(f"  🔴 TIE RATE: {tied} of {n} shown rows are indistinguishable — {cnt} share "
+              f"the whole-point score {top} and {rcnt} state an IDENTICAL reason.")
+        print(f"     The order among them is the TIEBREAK ({tiebreak}), never a "
+              "verdict. Row 1 here is a coin flip.")
+        if rcnt > 1:
+            print(f"     shared reason: {rwhy[:150]}")
+
+
+# ── SCREENING QUEUE: what to MEASURE next, when the ranking has nothing left to say ────────────
+#
+# ⛔ THE PROBLEM THIS ANSWERS. `print_tie_tripwires` tells the reader that row 1 is a coin flip. It
+# does not tell them what to DO about it, and "pick 3" still points at a band the ranker cannot
+# order. The tie is an INPUT problem — the culture criteria are unrecorded on every screened row by
+# design, because review sites block agents and the short manual peek is the human's alone — so the
+# useful next action is not a better sort, it is a measurement.
+#
+# 📏 POINTS AT STAKE COME FROM THE SCORER'S OWN WEIGHTS, never a second table, so re-tuning
+# CRITERIA_WEIGHTS in kit_config moves this queue with it. `_score_fields` already banks part of the
+# leadership weight as "unproven", so a clean screen only adds the remainder.
+# ⚠️ The WLB criterion also VETOES below WLB_FLOOR, which no other missing datum can do. A peek does
+# not just add points there, it can remove the company from the board entirely — that is why the
+# peek is worth more than its point total suggests, and the renderer says so.
+COMP_STAKE_POINTS = 10.0     # the published-comp branch of `_score_fields` is worth this much
+
+
+def _culture_stake():
+    """(label, points, …) triples for the culture data a peek would resolve, from the live weights."""
+    lw = float(CRITERIA_WEIGHTS.get("leadership_stability", 0) or 0)
+    return (("WLB", float(CRITERIA_WEIGHTS.get("wlb", 0) or 0), "peek"),
+            ("%recommend", float(CRITERIA_WEIGHTS.get("retention", 0) or 0), "peek"),
+            ("leadership", lw * (1.0 - LEADERSHIP_UNPROVEN_FRACTION), "peek"))
+
+
+def screening_stake(row):
+    """(points_at_stake, [what is unmeasured], can_veto) for one scored board row.
+
+    Reads the row's OWN reason strings, which is what the scorer actually emitted, rather than
+    re-deriving from the source cells. A criterion the scorer called "n/a" or "not scored" is
+    unmeasured BY THE SCORER, which is the only definition that matters here.
+    """
+    why = " · ".join(row.get("reasons") or [])
+    culture = _culture_stake()
+    owed, stake, veto = [], 0.0, False
+    if "WLB n/a" in why:
+        owed.append(culture[0][0]); stake += culture[0][1]; veto = True
+    if "rec n/a" in why:
+        owed.append(culture[1][0]); stake += culture[1][1]
+    if "leadership: unproven" in why:
+        owed.append(culture[2][0]); stake += culture[2][1]
+    if "comp unpublished" in why:
+        owed.append("comp band"); stake += COMP_STAKE_POINTS
+    return stake, owed, veto
+
+
+def print_screening_queue(ranked, limit=10):
+    """What to MEASURE next, ordered by how much of the score is currently unmeasured.
+
+    ⛔ AND IT REFUSES TO FAKE AN ORDER. When every row owes the same data — which is the normal
+    case, because the culture screen is owed board-wide by design — the stake is identical and
+    there is no honest ordering. Inventing one would be the tiebreak mistake a second time: a
+    tiebreak dressed as a verdict. It says they are indistinguishable and names the one action that
+    resolves all of them instead. A uniform penalty cannot break a tie.
+    """
+    rows = [(screening_stake(c), c) for c in (ranked or [])]
+    rows = [(s, owed, veto, c) for (s, owed, veto), c in rows if owed]
+    if not rows:
+        return
+    rows.sort(key=lambda t: -t[0])
+    top = rows[0][0]
+    uniform = all(abs(s - top) < 0.01 for s, _o, _v, _c in rows)
+
+    print(f"\n  📋 SCREENING QUEUE — {len(rows)} row(s) carry unmeasured criteria.")
+    if uniform:
+        names = ", ".join(str(c.get("company") or "") for _s, _o, _v, c in rows[:limit])
+        owed = rows[0][1]
+        print(f"     All {len(rows)} owe the SAME data and are worth the SAME {top:.0f} points, so "
+              f"there is no order here to give you.")
+        print(f"     unmeasured on every one: {' · '.join(owed)}")
+        print(f"     {names}")
+    else:
+        for s, owed, veto, c in rows[:limit]:
+            flag = " ⚠️ can VETO" if veto else ""
+            print(f"     {s:5.0f} pts at stake  {str(c.get('company') or '')[:28]:28} owed: "
+                  f"{', '.join(owed)}{flag}")
+    if any(v for _s, _o, v, _c in rows):
+        print(f"     ⚠️  WLB is the only one that can VETO (below the {WLB_FLOOR} floor). A peek")
+        print("         there can remove a company outright, which is worth more than the points say.")
+
+
 # Trailing window that decides which category is STARVED of sends (the exposure floor, below).
 EXPOSURE_WINDOW_DAYS = 30
 
@@ -1524,9 +1966,53 @@ def live_weights():
     if "w" not in _LIVE_WEIGHTS:
         try:
             _LIVE_WEIGHTS["w"] = _compute_weights()
+            _stamp_derivation(_LIVE_WEIGHTS["w"])
         except Exception:
             _LIVE_WEIGHTS["w"] = _stored_weights()
     return _LIVE_WEIGHTS["w"]
+
+
+def _stamp_derivation(w):
+    """Witness that a derivation RAN, with the numbers it produced.
+
+    🔴 WHY (2026-08-11). The learner works — weights genuinely move as sends accumulate, proven by
+    re-deriving against chronological truncations of the send log (senior-exec travelled
+    0.98 → 1.31 → 1.28 across 50/75/100% of the log). But `documents/state/person-weights.jsonl`
+    last wrote **2026-07-30 at joined=56** while live derivation stands at **joined=102**. Learning
+    ran on every invocation and NOTHING durable witnessed it.
+
+    ⚖️ That is the distinction `check_job_liveness.py` exists for, one level down: *"a job that is
+    LOADED is not a job that RAN, and the two come apart silently."* Here it is *a learner that is
+    WIRED is not a learner that LEARNED*. Without a stamp, "the ranker adapts" is a claim about
+    code rather than a fact about this install, and the only honest answer to "is it active?" was
+    a shrug ([[a-self-heal-must-verify-itself-and-never-write-its-own-input]]).
+
+    ⛔ BEST EFFORT, NEVER FATAL. A briefing must not die because a witness file is unwritable; the
+    contract on the caller is `Exit: 0 always`. A missing stamp is itself the finding, and the
+    liveness check reports it.
+    """
+    import datetime as _dt
+    path = os.path.join(REPO, "documents", "state", "weights-derive.json")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        payload = {"last_run": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                   "joined": (w or {}).get("joined"),
+                   "log_rows": (w or {}).get("log_rows"),
+                   "coverage": (w or {}).get("coverage"),
+                   "founder_order": (w or {}).get("founder_order"),
+                   "per_category": (w or {}).get("per_category")}
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2, default=str)
+        os.replace(tmp, path)          # atomic: a half-written witness is worse than none
+    except Exception as exc:
+        # ⛔ NON-FATAL BUT NEVER SILENT. The first cut was `except Exception: pass`, and it hid a
+        # NameError (`datetime` is not imported in this module, only `date as _date`) so the stamp
+        # never wrote and the run still reported success. A witness that fails quietly is worse
+        # than no witness, because the liveness check then reports "never ran" and the operator
+        # goes looking in the wrong place. Print to stderr; the caller's `Exit: 0 always` contract
+        # is unaffected.
+        print(f"   ⚪ weights stamp not written ({exc.__class__.__name__}: {exc})", file=sys.stderr)
 
 
 def weights_reorder_note():
@@ -1546,10 +2032,27 @@ def weights_reorder_note():
         return [c for c, _ in sorted(cats.items(), key=lambda kv: -float(kv[1].get("w", 1.0)))][:3]
 
     a, b = top3(old), top3(new)
-    if a == b:
+    if a != b:
+        return (f"  ⚖️ category order MOVED since the {old.get('as_of')} snapshot: "
+                f"{' > '.join(a)}  →  {' > '.join(b)} · snapshot it with --recompute-weights")
+
+    # ⛔ ORDER IS NOT THE ONLY THING WORTH ANNOUNCING (added 2026-08-11). Reorder-only was a PROXY:
+    # weights can travel a long way without swapping rank, and this note then stays silent while
+    # the audit trail rots. Measured the day this was written: the newest `person-weights.jsonl`
+    # row was 2026-07-30 at joined=56 while live derivation stood at joined=102, so **46 sends of
+    # evidence had accumulated with no snapshot and nothing said a word.** The scoring was current;
+    # only the RECORD was stale, which is the harder failure to notice because nothing looks wrong.
+    # ⚖️ Reuses WEIGHTS_STALE_AFTER, the threshold this file already defines for exactly this
+    # question, rather than introducing a second number that could drift from it.
+    try:
+        grew = int(new.get("joined") or 0) - int(old.get("joined") or 0)
+    except Exception:
         return None
-    return (f"  ⚖️ category order MOVED since the {old.get('as_of')} snapshot: "
-            f"{' > '.join(a)}  →  {' > '.join(b)} · snapshot it with --recompute-weights")
+    if grew >= WEIGHTS_STALE_AFTER:
+        return (f"  ⚖️ {grew} more joined send(s) than the {old.get('as_of')} snapshot "
+                f"({old.get('joined')} → {new.get('joined')}), order unchanged · "
+                f"snapshot it with --recompute-weights")
+    return None
 
 
 def recompute_weights():
@@ -1816,12 +2319,34 @@ def contacted_people():
                 tn = re.sub(r"[^a-z0-9]", "", str(variant or "").lower())
                 if len(tn) >= 4:
                     names.add(tn)
-            m = re.search(r"linkedin\.com/in/([^/?\s]+)", str(d.get("to") or ""))
+            # ⛔ BOTH `to` SPELLINGS, because the writer emits both (found upstream 2026-08-10).
+            # This read only `linkedin.com/in/<slug>`, while `log_linkedin_send.py --to` accepts and
+            # DOCUMENTS the short form `linkedin:<handle>` in its own help text. Measured on the
+            # upstream log: **76 of 393 rows (19% of every send ever made)** used the short form with
+            # no `to_name` and were invisible here, including four replies to live threads. A
+            # contacted person this set cannot see is offered again as a NEW initial contact, which
+            # is the single thing it exists to prevent.
+            _to = str(d.get("to") or "")
+            m = (re.search(r"linkedin\.com/in/([^/?\s]+)", _to)
+                 or re.search(r"^linkedin:([^/?\s]+)$", _to.strip(), re.I))
             if m:
                 slug = m.group(1).lower()
                 nm = re.sub(r"[^a-z0-9]", "", slug)
                 if len(nm) >= 4:
                     names.add(nm)
+                # 🔴 LINKEDIN'S DISAMBIGUATOR BREAKS THE JOIN THE SAME WAY A MIDDLE INITIAL DOES.
+                # A taken handle gets a hash appended: `avery-garner-b967b429` keys as
+                # `averygarnerb967b429`, which never equals the pool's `averygarner`. Strip a
+                # trailing segment ONLY when it mixes letters AND digits, which is the hash's shape
+                # and not a surname's, so `mary-jane-smith` and `jennifer-dennis-brown` stay whole.
+                _parts = slug.split("-")
+                if len(_parts) > 2:
+                    _tail = _parts[-1]
+                    if (len(_tail) >= 4 and any(c.isdigit() for c in _tail)
+                            and any(c.isalpha() for c in _tail)):
+                        _base = re.sub(r"[^a-z0-9]", "", "".join(_parts[:-1]))
+                        if len(_base) >= 4:
+                            names.add(_base)
                 # 🔴 A MIDDLE INITIAL IN THE SLUG BREAKS THE JOIN. A profile at
                 # `/in/jane-a-doe` keys as `janeadoe`, while the contact pool knows the person
                 # as "Jane Doe" and keys as `janedoe`. The two never match, so the
@@ -2640,11 +3165,14 @@ def main():
         # 📊 PLATEAU TRIPWIRE. A scoring function built from a few discrete bonuses over a large
         # population WILL pile up on one value, and upstream that happened three separate times —
         # each one found by eye, weeks apart. A ceiling that announces itself is found the same day.
-        _sc = collections.Counter(round(float(c["pts"]), 1) for c in ranked)
-        _top, _cnt = (_sc.most_common(1) or [(None, 0)])[0]
-        if _cnt > PLATEAU_WARN_AT:
-            print(f"  ⚠️  PLATEAU: {_cnt} of {len(ranked)} shown rows share the score {_top}. "
-                  f"Ties this wide mean the ordering below them is a tiebreak, not a ranking.")
+        # ⚠️ WHOLE POINTS, and the reason string on top of it. An exact 0.1 match is defeated by
+        # any continuous term (a tenure bonus spread one identical band across five "distinct"
+        # scores), and even a whole-point tie understates the problem: upstream, six tied rows
+        # carried FIVE byte-identical reason strings, meaning no feature separated them at all.
+        # ⚖️ AND THE SCORE IS THE WEAKER HALF. Rows can tie on score while a continuous term hides
+        # it, and identical stated grounds means the ranker owns no feature that separates those
+        # people at all — so the shared instrument fires on its own count, at its own threshold.
+        print_tie_tripwires(ranked, "older connect date first")
         # ⚖️ A board that is ALL reunions is honest but not a job search. A reunion IS a send and
         # counts as work, so this never suppresses the rows — it names the SHAPE of the day so the
         # day's picks are a choice rather than a surprise.
@@ -2687,6 +3215,14 @@ def main():
     if len(ranked) < n:
         print(f"  ⚠️  only {len(ranked)} rankable candidate(s) — the board + discovery are thin. "
               f"Refill to see a full top {n}.")
+    # 📊 THE SAME TRIPWIRES THE PEOPLE BOARD GETS. Companies sort on (pts, tier, seats); when all
+    # three match, the order is the input order, which is a file-and-dict accident. The human is
+    # asked to "pick 3" off the top of this list, so a silent tie sends them at whoever happened to
+    # be parsed first. See `print_tie_tripwires` for why this took two boards to reach.
+    print_tie_tripwires(ranked, "equal score and tier — input order decides")
+    # 📋 AND WHAT TO DO ABOUT IT. The tripwire above says row 1 is a coin flip; this says which
+    # measurement stops it being one. Printed after, because it is the answer to the warning.
+    print_screening_queue(ranked)
     if skipped:
         print(f"  excluded on a veto: " + ", ".join(f"{co} ({why})" for co, why in skipped[:4]))
     print("\n  Ranked on RECORDED signals (culture, remote, PE, boss, praise) mapped to the matrix.")

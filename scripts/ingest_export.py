@@ -21,6 +21,7 @@ Usage:
   scripts/ingest_export.py <path> --force     # allow ingesting an OLDER export
 
 Exit: 0 = ingested · 2 = nothing usable found · 3 = usage · 4 = refused (older than what we have)
+      5 = refused (already sanitized — re-ingesting it would blank every `Has Email` flag)
 """
 import csv
 import datetime
@@ -124,6 +125,24 @@ def main():
     if not rows:
         print("❌ parsed 0 rows — refusing to ingest an empty export")
         return 2
+
+    # ⛔ RE-INGESTING OUR OWN OUTPUT DESTROYS `Has Email`, SILENTLY. The sanitized copy this script
+    # writes has no `Email Address` column, so re-reading it makes `has` False on every row, and the
+    # destination filename derives from the same connection dates — meaning the script overwrites
+    # the very file it just read. Measured upstream 2026-08-10: one run took 35 `yes` flags to 0 and
+    # printed "🔒 0 email address(es) stripped", which reads as a clean run. It matters here because
+    # `reconcile_contacts`-style orchestration passes whatever `find_export` resolves, and once a
+    # download has been ingested that IS the sanitized copy.
+    #
+    # 🎯 The guard checks for the COLUMN, not the path: a copy of the sanitized file kept anywhere
+    # else is the same hazard, and the column is what actually decides the outcome. An export
+    # straight from LinkedIn always carries `Email Address`, even when every value in it is blank.
+    if "Email Address" not in (rows[0].keys() if rows else ()):
+        print("⛔ REFUSING: this file has no `Email Address` column, so it is already sanitized —")
+        print("   almost certainly a copy this script wrote earlier. Ingesting it would rewrite it")
+        print("   with every `Has Email` flag blanked, and nothing would report the loss.")
+        print("   Point this at the RAW export from LinkedIn (or its .zip) instead.")
+        return 5
 
     when = _export_date(label, rows)
     have = existing_newest()

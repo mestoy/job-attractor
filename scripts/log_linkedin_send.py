@@ -255,6 +255,132 @@ def _near_misses(to, rows, limit=3):
     return sorted(out, key=lambda r: (r.get("date", ""), r.get("ts", "")), reverse=True)[:limit]
 
 
+# ── THE FUNNEL STAGE, added 2026-08-11 ──────────────────────────────────────────────────────────
+# 🎯 THE GOAL IS INTERVIEWS, NOT SENDS, and until today the log could not count either one.
+# `replied` is a boolean and `outcome` was free prose on 5 of 397 rows. So "how many interviews has
+# this search produced" was answerable only by reading `correspondence-log.md` end to end, which is
+# what a three-agent forensic pass had to do on 2026-08-11 to establish the answer: SIX
+# conversations, ZERO interviews, across 380 sends.
+#
+# ⛔ CONVERSATION AND INTERVIEW ARE DIFFERENT STAGES AND THE VOCABULARY MUST SAY SO. This is not
+# pedantry, it is a guardrail with a receipt: on 2026-07-24 the pipeline reported "3 interviews this
+# week" and the owner corrected it to three CONVERSATIONS and no interviews
+# ([[interview-vs-informational-exchange]]). A field that cannot tell them apart will retell that
+# flattering error every time it is summed. An informational exchange, a recruiter intro call and a
+# coffee chat are `conversation`. `interview` means an employer is EVALUATING him for a named seat.
+#
+# ⚖️ MONOTONIC BY DESIGN. Stages only advance; `--stage` refuses to move a row backwards, because a
+# funnel that can un-advance cannot be counted. `closed` is terminal and may follow any stage.
+STAGES = [
+    "sent",           # it left; nothing has come back
+    "replied",        # a human answered, of any kind
+    "conversation",   # a real exchange or call. NOT an interview. Intro calls live here.
+    "screen",         # a recruiter or hiring screen against a NAMED seat
+    "interview",      # an employer is evaluating him for a named seat
+    "onsite",         # panel, loop, or final round
+    "offer",
+    "closed",         # rejected, withdrawn, ghosted-and-called. Terminal, allowed from anywhere.
+]
+_STAGE_RANK = {name: i for i, name in enumerate(STAGES)}
+
+
+def stage_rank(name):
+    return _STAGE_RANK.get((name or "").strip().lower(), -1)
+
+
+def set_stage(to, stage, path=SENDLOG, when=None, note=None):
+    """Advance the most recent row for `to` to `stage`. Returns (row, error_or_None).
+
+    Refuses to move BACKWARDS. A funnel whose stages can regress cannot be summed, and the honest
+    way to record a reversal is `closed` plus a note, never a demotion that erases the high-water
+    mark that was actually reached.
+    """
+    want = (stage or "").strip().lower()
+    if want not in _STAGE_RANK:
+        return None, f"unknown stage {stage!r}; one of: {', '.join(STAGES)}"
+    rows = _load(path)
+    hits = [r for r in rows if same_recipient(r.get("to"), to)]
+    if not hits:
+        return None, f"no send-log row for {to!r}"
+    target = max(hits, key=lambda r: (r.get("date", ""), r.get("ts", "")))
+    cur = target.get("stage") or ("replied" if target.get("replied") else "sent")
+    if want != "closed" and stage_rank(want) < stage_rank(cur):
+        return None, (f"refusing to move {to} BACKWARDS from {cur!r} to {want!r}. "
+                      f"Record a reversal as `closed` with a note; the high-water mark stays.")
+    target["stage"] = want
+    target["stage_at"] = when or datetime.date.today().isoformat()
+    if note:
+        target["stage_note"] = note
+    # ⛔ DO NOT SET `replied` FROM A STAGE. Removed 2026-08-11, hours after being written, when
+    # the owner asked what the backfill had changed.
+    # 🔬 THE ERROR: STAGE is a property of the THREAD, `replied` is a property of the ROW, and the
+    # first cut set `replied = True` on any advance past that rank. It flipped three rows, two of
+    # them THANK-YOU notes sent at the END of a conversation. A thank-you often gets no reply at
+    # all. The thread reached `conversation`; that row did not get answered.
+    # 📊 COST, measured: the headline reply rate moved 16.5% → 17.3% on a backfill that added no
+    # new replies, only stage labels. An instrument that changes the number it is meant to explain
+    # is worse than no instrument.
+    # ⚖️ The two facts stay separate: `--mark-replied` records that THIS row was answered;
+    # `--stage` records how far the THREAD got. Neither implies the other.
+    _write(rows, path)
+    return target, None
+
+
+def stage_counts(path=SENDLOG):
+    """{stage: n} over delivered rows, using the high-water stage each row reached."""
+    out = {s: 0 for s in STAGES}
+    for r in _load(path):
+        if (r.get("status") or "sent") != "sent":
+            continue
+        s = r.get("stage") or ("replied" if r.get("replied") else "sent")
+        if s in out:
+            out[s] += 1
+    return out
+
+
+# ── ONE CHANCE PER MEDIUM (Andy, Boss Hunting Bible p.4) ────────────────────────────────────────
+# His words, verbatim: *"If it's me, I give them ONE chance via each medium. That is, I'd send an
+# email and then a week or so later I'd send a LinkedIn message. If they don't get back to me, I'd
+# move on."* And p.11: *"You will benefit much more from reaching out to NEW people than chasing
+# individuals who are either not getting back to you."*
+#
+# ⚖️ HALF OF THIS WAS ALREADY ENFORCED AND HALF WAS NOT. `check_followups.ARMS_FOLLOWUP` is an empty
+# tuple, so nothing ARMS a nudge automatically — that half has held since 2026-07-27. What had no
+# guard is the MANUAL path: nothing stopped a second bump to the same person on the same medium if
+# someone decided to send one. A rule that only binds the robot is not a rule.
+#
+# ⛔ MEDIUM, NOT PERSON, AND THE ORDER IS NOT SYMMETRIC. **Email is the default and preferred first
+# touch; LinkedIn is the SECOND** (the owner, 2026-08-11, ratifying p.4: "I'd send an email and then a
+# week or so later I'd send a LinkedIn message"). So the ledger keys on (recipient, channel), and a
+# LinkedIn bump after an email bump is CORRECT and must pass. Keying on the person alone would
+# forbid the very sequence he prescribes.
+# ⚠️ The email-first default is a BOSS HUNT rule (rungs 3-4). On warm rungs the measured data runs
+# the other way: warm-on-LinkedIn was 16/38 against 6/49 on the unrecorded mix. Do not carry the
+# default onto a warm rung. [[email-is-the-default-linkedin-is-the-second-touch]]
+#
+# ⚠️ A DATED DEFERRAL IS NOT A BUMP. "Check back closer to October" is an invitation with a date on
+# it, and the first touch on that medium is still the first touch. This only refuses a SECOND one.
+BUMP_RUNGS = {"follow-up", "bump"}
+
+
+def prior_bump_on_medium(to, channel, path=SENDLOG):
+    """The earlier bump row for this recipient on this channel, or None.
+
+    Delivered rows only: a discarded or bounced draft never reached them, so it never spent the
+    one chance. Counting it would refuse a touch that never happened.
+    """
+    for r in _load(path):
+        if (r.get("status") or "sent") != "sent":
+            continue
+        if (r.get("rung") or "") not in BUMP_RUNGS:
+            continue
+        if (r.get("channel") or "") != (channel or ""):
+            continue
+        if same_recipient(r.get("to"), to):
+            return r
+    return None
+
+
 def mark_replied(to, path=SENDLOG, when=None):
     """Set replied=True on the most recent row for `to`. Returns the row or None.
 
@@ -414,7 +540,7 @@ def _append_narrative(row, a, rung):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Log a LinkedIn send to documents/send-log.jsonl")
     ap.add_argument("--rung", help="one of: " + ", ".join(sorted(RUNGS)))
-    ap.add_argument("--to", required=True, help="linkedin.com/in/<handle> or linkedin:<handle>")
+    ap.add_argument("--to", required=False, help="linkedin.com/in/<handle> or linkedin:<handle>")
     ap.add_argument("--company", default="")
     # The real subject line, for a send that began as an email draft. Without it this logger can
     # only ever file a row as "(LinkedIn)", and the narrative collapse below has no key to join on:
@@ -439,12 +565,49 @@ def main(argv=None):
     ap.add_argument("--followup-due", default=None, help="YYYY-MM-DD; overrides the rung default")
     ap.add_argument("--no-followup", action="store_true", help="deliberately arm nothing")
     ap.add_argument("--mark-replied", action="store_true", help="flip the latest row for --to to replied")
+    ap.add_argument("--stage", choices=STAGES,
+                    help="advance the latest row for --to to a funnel stage (monotonic; "
+                         "conversation != interview)")
+    ap.add_argument("--stage-note", help="what happened, for the stage row")
+    ap.add_argument("--funnel", action="store_true", help="print the funnel: how many reached each stage")
+
     ap.add_argument("--boss", default="", help="REQUIRED on --rung cold-boss: the person, "
                                               "checked against documents/state/boss.jsonl")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--path", default=SENDLOG, help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
 
+    if not a.funnel and not a.to:
+        # ⛔ --to stays mandatory for every WRITE. Only the read-only funnel report is exempt,
+        # because a report about the whole log has no single recipient. Relaxing the argparse
+        # requirement without this guard would let a send be logged against nobody.
+        print("🔴 --to is required (except with --funnel)", file=sys.stderr)
+        return 3
+    if a.funnel:
+        c = stage_counts(a.path)
+        total = sum(c.values())
+        print(f"── FUNNEL over {total} delivered send(s) ──")
+        for st in STAGES:
+            print(f"  {st:14s} {c[st]:4d}")
+        reached = {st: sum(c[s2] for s2 in STAGES
+                           if stage_rank(s2) >= stage_rank(st) and s2 != "closed")
+                   for st in STAGES if st != "closed"}
+        print("\n  reached AT LEAST this stage:")
+        for st in STAGES:
+            if st == "closed":
+                continue
+            print(f"  {st:14s} {reached[st]:4d}")
+        print("\n  ⚖️ conversation is NOT interview. An intro call, a coffee chat and an")
+        print("     informational exchange are `conversation`. `interview` means an employer is")
+        print("     evaluating him for a NAMED seat. Summing the two is the error of 2026-07-24.")
+        return 0
+    if a.stage:
+        row, err = set_stage(a.to, a.stage, a.path, note=a.stage_note)
+        if err:
+            print(f"🔴 {err}", file=sys.stderr)
+            return 2
+        print(f"✅ {a.to} → stage={row['stage']} ({row.get('stage_at')})")
+        return 0
     if a.mark_replied:
         row = mark_replied(a.to, a.path)
         if not row:
@@ -499,6 +662,23 @@ def main(argv=None):
              if same_recipient(r.get("to"), a.to) and r.get("date") == today and r.get("rung") == rung]
     if dupes:
         print(f"⚠️  {len(dupes)} row(s) already logged today for {a.to} at rung {rung} — check for a double-log.")
+
+    # ⛔ ONE CHANCE PER MEDIUM (Bible p.4). Refuses a SECOND bump on the same medium to the same
+    # person. Placed here, immediately before the row is built, because this is the last point both
+    # channels pass through in this tree. The main repo attaches it at channel resolution; this
+    # file has no such block, so the anchor differs while the rule is identical.
+    _chan = (a.channel if getattr(a, "channel", "auto") != "auto"
+             else ("email" if ("@" in a.to and "linkedin" not in a.to.lower()) else "linkedin"))
+    if rung in BUMP_RUNGS and (a.status or "sent") == "sent":
+        _prior = prior_bump_on_medium(a.to, _chan, a.path)
+        if _prior:
+            print(f"🔴 REFUSED: {a.to} already got a {_prior.get('rung')} on {_chan} "
+                  f"({_prior.get('date')}).", file=sys.stderr)
+            print("   Bible p.4: \"I give them ONE chance via each medium... If they don't get "
+                  "back to me, I'd move on.\"", file=sys.stderr)
+            print("   The OTHER medium is still open if unused. Otherwise pivot to a new person.",
+                  file=sys.stderr)
+            return 2
 
     row = {
         "ts": datetime.datetime.now().astimezone().isoformat(),

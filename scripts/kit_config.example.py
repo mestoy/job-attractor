@@ -461,6 +461,17 @@ NOT_A_COMPANY = [
     r"\bcandidate experience page$", r"\bjob opportunities$", r"\bcareer site$",
     r"\bcorporate openings\b", r"\btalent acquisition team$", r"\bglobal career site$",
     r"^company$", r"^overview$", r"^jobs?$",
+    # ── SCORECARD FRAGMENTS, not employers ───────────────────────────────────────────────────
+    # Banked-candidate files are `·`-separated name lists, and a culture note written into one of
+    # those lines ("Culture 3.1 · WLB 3.8 · Career 3.9") gets split on the same separator as the
+    # company names. Seven such fragments were sitting in one ranker's screening queue as if they
+    # were employers, including a bare "PE" — which is worse than noise, because it reads as a
+    # company sharing a name with the ownership gate.
+    # ⚖️ ANCHORED ON A KNOWN SUB-RATING LABEL, never on the bare decimal, so a real company with a
+    # version-shaped name (Web 3.0 Labs) is untouched.
+    r"^(culture|career|wlb|work[- ]?life( balance)?|d&i|diversity|comp|compensation|leadership|"
+    r"senior leadership|mgmt|management|benefits|rec|recommend)\b[\s:]*\d+(\.\d+)?$",
+    r"^pe$", r"^\d+(\.\d+)?$",
 ]
 
 VETO_EMPLOYERS = [
@@ -551,3 +562,58 @@ if __name__ == "__main__":
         print(f"screens: {len(INDUSTRY_VETO)} industry veto term(s), {len(PE_FLAG)} ownership flag(s)")
         if not RETIRED and not RETIRED_PATTERNS:
             print("\n⚠️  RETIRED lists are empty — the honesty gate is a no-op until you fill them.")
+
+
+# ── THE RÉSUMÉ PANEL'S OPTIONAL DOMAIN-EXPERT LENS ───────────────────────────────────────────
+# `review_resume.py` always runs the three CEO/CTO/CPO lenses. This adds a fourth pass in a NAMED
+# practitioner's voice: an interview coach, a hiring manager whose writing you trust, whoever your
+# field actually reads.
+#
+# ── RESUME_CORE_LENSES — the three reviewers who ALWAYS run ───────────────────────────────────
+#
+# The panel ships as CEO, CTO and CPO. That is a product-startup executive panel, and it is only
+# right if that is the table you are trying to sit at.
+#
+# ⚖️ SET THIS TO THE ROLES IN *YOUR* REAL INTERVIEW LOOP. A remote product owner in healthcare or
+# insurance is read by a hiring manager (a director of product or IT), a peer analyst, and the
+# operations leader whose process changes. A CPO lens asked of that resume returns "no discovery or
+# roadmap ownership", which is a fair note for a startup product manager and a mis-aimed one for a
+# backlog owner who never claimed roadmap authority. A mis-aimed lens does not merely waste a pass:
+# it tells you to add claims your record does not support.
+#
+# ⛔ THIS IS NOT `RESUME_EXPERT_LENSES` BELOW, AND THE TWO ARE COMPLEMENTARY. That one names a
+# PUBLIC PRACTITIONER and grounds the critique in what they have published. This one names a SEAT AT
+# YOUR TABLE. Putting a job title in the expert slot asks a reviewer to cite the published
+# methodology of a role, which is incoherent.
+#
+# Shape: {"key": {"title": "THE X LENS - what it is for", "asks": ["question", ...]}}
+# Leave EMPTY to keep the shipped CEO/CTO/CPO panel. Malformed config falls back to it too, because
+# a resume reviewed by nothing would still print a clean report.
+#
+# Worked example, for a regulated-industry delivery seat:
+#   RESUME_CORE_LENSES = {
+#       "hiring_manager": {
+#           "title": "THE HIRING MANAGER LENS - can this person own my backlog",
+#           "asks": ["Read the top third only. What would this person OWN on day one?",
+#                    "Is there evidence of shipping inside constraints, not just shipping?"],
+#       },
+#       "peer_analyst": {
+#           "title": "THE PEER LENS - would I want this person in my requirements review",
+#           "asks": ["Which bullet proves they can elicit a requirement rather than receive one?"],
+#       },
+#       "ops_leader": {
+#           "title": "THE OPERATIONS LENS - whose process changes if this hire lands",
+#           "asks": ["What did the people doing the work actually do differently afterward?"],
+#       },
+#   }
+RESUME_CORE_LENSES = {}
+
+# ⛔ EMPTY BY DEFAULT, DELIBERATELY. The kit must not assume what kind of seat you are hunting, so
+# it ships you the mechanism and none of the names. Add your own, or leave it empty and run the
+# three business lenses alone.
+#
+# ⚠️ Whoever you name, the brief tells the reviewer to ground every note in what that person has
+# actually published. A critique invented in someone's name is a fabrication wearing a citation.
+#
+# e.g. RESUME_EXPERT_LENSES = ["Jane Doe (Some Accelerator) — interview rigor, structured answers"]
+RESUME_EXPERT_LENSES = []
