@@ -75,6 +75,33 @@ def section(title):
 
 
 # ── A. UNFINISHED WORK ───────────────────────────────────────────────────────────────────────
+def _freshness_item(s, warn_days):
+    """The warm-network freshness line for the briefing, or None when nothing is actionable.
+
+    ⛔ GATE THE DOWNLOAD NAG ON export_taken_days, NEVER data_lag_days (kit issue #40). A high
+    data_lag_days just means a quiet month on LinkedIn — nobody new connected. That is not stale
+    DATA, and no download fixes it, so nagging "download a fresh export" off it is a no-op that
+    prints forever and trains the operator to ignore the whole briefing. #7 corrected this in
+    check_network_freshness's own verdict; this is the caller that re-derived it and kept the bug,
+    so the CLI said "current" while the briefing said "34 days old, download now" off the SAME scan().
+    The only nag a download can honestly resolve is a stale EXPORT (export_taken_days high); a stale
+    parse (parse_is_behind_export) is fixed by re-parsing, with no download at all.
+    """
+    if not (s.get("newest_connection") and s.get("data_lag_days") is not None):
+        return None
+    if s.get("parse_is_behind_export"):
+        return ("🟠", f"warm-network is behind an export on disk "
+                      f"(parsed {s['newest_connection']}, available {s['export_newest_connection']})",
+                ["fix: python3 scripts/parse_network.py    (no download needed)"])
+    taken = s.get("export_taken_days")
+    if taken is not None and taken >= warn_days:
+        return ("🟠", f"warm-network export is {taken} days old",
+                [f"last downloaded {s.get('export_taken')}",
+                 "a fresh export pulls in anyone connected since then",
+                 "fix: download a fresh LinkedIn export, then parse_network.py"])
+    return None
+
+
 def unfinished():
     items, today = [], date.today().isoformat()
 
@@ -150,19 +177,9 @@ def unfinished():
     # operator actually reads, and the whole point is that the lag stops being invisible.
     try:
         import check_network_freshness as _nf
-        _s = _nf.scan()
-        if _s["newest_connection"] and _s["data_lag_days"] is not None:
-            _lag = _s["data_lag_days"]
-            if _s["parse_is_behind_export"]:
-                items.append(("🟠", f"warm-network is behind an export on disk "
-                                    f"(parsed {_s['newest_connection']}, available "
-                                    f"{_s['export_newest_connection']})",
-                              ["fix: python3 scripts/parse_network.py"]))
-            elif _lag >= _nf.WARN_DAYS_DEFAULT:
-                items.append(("🟠", f"warm-network data is {_lag} days old",
-                              [f"newest connection on file: {_s['newest_connection']}",
-                               "anyone connected since then is invisible to today's 3 people",
-                               "fix: download a fresh LinkedIn export, then parse_network.py"]))
+        _item = _freshness_item(_nf.scan(), _nf.WARN_DAYS_DEFAULT)
+        if _item:
+            items.append(_item)
     except Exception:
         pass  # DEGRADES GRACEFULLY: a briefing that crashes blocks the session from opening.
 

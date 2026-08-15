@@ -15,7 +15,7 @@ eval "$(python3 "$HERE/kit_config.py" --sh 2>/dev/null || true)"
 KIT_OWNER_NAME="${KIT_OWNER_NAME:-Your Name}"
 KIT_RESUME_EXAMPLE="${KIT_RESUME_EXAMPLE:-$KIT_OWNER_NAME - Resume - <Company>.pdf}"
 KIT_RULES_DOC="${KIT_RULES_DOC:-documents/WORKFLOW-RULES.md}"
-TO="" BCC="" SUBJECT="" BODYFILE="" ATTACH="" FORCE="" PRAISE_SOURCE="" LACIVITA_CHECK="" PANEL_CHECK="" RESUME_PANEL_CHECK="" PRAISE_PHRASING="" COMPANY="" SEGMENT="" WARM_RUNG="" RUNG="" RUNG_EXPLICIT="" TARGETS="" POST_CONTACT="" NO_RESUME="" MTYPE="outreach" BOSS=""
+TO="" BCC="" SUBJECT="" BODYFILE="" ATTACH="" FORCE="" PRAISE_SOURCE="" LACIVITA_CHECK="" PANEL_CHECK="" RESUME_PANEL_CHECK="" PRAISE_PHRASING="" COMPANY="" SEGMENT="" WARM_RUNG="" RUNG="" RUNG_EXPLICIT="" TARGETS="" POST_CONTACT="" NO_RESUME="" MTYPE="outreach" BOSS="" NAME=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --to) TO="$2"; shift 2;;
@@ -33,6 +33,9 @@ while [ $# -gt 0 ]; do
     --warm) WARM_RUNG="1"; shift;;                    # BACK-COMPAT alias for `--rung warm` (see the profile switch below)
     --rung) RUNG="$2"; RUNG_EXPLICIT=1; shift 2;;     # cold-boss|cold-stranger|warm|referred|event|thank-you|reply|follow-up
     --boss) BOSS="$2"; shift 2;;                      # REQUIRED on cold-boss: the person, checked against the boss registry
+    --name|--to-name) NAME="$2"; shift 2;;            # the RECIPIENT'S name — written to the send-log `to_name`, the field the
+                                                      # people-ranker dedups on. Without it a send stays invisible to that dedup
+                                                      # and the person is re-offered as uncontacted.
     --targets) TARGETS="$2"; shift 2;;                # warm/referred: comma-separated companies NAMED in the ask (dedup'd instead of --company)
     --no-resume) NO_RESUME="1"; shift;;               # explicit opt-out of the mandatory résumé attachment
     --force) FORCE="1"; shift;;
@@ -686,10 +689,16 @@ fi
   # which companies a warm ask already named, so without this the trio generator keeps proposing
   # companies you already asked about.
   _SLOG="$(cd "$HERE/.." && pwd)/documents/send-log.jsonl"
+  # RECIPIENT NAME ON THE ROW: the people-ranker dedups on the CONTACT (contacted_people reads
+  # `to_name`), not the address, so a nameless row never matches the roster entry and the person is
+  # re-offered as uncontacted. Resolve from --name, falling back to --boss exactly as
+  # log_linkedin_send.py does, so one vocabulary (`to_name`) covers both writers.
+  _TONAME="$NAME"
+  [ -z "$_TONAME" ] && _TONAME="$BOSS"
   if [ -d "$(dirname "$_SLOG")" ]; then
-    python3 - "$_SLOG" "${RUNG:-cold-boss}" "$TO" "$_LOG_CO" "$TARGETS" "$SUBJECT" "$_FUP" "$SEGMENT" "$PANEL_STATE" "${RESUME_PANEL_STATE:-n/a}" <<'PYLOG' 2>/dev/null || true
+    python3 - "$_SLOG" "${RUNG:-cold-boss}" "$TO" "$_LOG_CO" "$TARGETS" "$SUBJECT" "$_FUP" "$SEGMENT" "$PANEL_STATE" "${RESUME_PANEL_STATE:-n/a}" "$_TONAME" <<'PYLOG' 2>/dev/null || true
 import json, sys, datetime, os
-path, rung, to, company, targets, subject, fup, segment, panel, resume_panel = sys.argv[1:11]
+path, rung, to, company, targets, subject, fup, segment, panel, resume_panel, to_name = sys.argv[1:12]
 # ⛔ ONE DEFINITION OF THE STATUS THIS FILE WRITES. The row below and the rebuild guard further
 # down must agree, and they are twelve lines apart. A guard that matched a status this script does
 # not write would never fire, and the fix would be present in the file and dead in practice.
@@ -701,7 +710,7 @@ STAGED_STATUS = "staged"
 # READER, not what looks tidier in JSON.
 row = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
        "date": datetime.date.today().isoformat(),
-       "channel": "email", "status": STAGED_STATUS, "rung": rung, "to": to,
+       "channel": "email", "status": STAGED_STATUS, "rung": rung, "to": to, "to_name": to_name,
        "company": company,
        "targets": ",".join(t.strip() for t in targets.split(",") if t.strip()),
        "subject": subject, "followup_due": fup, "segment": segment,

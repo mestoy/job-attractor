@@ -28,6 +28,22 @@ Run `python3 scripts/rank_criteria.py --pool people --n <N>`. Take the names in 
 
 For each, read what the pipeline currently BELIEVES, so you can tell a confirmation from a correction: the row in `documents/warm-network.md` gives the frozen title, company and connection date.
 
+## Step 1b: Prepare the Paste-Back Invocations
+
+Reading is the human's half and recording is yours, so do not make them dictate values for you to retype. For EACH target, build the exact `record_role.py` line up front with the name already filled in and `--title`, `--company`, `--source` and `--source-type` left blank, and hand them the whole list at once. They read a profile, fill the blanks from what they see, and paste the line back. That turns their step into a paste instead of a dictation, and it is what lets the run hand off cleanly rather than stall waiting for them to read each value aloud.
+
+```
+python3 scripts/record_role.py --name "<Target Name>" --title "" --company "" \
+  --source-type "" --source ""
+```
+
+If the role has ended, hand them the `--left` shape instead, so the paste stays a paste:
+
+```
+python3 scripts/record_role.py --name "<Target Name>" --left --source-type "" --source "" \
+  --note "old role and its dates"
+```
+
 ## Step 2: The LinkedIn Read, Which Needs a Human at the Browser
 
 ⛔ **Do NOT run WebFetch against linkedin.com.** It returns `HTTP 999` every time. A run that tries it, catches the failure and reports "could not open the profile" has spent tokens to rediscover a known refusal, and it makes an empty run look like a thorough one.

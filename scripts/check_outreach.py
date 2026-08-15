@@ -377,7 +377,11 @@ SENTENCE_STARTERS = {
 # The aliases are not cosmetic. mail-draft.sh maps `--rung thank-you` to `--type thankyou` and
 # `--rung follow-up` to `--type followup` (no hyphen), so an in-thread set spelled only with
 # hyphens silently classified every mail-draft thank-you and follow-up as a first contact.
-KNOWN_TYPES = {"outreach", "reply", "follow-up", "thank-you", "bump", "reunion", "invitation"}
+#
+# "peer" is its own third bucket, neither cold-boss-outreach nor in-thread: a first contact, in
+# the shape sense (greeting/signature/dense-block rules apply), that is not an ask for a job and
+# so does not owe the cold-boss 7-ingredient/O-A-K block. See the PEER_TYPES comment below.
+KNOWN_TYPES = {"outreach", "reply", "follow-up", "thank-you", "bump", "reunion", "invitation", "peer"}
 
 
 TYPE_ALIASES = {
@@ -405,6 +409,26 @@ IN_THREAD_TYPES = {"reply", "follow-up", "thank-you", "bump"}
 # runs: AI-tells, em dashes, spaced slashes, retired figures, engineer-implication. A note to a
 # friend has to be just as honest and just as clean as a cold email.
 NO_ASK_TYPES = {"reunion", "invitation"}
+
+
+# ── THE PEER / COMMON-INTEREST NOTE ─────────────────────────────────────────────────────────────
+# A rung 1-2 note to someone you are ALREADY connected to — celebrate their public work, one light
+# give, one question. It owes a genuine reason for reaching out and staying human; it does NOT owe
+# the cold-boss ask (who you are / why you chose them / what you want / one-of-a-kind anchor).
+# That block is built for a "work directly for you" pitch, so running it on a peer note is a
+# category error, not a quality check.
+#
+# ⛔ NOT the same shape as "invitation". Invitation is a LinkedIn CONNECTION REQUEST to a
+# stranger — 300-char cap, no signature possible, ask = acceptance. Peer is a normal-length
+# note/email to an EXISTING 1st-degree connection — full body, a real signature, no character cap.
+# Deliberately in NEITHER NO_ASK_TYPES nor IN_THREAD_TYPES, so the greeting/signature/dense-block
+# checks a first-contact-length note still owes keep running.
+#
+# WHAT STAYS ON: banned-word/AI-tells, em dash, spaced slash, retired figures, role-implication,
+# greeting line, signature block (rung-aware), dense-block, generic-praise, length. Only the
+# 7-ingredient/O-A-K composite is structurally exempt below — mtype != "outreach" already routes
+# it to WARN-only, same as every other non-outreach type.
+PEER_TYPES = {"peer"}
 
 
 # WARM LANE (added 2026-07-26 for the rung-aware signature below). These are the rungs where the
@@ -960,6 +984,10 @@ def main():
                        "--type reply|follow-up|thank-you|bump. The ingredient/O-A-K block is a "
                        "FIRST-CONTACT check and does not apply here.")
         fails.extend(_if); warns.extend(_iw)
+    elif mtype in PEER_TYPES:
+        warns.append("message type 'peer': rung 1-2 common-interest note — the cold-boss "
+                     "7-ingredient/O-A-K block does not apply (not a work-for-you ask); AI-tells, "
+                     "honesty, greeting, and signature checks still applied")
     else:
         warns.append(f"message type '{mtype}': ingredient/O-A-K check skipped (not an intro); "
                      "AI-tells, honesty, and signature checks still applied")

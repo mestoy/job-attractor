@@ -14,8 +14,11 @@ without deleting the guard it protects is how these come back.
 Run:  python3 tests/test_gates.py        (or: python3 -m unittest discover tests)
 No dependencies beyond the standard library.
 """
+import argparse
+import contextlib
 import datetime
 import importlib
+import io
 import json
 import os
 import re
@@ -146,6 +149,172 @@ class TestPMTitle(unittest.TestCase):
                   "Lead Product Recruiter", "Product Marketing Manager"]:
             with self.subTest(title=t):
                 self.assertFalse(check_ats.is_pm(t), f"non-PM seat reported as PM: {t}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The PLURAL. `is_pm()` matches `product\b`, which stops at the singular, so a
+# "Vice President of Products" in the network read as senior-exec and every
+# plural-titled product leader sank below the fold of the daily people ranking.
+# The fix is confined to the PEOPLE path; the seat test must NOT move with it.
+# ─────────────────────────────────────────────────────────────────────────────
+class TestPluralProductTitles(unittest.TestCase):
+    def setUp(self):
+        import rank_criteria
+        self.rc = rank_criteria
+
+    def test_plural_product_leaders_rank_as_leaders(self):
+        for t in ["Vice President of Products", "Chief Products Officer",
+                  "Head of Products", "Director of Products"]:
+            with self.subTest(title=t):
+                self.assertEqual(self.rc._person_category(t), "product-leader",
+                                 f"plural demoted a product leader: {t}")
+
+    def test_singular_categories_are_unchanged(self):
+        for t, expect in [("Vice President of Product", "product-leader"),
+                          ("Product Owner", "product-ic"),
+                          ("Principal Product Manager", "product-ic"),
+                          ("Recruiter", "connector")]:
+            with self.subTest(title=t):
+                self.assertEqual(self.rc._person_category(t), expect)
+
+    def test_the_seat_test_still_stops_at_the_singular(self):
+        """The people-path widening must not leak into is_pm(), which feeds live-role
+        detection: loosening it there reports open PM seats that do not exist."""
+        self.assertFalse(check_ats.is_pm("Vice President of Products"))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUG-181 WU-6a (the fourth bucket) + WU-2 (the closeness band) — KIT PARITY.
+# The MECHANISM is pinned, never the owner's shipped numbers: senior-ic files as its
+# own bucket at "other"'s value (a wider admission, not a typed weight), is_pm does
+# not move, and the closeness band respects provenance. The partner degrade case —
+# with NO closeness store every row's band is 0, so the sort reduces to today's — is
+# pinned in TestRankPeopleV2 where rank_people can be driven end to end.
+# ─────────────────────────────────────────────────────────────────────────────
+class TestFourthBucketAndCloseBand(unittest.TestCase):
+    def setUp(self):
+        import importlib
+        if SCRIPTS not in sys.path:
+            sys.path.insert(0, SCRIPTS)
+        self.rc = importlib.import_module("rank_criteria")
+        self.pn = importlib.import_module("parse_network")
+
+    def test_seniority_word_ics_file_into_the_fourth_bucket(self):
+        """Writer (parse_network.classify) and reader (rank_criteria._person_category) must AGREE
+        that a seniority-word IC is `senior-ic` — never `senior` (which feeds a learned weight),
+        never `other` (invisible)."""
+        for title in ("Senior Software Engineer", "Staff Designer", "Engineering Manager"):
+            with self.subTest(title=title):
+                self.assertEqual(self.pn.classify(title), "senior-ic")
+                self.assertEqual(self.rc._person_category(title), "senior-ic")
+                self.assertNotEqual(self.rc._person_category(title), "senior-exec")
+
+    def test_fourth_bucket_base_is_other_value_not_a_typed_weight(self):
+        self.assertEqual(self.rc.PERSON_BASE["senior-ic"], self.rc.PERSON_BASE["other"])
+        self.assertNotEqual(self.rc.PERSON_BASE["senior-ic"], self.rc.PERSON_BASE["senior-exec"])
+
+    def test_is_pm_does_not_move(self):
+        self.assertFalse(check_ats.is_pm("Senior Software Engineer"))
+        self.assertFalse(check_ats.is_pm("Engineering Manager"))
+        self.assertTrue(check_ats.is_pm("Senior Product Manager"))
+
+    def test_close_band_respects_strength_and_provenance(self):
+        for tier in ("worked-together", "know-well", "personal-friend"):
+            with self.subTest(tier=tier):
+                self.assertEqual(self.rc._close_band(
+                    {"closeness": tier, "source": "stated-by-owner"}, "product-ic"), 2)
+        self.assertEqual(self.rc._close_band(
+            {"closeness": "know-well", "source": "inferred-from-messages"}, "product-ic"), 1,
+            "an inferred strong tier claimed band 2 — the provenance rule is not respected")
+        # Thin tiers the KIT ships (stanton-alum is owner-specific and not in the partner store).
+        for tier in ("shared-community", "classmate", "know-not-close"):
+            with self.subTest(tier=tier):
+                self.assertEqual(self.rc._close_band(
+                    {"closeness": tier, "source": "stated-by-owner"}, "product-ic"), 1)
+        self.assertEqual(self.rc._close_band({"closeness": "never-spoke"}, "product-ic"), 0)
+        self.assertEqual(self.rc._close_band(None, "product-ic"), 0)
+
+    # ── BUG-181 WU-3: outcome-validated-or-scores-nothing (mechanism, not the partner's numbers) ──
+    def test_an_under_floor_person_cell_contributes_exactly_zero(self):
+        """A closeness-tier cell under the n≥15 floor must contribute EXACTLY 0.0; a cell that clears
+        the floor with a real reply lift scores > 0. Pins the floor gate itself, so it holds on a
+        partner whose join is thin or absent."""
+        rc = self.rc
+        rc._PERSON_CELLS_CACHE.clear()
+        rc._PERSON_CELLS_CACHE["c"] = {
+            "closeness": {"strong": [14, 7], "thin": [40, 20], "never": [100, 20]},
+            "thread": {}, "joined": 154, "delivered": 200}
+        try:
+            lifts = rc.closeness_tier_lift()
+            self.assertIsNone(lifts["strong"][0], "n=14 is under the n≥15 floor")
+            self.assertEqual(rc.closeness_tier_points(2, lifts)[0], 0.0,
+                             "an under-floor cell must contribute EXACTLY 0.0")
+            self.assertIsNotNone(lifts["thin"][0], "n=40 clears the floor")
+            self.assertGreater(rc.closeness_tier_points(1, lifts)[0], 0.0)
+        finally:
+            rc._PERSON_CELLS_CACHE.clear()
+
+    def test_thread_bonus_is_leakage_silenced(self):
+        self.assertEqual(self.rc.thread_depth_points(), (0.0, None))
+
+    def test_an_inferred_reply_does_not_enter_the_scored_thin_cell(self):
+        """BUG-181 B1 MECHANISM. An `inferred-from-messages` closeness tier was read out of the very
+        thread the reply lives in. `_close_band` haircuts an inferred `know-well` to band 1, so its
+        reply would otherwise corroborate that band in the SCORED thin cell. Only STATED-provenance
+        replies may enter a scored lift cell; a STATED thin reply is still counted, and an inferred
+        NEVER-SPOKE reply stays in the base. RED before the guard (thin == [2, 2]), GREEN after."""
+        import importlib
+        rc = self.rc
+        rung_ladder = importlib.import_module("rung_ladder")
+        closeness = importlib.import_module("closeness")
+        rows = [
+            {"to_name": "Infer Knowwell", "status": "sent", "replied": True},
+            {"to_name": "Stated Thinny", "status": "sent", "replied": True},
+            {"to_name": "Infer Never", "status": "sent", "replied": True},
+        ]
+        store = {
+            closeness.normalize_name("Infer Knowwell"):
+                {"closeness": "know-well", "source": "inferred-from-messages"},
+            closeness.normalize_name("Stated Thinny"):
+                {"closeness": "know-not-close", "source": "stated-by-owner"},
+            closeness.normalize_name("Infer Never"):
+                {"closeness": "never-spoke", "source": "inferred-from-messages"},
+        }
+        saved = (rung_ladder.load, closeness.load, rc._identity_map)
+        rc._PERSON_CELLS_CACHE.clear()
+        try:
+            rung_ladder.load = lambda *a, **k: rows
+            closeness.load = lambda *a, **k: store
+            rc._identity_map = lambda *a, **k: {}
+            cells = rc._person_signal_cells()
+            self.assertEqual(cells["closeness"]["thin"], [1, 1],
+                             "only the STATED thin reply may enter the scored thin cell")
+            self.assertEqual(cells["closeness"]["strong"], [0, 0],
+                             "an inferred know-well never reaches the strong cell")
+            self.assertEqual(cells["closeness"]["never"], [1, 1],
+                             "an inferred never-spoke reply is preserved in the base denominator")
+        finally:
+            (rung_ladder.load, closeness.load, rc._identity_map) = saved
+            rc._PERSON_CELLS_CACHE.clear()
+
+    def test_signal_audit_is_green_and_flags_typed_terms_when_ungated(self):
+        """GREEN (0 typed) with the WU-3 flags; RED (≥2 typed) with them removed — one classifier,
+        two code states. Dependencies injected so no live file is read or written."""
+        rc = self.rc
+        rc._PERSON_CELLS_CACHE.clear()
+        rc._PERSON_CELLS_CACHE["c"] = {"closeness": {"strong": [0, 0], "thin": [0, 0],
+                                       "never": [0, 0]}, "thread": {}, "joined": 0, "delivered": 0}
+        rc._LIVE_WEIGHTS["w"] = {"joined": 0, "log_rows": 0, "per_category": {}}
+        saved = (rc._THREAD_SCORED, rc._EVTIER_RATIFIED)
+        try:
+            self.assertEqual(rc.audit_signals(), 0)
+            del rc._THREAD_SCORED
+            del rc._EVTIER_RATIFIED
+            self.assertGreaterEqual(rc.audit_signals(), 2)
+        finally:
+            rc._THREAD_SCORED, rc._EVTIER_RATIFIED = saved
+            rc._PERSON_CELLS_CACHE.clear()
+            rc._LIVE_WEIGHTS.clear()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2030,6 +2199,25 @@ class TestRankPeopleV2(unittest.TestCase):
                         "the revoked title ladder is still driving the order")
         self.assertEqual("founder-exec", by_name["Old Founder"]["cat"])
         self.assertGreater(by_name["Old Founder"]["pts"], by_name["Stranger Lead"]["pts"])
+
+    def test_no_closeness_store_degrades_to_todays_behavior(self):
+        """⭐ BUG-181 WU-2 KIT PARITY. A partner who has never run the levelling interview has NO
+        closeness store, so `closeness.load()` returns None and the new leading sort key is 0 for
+        every row — `-close_band` becomes a constant and the ordering reduces EXACTLY to the prior
+        (evtier, pts, Ruling-B) sort. Pinned two ways: every row carries band 0, and the Ruling-B
+        tiebreak below is unchanged."""
+        same = "🟢 5y (2021-01-04)"
+        self._seed([
+            self._row(1, "Ada Founder", "Founder & CEO", "AlphaCo", same),
+            self._row(2, "Bo Product", "Head of Product", "BetaCo", same),
+        ])
+        order, by_name = self._names()
+        for nm, c in by_name.items():
+            self.assertEqual(c["close_band"], 0,
+                             f"{nm} carries a nonzero closeness band with no store — the key did "
+                             f"not degrade")
+        self.assertLess(order.index("Bo Product"), order.index("Ada Founder"),
+                        "with no closeness store the Ruling-B tiebreak must be unchanged")
 
     def test_on_an_equal_score_the_product_leader_sorts_before_the_founder(self):
         """Ruling B: when only a founder can be found among several plausible bosses, the founder is
@@ -6531,6 +6719,581 @@ class TestDeclaredWorkdayEndExtendsTheOutboundWindow(unittest.TestCase):
         self._declare("2026-08-05", "01:00")
         self.assertTrue(self.pb._outbound_window_open(dt(2026, 8, 5, max(floor - 1, 0), 0)),
                         "a declaration cut the window below the configured floor")
+
+
+class TestPeerNote(unittest.TestCase):
+    """`--type peer` (added 2026-08-13). A rung 1-2 common-interest note to an EXISTING connection:
+    a first contact in the SHAPE sense (greeting/signature/dense-block still owed) that makes no
+    work-for-you ask, so it is exempt from the cold-boss 7-ingredient/O-A-K block ONLY.
+
+    The risk this pins: `--type peer` must not launder a dishonest or sloppy note. Every hard check
+    (em dash, banned word, retired figure, signature) still fires; only the O-A-K composite falls
+    away. The signature body uses the kit_config OWNER defaults so the suite is install-agnostic.
+    """
+
+    OWNER = check_outreach.OWNER_NAME
+    SITE = check_outreach.OWNER_SITE
+    CLEAN = (f"Hi, Dana!\n\nYour talk on payments reliability stuck with me, the part about "
+             f"backfilling ledgers without downtime. I wrote a short note on idempotency keys that "
+             f"might help your team, happy to send it.\n\nWhat are you leaning toward for retries "
+             f"these days?\n\n{OWNER}\nhttps://{SITE}")
+
+    def _run(self, body, *args):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as fh:
+            fh.write(body)
+            path = fh.name
+        try:
+            return subprocess.run(
+                [sys.executable, os.path.join(SCRIPTS, "check_outreach.py"), path,
+                 "--type", "peer", "--rung", "warm", *args],
+                capture_output=True, text=True)
+        finally:
+            os.unlink(path)
+
+    def test_00_clean_peer_note_passes(self):
+        """Positive control. A permanently-failing guard would pass every test below and quietly
+        re-block the channel the fix opens."""
+        res = self._run(self.CLEAN)
+        self.assertEqual(0, res.returncode, res.stdout)
+        self.assertIn("peer", res.stdout)
+
+    def test_01_em_dash_still_fails_under_peer(self):
+        res = self._run(self.CLEAN.replace("happy to send it", "happy to send it — really"))
+        self.assertEqual(1, res.returncode, res.stdout)
+        self.assertIn("em dash", res.stdout.lower())
+
+    def test_02_banned_word_still_fails_under_peer(self):
+        res = self._run(self.CLEAN.replace("stuck with me", "was a game changer for me"))
+        self.assertEqual(1, res.returncode, res.stdout)
+        self.assertIn("game changer", res.stdout.lower())
+
+    def test_03_missing_signature_still_fails_under_peer(self):
+        stripped = "\n".join(l for l in self.CLEAN.splitlines()
+                             if self.SITE not in l and l.strip() != self.OWNER).rstrip() + "\n"
+        res = self._run(stripped)
+        self.assertEqual(1, res.returncode, res.stdout)
+        self.assertIn("sign-off", res.stdout.lower())
+
+    def test_03b_retired_figure_still_fails_under_peer(self):
+        """The honesty guardrails never fall away for a message type — a retired claim laundered
+        through a peer note is exactly the failure this --type exists to refuse.
+
+        The class docstring above has PROMISED this test since 2026-08-13 without one existing
+        (BUG-186): the partner kit ships `RETIRED = []` / `RETIRED_PATTERNS = []` by design (this
+        file, kit_config import fallback above), so nothing in the shipped CLEAN-note corpus can
+        exercise the retired-figure path the way the main kit's mirror test does. A RETIRED value
+        has to be INJECTED to prove the check still fires when one is configured.
+
+        Runs check_outreach.main() IN-PROCESS (not via subprocess, unlike the sibling tests above)
+        specifically so the monkeypatched `RETIRED` list is visible to the code under test — a
+        subprocess would re-import the module fresh from disk and never see the patch.
+        """
+        body = self.CLEAN.replace("payments reliability", "shipping apps 100x faster")
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as fh:
+            fh.write(body)
+            path = fh.name
+        old_retired = check_outreach.RETIRED
+        old_argv = sys.argv
+        try:
+            check_outreach.RETIRED = ["100x faster"]
+            sys.argv = ["check_outreach.py", path, "--type", "peer", "--rung", "warm"]
+            buf = io.StringIO()
+            with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stdout(buf):
+                check_outreach.main()
+            self.assertEqual(1, ctx.exception.code, buf.getvalue())
+            self.assertIn("retired", buf.getvalue().lower())
+        finally:
+            check_outreach.RETIRED = old_retired
+            sys.argv = old_argv
+            os.unlink(path)
+
+    def test_04_peer_is_known_and_a_first_contact_shape(self):
+        """peer must be KNOWN, and in NEITHER IN_THREAD_TYPES nor NO_ASK_TYPES — those sets suppress
+        the greeting/signature/dense-block checks a peer note still owes."""
+        self.assertIn("peer", check_outreach.KNOWN_TYPES)
+        self.assertIn("peer", check_outreach.PEER_TYPES)
+        self.assertNotIn("peer", check_outreach.IN_THREAD_TYPES)
+        self.assertNotIn("peer", check_outreach.NO_ASK_TYPES)
+
+    def test_05_known_types_match_the_main_kit(self):
+        """KNOWN_TYPES lives in both this mirror and the main kit's scripts/check_outreach.py. Read
+        the main file's literal and pin it equal, so a --type added to one kit and not the other is
+        caught. Skips gracefully when the mirror is installed standalone."""
+        main = os.path.join(KIT, "..", "scripts", "check_outreach.py")
+        if not os.path.exists(main):
+            self.skipTest("main kit not present alongside this mirror")
+        src = open(main, encoding="utf-8").read()
+        m = re.search(r"^KNOWN_TYPES\s*=\s*\{([^}]*)\}", src, re.M)
+        self.assertIsNotNone(m, "could not find KNOWN_TYPES in the main kit")
+        main_types = set(re.findall(r'"([^"]+)"', m.group(1)))
+        self.assertEqual(set(check_outreach.KNOWN_TYPES), main_types,
+                         "KNOWN_TYPES forked between the main kit and this partner mirror")
+
+
+class TestResolveEmployersSourceIsCited(unittest.TestCase):
+    """#33: cmd_ingest's source-citation gate. Both failure directions matter: a bare assertion
+    ("I think it's a startup") must be REJECTED even though it is non-empty, and a real citation
+    (a wikilink, a URL, a dated filing) must PASS so a well-sourced row is not blocked."""
+
+    def setUp(self):
+        self.re_ = importlib.import_module("resolve_employers")
+
+    def test_bare_uncited_assertion_is_rejected(self):
+        self.assertFalse(self.re_._source_is_cited("I think Jane Doe's company is a startup"))
+        self.assertFalse(self.re_._source_is_cited("well-known company"))
+        self.assertFalse(self.re_._source_is_cited(""))
+
+    def test_real_citations_pass(self):
+        self.assertTrue(self.re_._source_is_cited("[[somesegment-ruling-2026-08-14]]"))
+        self.assertTrue(self.re_._source_is_cited("https://someco.example.com/about"))
+        self.assertTrue(self.re_._source_is_cited("SomeCo 10-K filed 2026-08"))
+        self.assertTrue(self.re_._source_is_cited("not-found"))
+
+    def test_cmd_ingest_rejects_uncited_row_end_to_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = {"employers": [
+                {"employer": "SomeCo", "segment": "segment-a", "industry": "fintech",
+                 "source": "I think this is a payments company"},
+            ]}
+            path = os.path.join(tmp, "batch.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            args = argparse.Namespace(path=path, dry_run=True)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.re_.cmd_ingest(args)
+            self.assertIn("rejected: 1", buf.getvalue())
+            self.assertIn("would add: 0", buf.getvalue())
+
+    def test_cmd_ingest_accepts_cited_row_end_to_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = {"employers": [
+                {"employer": "SomeCo", "segment": "segment-a", "industry": "fintech",
+                 "source": "https://someco.example.com/about"},
+            ]}
+            path = os.path.join(tmp, "batch.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            args = argparse.Namespace(path=path, dry_run=True)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.re_.cmd_ingest(args)
+            self.assertIn("would add: 1", buf.getvalue())
+            self.assertIn("rejected: 0", buf.getvalue())
+
+
+class TestStripLatexContactBlock(unittest.TestCase):
+    """check_style.strip_latex, the .tex-to-prose reducer. A wrapped multi-line contact header must
+    be blanked as one unit on both the source and the PDF-extracted side, or a text-wrap artifact
+    reads as real drift between them."""
+
+    def setUp(self):
+        self.cs = importlib.import_module("check_style")
+        self._email = self.cs.cfg.OWNER_EMAIL
+        self._phone = self.cs.cfg.OWNER_PHONE
+        self.cs.cfg.OWNER_EMAIL = "you@example.com"
+        self.cs.cfg.OWNER_PHONE = "555-0100"
+
+    def tearDown(self):
+        self.cs.cfg.OWNER_EMAIL = self._email
+        self.cs.cfg.OWNER_PHONE = self._phone
+
+    def test_wrapped_header_block_is_blanked_as_a_unit(self):
+        text = (
+            "\\begin{document}\n"
+            "you@example.com $\\vert$ 555-0100\n"
+            "example.com/you\n"
+            "\n"
+            "Built the thing that shipped the other thing.\n"
+            "\\end{document}\n"
+        )
+        stripped = self.cs.strip_latex(text)
+        self.assertNotIn("example.com/you", stripped)
+        self.assertNotIn("you@example.com", stripped)
+        self.assertIn("Built the thing that shipped the other thing.", stripped)
+
+    def test_unrelated_paragraph_is_not_reached(self):
+        text = (
+            "\\begin{document}\n"
+            "you@example.com $\\vert$ 555-0100\n"
+            "\n"
+            "This paragraph should survive untouched.\n"
+            "\\end{document}\n"
+        )
+        stripped = self.cs.strip_latex(text)
+        self.assertIn("This paragraph should survive untouched.", stripped)
+
+
+class TestConfirmSentFlipsAllThreeStores(unittest.TestCase):
+    """--confirm-sent is the #48 post-send step: mail-draft.sh stages an email (an UNSENT_STATUSES
+    send-log row, a STAGED outreach_log header, a STAGED correspondence-log line) and nothing
+    converts any of the three when you actually press send. This is the writer that does."""
+
+    TO = "jane" + "@" + "example.com"
+    COMPANY = "SomeCo"
+    SUBJECT = "Re: SomeCo"
+
+    def setUp(self):
+        if SCRIPTS not in sys.path:
+            sys.path.insert(0, SCRIPTS)
+        self.mod = importlib.import_module("log_linkedin_send")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+        self.sendlog = os.path.join(self.tmp.name, "send-log.jsonl")
+        self.outreach = os.path.join(self.tmp.name, "outreach_log.md")
+        self.corr = os.path.join(self.tmp.name, "correspondence-log.md")
+
+        self._real_sendlog = self.mod.SENDLOG
+        self._real_outreach = self.mod.OUTREACH_LOG
+        self._real_corr = self.mod.CORRESPONDENCE_LOG
+        self.mod.SENDLOG = self.sendlog
+        self.mod.OUTREACH_LOG = self.outreach
+        self.mod.CORRESPONDENCE_LOG = self.corr
+        self.addCleanup(setattr, self.mod, "SENDLOG", self._real_sendlog)
+        self.addCleanup(setattr, self.mod, "OUTREACH_LOG", self._real_outreach)
+        self.addCleanup(setattr, self.mod, "CORRESPONDENCE_LOG", self._real_corr)
+
+        row = {"date": "2026-08-14", "ts": "2026-08-14T09:00:00-04:00", "rung": "cold-boss",
+               "to": self.TO, "to_name": "", "company": self.COMPANY, "targets": "",
+               "subject": self.SUBJECT, "kind": "initial", "status": "drafted",
+               "replied": False, "sent_note": "staged"}
+        with open(self.sendlog, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+
+        with open(self.outreach, "w", encoding="utf-8") as fh:
+            fh.write(
+                "# Outreach log\n\n"
+                f"## 2026-08-14 · {self.COMPANY} · {self.TO} — STAGED (draft)\n"
+                f"<!-- STAGED · {self.COMPANY} · {self.SUBJECT} -->\n"
+                f"**Subject:** {self.SUBJECT}\n"
+                "**Rung:** cold-boss | channel:email | status:staged\n\n"
+            )
+
+        with open(self.corr, "w", encoding="utf-8") as fh:
+            fh.write(
+                f"- 2026-08-14 · OUTBOUND (STAGED, not yet sent) · {self.COMPANY} → {self.TO} "
+                f"· subj: {self.SUBJECT} · rung:cold-boss\n"
+            )
+
+    def _rows(self):
+        with open(self.sendlog, encoding="utf-8") as fh:
+            return [json.loads(l) for l in fh if l.strip()]
+
+    def test_confirm_sent_flips_all_three_stores(self):
+        rc = self.mod.main(["--to", self.TO, "--company", self.COMPANY,
+                            "--subject", self.SUBJECT, "--confirm-sent",
+                            "--path", self.sendlog])
+        self.assertEqual(rc, 0)
+
+        rows = self._rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "sent")
+        self.assertIn("sent_ts", rows[0])
+        self.assertIn("sent_confirmed_by", rows[0])
+
+        outreach_text = open(self.outreach, encoding="utf-8").read()
+        self.assertNotIn("STAGED (draft)", outreach_text)
+        self.assertNotIn(f"<!-- STAGED · {self.COMPANY}", outreach_text)
+        self.assertIn("✅ SENT", outreach_text)
+        heads = re.findall(r"(?m)^## .*$", outreach_text)
+        self.assertEqual(sum(self.COMPANY in h for h in heads), 1, "one send, one header")
+
+        corr_text = open(self.corr, encoding="utf-8").read()
+        self.assertNotIn("STAGED, not yet sent", corr_text)
+        self.assertIn("OUTBOUND (SENT)", corr_text)
+
+    def test_confirm_sent_refuses_when_company_or_subject_does_not_match(self):
+        rc = self.mod.main(["--to", self.TO, "--company", "AWrongCo",
+                            "--confirm-sent", "--path", self.sendlog])
+        self.assertEqual(rc, 1)
+        self.assertEqual(self._rows()[0]["status"], "drafted", "an unmatched selector must not flip")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# check_preview BUILD-gate refusal must be RUNG-AWARE (kit issue #50).
+# The refusal prescribed a Boss Match Scorecard, which has no valid inputs at a
+# warm / rung-1-2 / referral / inbound / application shape, and it named ZERO
+# exemption markers — so the operator was handed an impossible instruction and had
+# to read check_preview.py to find the marker that is the real escape hatch. Both
+# directions: the banner must fire for a no-boss shape and stay silent for an
+# ordinary planning question, and the full refusal must enumerate every marker.
+# ─────────────────────────────────────────────────────────────────────────────
+class TestBuildGateRefusalIsRungAware(unittest.TestCase):
+    MARKERS = ("WARM-RUNG:", "RUNG12:", "REFERRED:", "FOLLOWUP:", "INBOUND:", "APPLYING:")
+
+    @staticmethod
+    def _q(**over):
+        f = {"question": "Which opener?", "header": "Draft", "label": "A",
+             "description": "option", "preview": ""}
+        f.update(over)
+        return {"questions": [{"question": f["question"], "header": f["header"],
+                               "options": [{"label": f["label"], "description": f["description"],
+                                            "preview": f["preview"]}]}]}
+
+    def test_greeting_shape_leads_with_the_warm_rung_marker(self):
+        lead = check_preview._no_boss_rung_lead(self._q(preview="Hi, Dana! Good to reconnect."))
+        self.assertIn("NO-BOSS RUNG", lead)
+        self.assertIn("WARM-RUNG:", lead)
+
+    def test_referral_shape_names_the_referred_marker(self):
+        lead = check_preview._no_boss_rung_lead(
+            self._q(description="A contact offered to introduce me via a warm intro."))
+        self.assertIn("REFERRED:", lead)
+
+    def test_an_ordinary_planning_question_gets_no_banner(self):
+        """The banner is scoped to no-boss shapes only. A normal planning question that trips no
+        shape must return an empty lead, or the banner becomes noise on every block."""
+        lead = check_preview._no_boss_rung_lead(
+            self._q(question="Which of these two companies should I screen next?",
+                    description="Compare the two on remote policy."))
+        self.assertEqual(lead, "")
+
+    def test_full_refusal_enumerates_every_marker(self):
+        """End to end: a blocked greeting question (empty project → no ruling and no exemption store,
+        so it fails closed) must name EVERY exemption marker in stderr. REFERRED was the one the kit
+        refusal never named, and before this fix the kit refusal named none of them."""
+        with tempfile.TemporaryDirectory() as td:
+            env = dict(os.environ, CLAUDE_PROJECT_DIR=td)
+            payload = json.dumps({"tool_name": "AskUserQuestion",
+                                  "tool_input": self._q(preview="Hi, Dana! Loved the launch.")})
+            res = subprocess.run([sys.executable, os.path.join(SCRIPTS, "check_preview.py")],
+                                 input=payload, capture_output=True, text=True, env=env)
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertIn("NO-BOSS RUNG", res.stderr, "the block must lead with the rung-aware banner")
+        for m in self.MARKERS:
+            self.assertIn(m, res.stderr, f"the refusal must name the {m} exemption marker")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# mail-draft.sh must write the RECIPIENT NAME to the send-log (kit issue #49).
+# The row carried `to` (the address) but no name, while the people-ranker dedups on
+# the CONTACT (contacted_people reads `to_name`). A nameless row never matched the
+# roster, so an emailed person was re-offered as uncontacted — a duplicate approach
+# that reads as careless. Silent and expensive, which is exactly this suite's scope.
+# ─────────────────────────────────────────────────────────────────────────────
+class TestMailDraftWritesRecipientName(unittest.TestCase):
+    def _sandbox_send(self, *extra):
+        """Run mail-draft.sh in a throwaway COPY of the kit so the send-log write lands in the
+        sandbox, never the real tree (the script resolves the log from its OWN location). osascript
+        and dig are stubbed so no real Mail draft is created and no DNS call is made. --force skips
+        the gate chain; the send-log write happens regardless, which is the line under test."""
+        sb = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, sb, True)
+        shutil.copytree(SCRIPTS, os.path.join(sb, "scripts"))
+        os.makedirs(os.path.join(sb, "documents"))
+        bind = os.path.join(sb, "bin")
+        os.makedirs(bind)
+        for stub in ("osascript", "dig"):
+            p = os.path.join(bind, stub)
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/sh\nexit 0\n")
+            os.chmod(p, 0o755)
+        body = os.path.join(sb, "body.txt")
+        with open(body, "w", encoding="utf-8") as fh:
+            fh.write("Hi, Jane!\n\nGood to reconnect, no ask.\n")
+        env = dict(os.environ, PATH=bind + os.pathsep + os.environ.get("PATH", ""))
+        args = ["--to", "jane@example.test", "--subject", "Hello", "--body-file", body,
+                "--rung", "warm", "--no-resume", "--force", "--targets", "SomeCo", *extra]
+        subprocess.run(["bash", os.path.join(sb, "scripts", "mail-draft.sh"), *args],
+                       capture_output=True, text=True, env=env)
+        slog = os.path.join(sb, "documents", "send-log.jsonl")
+        return [json.loads(l) for l in open(slog, encoding="utf-8")] if os.path.exists(slog) else []
+
+    def test_name_flag_is_written_as_to_name(self):
+        rows = self._sandbox_send("--name", "Jane Doe")
+        self.assertTrue(rows, "mail-draft wrote no send-log row")
+        self.assertEqual(rows[-1].get("to_name"), "Jane Doe",
+                         "the recipient name must land in `to_name`, the field the ranker dedups on")
+
+    def test_to_name_alias_is_accepted(self):
+        rows = self._sandbox_send("--to-name", "Jane Doe")
+        self.assertTrue(rows)
+        self.assertEqual(rows[-1].get("to_name"), "Jane Doe")
+
+    def test_boss_is_the_fallback_when_no_name(self):
+        rows = self._sandbox_send("--boss", "Boss Person")
+        self.assertTrue(rows)
+        self.assertEqual(rows[-1].get("to_name"), "Boss Person")
+
+    def test_field_is_present_even_when_empty(self):
+        rows = self._sandbox_send()
+        self.assertTrue(rows)
+        self.assertIn("to_name", rows[-1], "the `to_name` key must always be present, even empty")
+        self.assertEqual(rows[-1].get("to_name"), "")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# backup.sh must push to a WRITABLE remote (kit issue #39).
+# A bare `git push` aims at the branch's upstream. In the two-remote layout (origin =
+# your writable fork, a shared read-only upstream you cloned from) `main` tracks the
+# read-only upstream after a sync, so a bare push fails EVERY time and the catch-all
+# blamed "read-only clone or offline" — breaking PUSH ALWAYS while a correct push was
+# one `git push origin main` away. The fix resolves the remote: prefer origin, fall
+# back to the tracked upstream, and report which remote failed.
+# ─────────────────────────────────────────────────────────────────────────────
+class TestBackupPushResolvesWritableRemote(unittest.TestCase):
+    def _git(self, cwd, *args):
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+
+    def _clone_with(self, remotes, upstream):
+        """A working repo on `main` with backup.sh installed and the given remotes; `main` is set to
+        track `<upstream>/main` (the layout that froze the bug). `remotes` maps name -> bare repo."""
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        bare = {}
+        for name in remotes:
+            bare[name] = os.path.join(base, f"{name}.git")
+            self._git(base, "init", "--bare", "-q", bare[name])
+        work = os.path.join(base, "work")
+        os.makedirs(os.path.join(work, "scripts"))
+        self._git(work, "init", "-q")
+        self._git(work, "config", "user.email", "t@t.test")
+        self._git(work, "config", "user.name", "T")
+        self._git(work, "checkout", "-q", "-b", "main")
+        shutil.copy(os.path.join(SCRIPTS, "backup.sh"), os.path.join(work, "scripts", "backup.sh"))
+        with open(os.path.join(work, "seed.txt"), "w") as fh:
+            fh.write("seed")
+        self._git(work, "add", "-A")
+        self._git(work, "commit", "-q", "-m", "seed")
+        for name, url in bare.items():
+            self._git(work, "remote", "add", name, url)
+            self._git(work, "push", "-q", name, "main")
+        self._git(work, "branch", f"--set-upstream-to={upstream}/main", "main")
+        return base, work, bare
+
+    def _run_backup(self, work, base):
+        # A change to push, and JOBSEARCH_MEMORY_DIR aimed at nothing so the memory-mirror step is a no-op.
+        with open(os.path.join(work, "change.txt"), "w") as fh:
+            fh.write("y")
+        env = dict(os.environ, JOBSEARCH_MEMORY_DIR=os.path.join(base, "no-such-mem"))
+        return subprocess.run(["bash", "scripts/backup.sh"], cwd=work,
+                              capture_output=True, text=True, env=env)
+
+    def test_push_targets_origin_not_the_tracked_upstream(self):
+        """The core bug: main tracks the read-only `kit`, but the push must go to the writable
+        `origin` fork. RED before the fix (bare push went to `kit`, so the fork never got it)."""
+        base, work, bare = self._clone_with(["kit", "origin"], upstream="kit")
+        res = self._run_backup(work, base)
+        fork_log = self._git(bare["origin"], "log", "--oneline", "main").stdout
+        self.assertIn("backup", fork_log,
+                      "backup.sh did not push the new commit to the writable origin fork.\n"
+                      f"stdout:\n{res.stdout}\nstderr:\n{res.stderr}")
+        self.assertIn("'origin'", res.stdout, "the report should name the remote it pushed to")
+
+    def test_single_remote_clone_still_pushes_to_its_upstream(self):
+        """The fallback must not regress single-remote clones: with no `origin`, push to whatever the
+        branch tracks. Here the only remote is `backup`, so the commit must land there."""
+        base, work, bare = self._clone_with(["backup"], upstream="backup")
+        res = self._run_backup(work, base)
+        up_log = self._git(bare["backup"], "log", "--oneline", "main").stdout
+        self.assertIn("backup", up_log,
+                      "a single-remote clone stopped pushing to its tracked upstream.\n"
+                      f"stdout:\n{res.stdout}\nstderr:\n{res.stderr}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# session_start freshness nag must gate on EXPORT age, not connection lag (kit #40).
+# A fresh export on a quiet LinkedIn month (high data_lag_days, low export_taken_days)
+# is current — no download fixes a quiet month — so it must NOT nag "download now",
+# which the caller did by re-deriving the verdict off data_lag_days instead of sharing
+# the module's #7 correction. The CLI said "current" while the briefing said "stale".
+# ─────────────────────────────────────────────────────────────────────────────
+class TestFreshnessNagGatesOnExportAge(unittest.TestCase):
+    session_start = importlib.import_module("session_start")
+
+    def _item(self, **over):
+        s = {"newest_connection": "2026-07-09", "data_lag_days": 34, "export_taken": "2026-08-06",
+             "export_taken_days": 6, "parse_is_behind_export": False,
+             "export_newest_connection": "2026-07-09"}
+        s.update(over)
+        return self.session_start._freshness_item(s, 7)
+
+    def test_fresh_export_on_a_quiet_month_does_not_nag(self):
+        # data_lag_days 34 but the export was taken 6 days ago: the exact case the CLI calls current.
+        self.assertIsNone(self._item(),
+                          "a fresh export must not trigger a download nag off a quiet-month lag")
+
+    def test_a_stale_export_does_nag_to_download(self):
+        item = self._item(export_taken_days=23, export_taken="2026-07-20")
+        self.assertIsNotNone(item, "a genuinely stale export should still prompt a fresh download")
+        self.assertIn("export is 23 days old", item[1])
+        self.assertIn("download a fresh LinkedIn export", " ".join(item[2]))
+
+    def test_a_stale_parse_prescribes_reparse_not_download(self):
+        item = self._item(parse_is_behind_export=True, export_taken_days=1,
+                          export_newest_connection="2026-08-11")
+        self.assertIsNotNone(item)
+        _fix = " ".join(item[2]).lower()
+        self.assertIn("parse_network.py", _fix)
+        self.assertNotIn("download a fresh", _fix)  # a re-parse, not the download nag
+
+    def test_no_data_is_not_a_nag(self):
+        self.assertIsNone(self._item(newest_connection=None, data_lag_days=None))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# A résumé header must survive the style strip (kit #51, regression from #41).
+# _blank_marker_blocks blanked the WHOLE contiguous header block on the source
+# side, eating the name and tagline (three adjacent lines) above the contact line.
+# Source and PDF strip_latex then disagreed by the header, build_drift scored ~0.99,
+# and every résumé failed the NEVER_WAIVABLE STALE BUILD check and could not export.
+# The fix blanks only from the first marker line FORWARD, keeping the lines above.
+# ─────────────────────────────────────────────────────────────────────────────
+class TestResumeHeaderSurvivesStyleStrip(unittest.TestCase):
+    check_style = importlib.import_module("check_style")
+
+    # A real résumé header: three ADJACENT lines, only the third carries a contact marker.
+    HEADER = (r"{\fontsize{18}{20}\selectfont\bfseries Jane Doe}\\[2pt]" "\n"
+              r"{\fontsize{10.5}{12}\selectfont Product Operations and Business Analysis}\\[3pt]" "\n"
+              r"Jacksonville, FL $\cdot$ Remote (US) $\mid$ (407) 401-1778 $\mid$ linkedin.com/in/janedoe")
+
+    def test_name_and_tagline_survive_the_contact_blank(self):
+        out = self.check_style._blank_marker_blocks(self.HEADER, "linkedin.com/in/")
+        self.assertIn("Jane Doe", out, "the résumé name was eaten (kit #51 regression)")
+        self.assertIn("Product Operations", out, "the résumé tagline was eaten (kit #51 regression)")
+
+    def test_the_contact_line_is_still_blanked(self):
+        out = self.check_style._blank_marker_blocks(self.HEADER, "linkedin.com/in/")
+        self.assertNotIn("linkedin.com/in/janedoe", out)
+        self.assertNotIn("401-1778", out)
+
+    def test_41_forward_wrap_still_blanks_the_whole_contact_header(self):
+        # #41's case: the contact line wraps FORWARD onto a tail line carrying only an href label
+        # (no email/phone/linkedin marker). Both must go, or the tail survives on the PDF side while
+        # the source blanks it, reopening the false drift #41 fixed.
+        wrapped = "linkedin.com/in/janedoe\ngithub.com/janedoe"
+        self.assertEqual(self.check_style._blank_marker_blocks(wrapped, "linkedin.com/in/").strip(), "")
+
+    def test_strip_latex_end_to_end_keeps_the_header_words(self):
+        # The gate that broke is build_drift over strip_latex output, so assert the produced text
+        # still carries the name and tagline and no longer carries the contact identifiers.
+        s = self.check_style.strip_latex(self.HEADER)
+        self.assertIn("Jane Doe", s)
+        self.assertIn("Product Operations", s)
+        self.assertNotIn("janedoe", s)
+        self.assertNotIn("401-1778", s)
+
+    def test_build_drift_scores_a_freshly_built_resume_at_1_0(self):
+        # The ACTUAL gate: verify_resume.build_drift(tex_src, pdf_text) compares source_signature
+        # (which runs the fixed strip_latex) against render_signature of the rendered PDF text. A
+        # conventional header must score >= 0.999, i.e. the two signatures AGREE on the header rather
+        # than diverging by name+tagline. build_drift takes two strings and never compiles, so this
+        # exercises the real STALE-BUILD gate with no pdflatex/pdftotext dependency. Goes RED before
+        # the fix (the source side over-blanks the whole header block).
+        import verify_resume as vr
+        tex = ("\\documentclass{article}\n\\begin{document}\n" + self.HEADER +
+               "\n\n\\section*{Objective}\n"
+               "Product operations and business analysis, building the systems that make teams faster.\n"
+               "\\end{document}")
+        pdf = ("Jane Doe\nProduct Operations and Business Analysis\n"
+               "Jacksonville, FL \u00b7 Remote (US) | (407) 401-1778 | linkedin.com/in/janedoe\n\n"
+               "Objective\n"
+               "Product operations and business analysis, building the systems that make teams faster.")
+        ratio, sample = vr.build_drift(tex, pdf)
+        self.assertGreaterEqual(
+            ratio, 0.999,
+            f"a freshly built résumé must not read as STALE BUILD; got {ratio:.4f} ({sample[:80]})")
 
 
 # ⛔ THIS GUARD MUST BE THE LAST THING IN THE FILE, AND IT WAS NOT (fixed 2026-08-11).

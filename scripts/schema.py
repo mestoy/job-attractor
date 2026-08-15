@@ -94,7 +94,7 @@ FINDING_ROW_OPTIONAL = ("filter", "evidence", "remote", "ownership", "pm_req", "
 # NEW row carries, not what every historical row carries.
 SEND_ROW = ("ts", "date", "rung", "to", "company", "targets", "subject",
             "segment", "kind", "followup_due", "status", "replied", "sent_note")
-SEND_ROW_OPTIONAL = ("referred_by", "channel", "backfill", "backfilled")
+SEND_ROW_OPTIONAL = ("referred_by", "channel", "backfill", "backfilled", "to_name")
 
 # `backfill` and `backfilled` are one concept with two provenances, and no row carries both. They
 # hold DIFFERENT values (which import produced the row), so coalesce the KEY on read via

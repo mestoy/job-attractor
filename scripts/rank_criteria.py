@@ -1327,11 +1327,16 @@ except Exception:
 # older kit_config (or omits one) silently loses ALL of them to the fallback branch, and a scoring
 # model that quietly reverts to defaults is the failure mode this whole section exists to remove.
 _PERSON_WEIGHTS_V2_DEFAULT = {"product-leader": 40, "founder-exec": 40, "senior-exec": 33,
-                              "product-ic": 25, "connector": 15, "other": 5}
+                              "product-ic": 25, "connector": 15, "senior-ic": 5, "other": 5}
 try:
     from kit_config import PERSON_WEIGHTS_V2 as PERSON_BASE
 except Exception:
     PERSON_BASE = dict(_PERSON_WEIGHTS_V2_DEFAULT)
+# 🧩 BUG-181 WU-6a: the fourth bucket ALWAYS scores at "other"'s value, whatever a partner's tuned
+# kit_config carries. This is the ABSENCE of a typed weight (the bucket's send history has not
+# cleared the n≥15 floor), NOT a chosen one — so it is pinned to "other" rather than tuned. An older
+# kit_config that predates the bucket keeps working: senior-ic defaults in here.
+PERSON_BASE.setdefault("senior-ic", PERSON_BASE.get("other", 5))
 
 # LEGACY v1 WEIGHTS — imported ONLY to report that they are inert, never to score with.
 # kit_config ships tracked, so an existing recipient's `git pull --ff-only` must keep working and
@@ -1414,6 +1419,47 @@ except Exception:
 PLATEAU_WARN_AT = 5
 # Above this share of the shown top band being indistinguishable, the #1 row is a coin flip.
 TIE_RATE_WARN_AT = 0.50
+
+# ── CLOSENESS BAND — the LEADING people-sort key (BUG-181 WU-2) ─────────────────────────────────
+# An evtier-led sort buries every stated relationship when the only shippable evidence band is
+# almost entirely `never-spoke`, so the closeness bonus can never lift a warm contact past a
+# stranger and the board returns a connect-date artifact. The fix: a band computed from the STATED
+# tier leads the sort, ABOVE evtier — a warm contact outranks a never-spoke senior exec.
+#   band 2 = strong (worked-together, know-well, personal-friend)
+#   band 1 = thin   (every other tier rung_for grants a bonus for, inferred-strong included)
+#   band 0 = never-spoke / absent / unstated
+# ⛔ DEGRADES TO TODAY'S BEHAVIOR WITH NO CLOSENESS STORE: with `closeness` absent the band is 0 for
+# every row, so `-close_band` is a constant and the rest of the sort key is unchanged. A test pins it.
+_CLOSE_BAND_STRONG = frozenset({"worked-together", "know-well", "personal-friend"})
+
+# WU-2 marker: 1 = the stated-closeness band LEADS the people sort; 0 reproduces the pre-WU-2
+# evtier-led ordering. `--audit-signals` reads it to classify the evtier signal.
+CLOSE_BAND_LEADS = 1
+# WU-3 audit-state flags (see `audit_signals`). A tree predating WU-3 lacks these names, so the
+# audit's `globals().get(..., <RED default>)` reports the pre-WU-3 picture. `_THREAD_SCORED False`
+# ⇒ the thread bonus is leakage-silenced; `_EVTIER_RATIFIED True` ⇒ evtier is a demoted, ratified
+# within-band tiebreak that scores 0, not an unvalidated lexicographic lead.
+_THREAD_SCORED = False
+_EVTIER_RATIFIED = True
+
+
+def _close_band(crow, category):
+    """The WU-2 closeness band (2/1/0) that leads the people sort.
+
+    ⛔ PROVENANCE-RESPECTING BY CONSTRUCTION. It reads the bonus back from `closeness.rung_for`, so
+    an `inferred-from-messages` strong tier (which hands back the THIN bonus) lands band 1, never
+    band 2; a doubted tier is likewise capped; an unmapped tier or `never-spoke` lands band 0.
+    """
+    if not closeness or not crow:
+        return 0
+    tier = crow.get("closeness")
+    tier = closeness.TIER_ALIASES.get(tier, tier)
+    if not tier or tier == "never-spoke":
+        return 0
+    _rung, _band, _ask, cbonus, _flag = closeness.rung_for(crow, category)
+    if not cbonus or cbonus <= 0:
+        return 0
+    return 2 if (tier in _CLOSE_BAND_STRONG and cbonus >= closeness.CLOSENESS_STRONG) else 1
 
 
 def reason_terms(why):
@@ -1574,7 +1620,7 @@ EXPOSURE_WINDOW_DAYS = 30
 
 PERSON_BADGE = {"product-leader": "🎯 likely boss", "founder-exec": "🏛 founder/CEO",
                 "senior-exec": "🏢 senior exec", "product-ic": "🤝 product peer",
-                "connector": "📇 connector", "other": "· other"}
+                "connector": "📇 connector", "senior-ic": "🧩 senior IC", "other": "· other"}
 
 # The org-OWNER titles Ruling A elevates. Deliberately narrow: CTO/VP/directors/partners are senior
 # but would not manage a product hire; "managing director" is a level at large firms.
@@ -1585,16 +1631,27 @@ _OWNER_TITLE = re.compile(r"\b(founder|co-?founder|ceo|chief executive|coo|chief
 # A "Product Owner" is a scrum-role IC, but SENIOR's \bowner\b matched inside the phrase, so every
 # Product Owner in the network scored as a product LEADER under v1 (four of one tied top 10).
 _PO_PHRASE = re.compile(r"\bproduct\s+owner\b", re.I)
+# `is_pm()` matches `product\b`, which stops at the singular, so "Vice President of Products" and
+# "Chief Products Officer" read as senior-exec and every plural-titled product leader sank below
+# the fold.
+# ⛔ The singularization lives HERE, in the PEOPLE path, and never in `is_pm()` itself: that
+# function answers "is this a PM seat worth applying to" and feeds live-role detection, where
+# loosening it pushes RADAR companies back to green.
+_PLURAL_PRODUCT = re.compile(r"\bproducts\b", re.I)
 # Principal/Staff PMs are senior ICs. Under Ruling A "likely boss" means MANAGES the role, so they
 # are peers unless the title ALSO carries a real management marker (Head/VP/Director/CPO/founder…).
 _IC_SENIORITY = re.compile(r"\b(principal|staff)\b", re.I)
+# 🧩 BUG-181 WU-6a. Seniority words `SENIOR` (executive-only) does not match, carried by a non-exec
+# IC/manager: the fourth bucket. Kept in lockstep with parse_network.SENIOR_IC, the writer that
+# decides which table these rows land in.
+_SENIOR_IC = re.compile(r"\b(senior|staff|lead|manager|executive|group)\b", re.I)
 
 
 def _person_category(title):
     """Category from the TITLE alone — the company-shape half of the likely-boss predicate is
     applied by the caller via _company_shape_map(), because shape lives on the green board, not in
     the title. With shape UNKNOWN (most of a network), both plausible-boss reads stay equal."""
-    t = title or ""
+    t = _PLURAL_PRODUCT.sub("product", title or "")
     # Mask to a SINGLE word: "product-owner" still leaves a \b before "owner" (the hyphen is a
     # non-word char), so the first cut of this mask changed nothing. Verified against a live pool:
     # a "Product Owner" ranked #1 as a likely boss under the hyphen mask.
@@ -1614,6 +1671,11 @@ def _person_category(title):
         return "product-ic"       # PM/Sr PM — a would-be teammate who can refer/intro
     if CONNECTOR.search(t):
         return "connector"        # recruiter/talent — routes you
+    # 🧩 THE FOURTH BUCKET (BUG-181 WU-6a). Runs LAST, so it only catches a seniority word carried by
+    # a title none of the sharper reads matched — a non-exec IC/manager. A SEPARATE people-test,
+    # never a loosened `is_pm()`. Mirrors parse_network.classify(), the writer of the table it reads.
+    if _SENIOR_IC.search(masked):
+        return "senior-ic"
     return "other"
 
 
@@ -1887,6 +1949,205 @@ def _category_evidence():
         per[cat][0] += 1
         per[cat][1] += 1 if r.get("replied") else 0
     return per, joined, len(rows), attributable
+
+
+# ── PERSON-LEVEL LEARNED TERMS (BUG-181 WU-3) ────────────────────────────────────────────────────
+# Among equally-warm peers the score is band-uniform, so a tie collapses onto the connect date. WU-3
+# derives per-person candidates the same way the category weights are derived: measure a reply-rate
+# lift from the live send log, clamp it, refuse it below n≥15, and score NOTHING when it cannot be
+# measured — never a typed guess. Degrades to "scores nothing" on a thin/absent partner join, which
+# is the correct behavior, not a bug.
+PERSON_LIFT_MIN_N = 15
+PERSON_LIFT_MAX_POINTS = 6.0                  # capped BELOW the ratified closeness bonus of +6
+PERSON_LIFT_CLAMP = PERSON_RATE_CLAMP
+
+
+def _person_signal_cells():
+    """Join every delivered send to its recipient's STATED closeness band and thread state.
+
+    Returns {"closeness": {band: [s, r]}, "thread": {state: [s, r]}, "joined": n, "delivered": n}.
+    The partner tree has no send-identity sidecar, so the recipient name is read from the row's own
+    `to_name`, then the export identity map — a THINNER join than the primary tree by design. A thin
+    join keeps every cell under the n≥15 floor, so the learned terms correctly score nothing.
+
+    ⚠️ LEAKAGE. The closeness BAND is a stated prior relationship (valid predictor); an
+    `inferred-from-messages` strong tier is haircut to band 1 by `_close_band`. The THREAD state is
+    `closeness.thread_state(TODAY)`, where "live" MEANS "they replied" — the outcome read back into
+    the predictor, so its cells are counted for the audit but never scored."""
+    out = {"closeness": {}, "thread": {}, "joined": 0, "delivered": 0}
+    for k in ("strong", "thin", "never"):
+        out["closeness"][k] = [0, 0]
+    try:
+        from rung_ladder import load as _load, NOT_DELIVERED as _ND
+    except Exception:
+        return out
+    if not closeness:
+        return out
+    close = closeness.load()
+    ident = _identity_map()
+    for r in _load():
+        if str(r.get("status", "")).lower() in _ND:
+            continue
+        out["delivered"] += 1
+        nm = (r.get("to_name") or "").strip()
+        if not nm:
+            raw = str(r.get("to", "")).strip().lower()
+            who = ident.get(raw)
+            if who is None:
+                m = re.search(r"/in/([^/?#]+)", raw)
+                if m:
+                    who = ident.get(re.sub(r"[^a-z0-9]", "", m.group(1)))
+            nm = who or ""
+        if not nm:
+            continue
+        crow = closeness.tier_for(nm, close)
+        band = _close_band(crow, "other") if crow else 0
+        rep = 1 if r.get("replied") else 0
+        out["joined"] += 1
+        # ⛔ B1 LEAKAGE GUARD. An `inferred-from-messages` closeness tier was read out of the very
+        # thread this reply lives in — the same leakage class the thread bonus is silenced for.
+        # `_close_band` haircuts an inferred `know-well` to band 1, so its reply would otherwise
+        # corroborate that inferred band in the THIN scored cell. Only STATED-provenance replies may
+        # enter a scored lift cell, so the guard fires for strong/thin. The `never` base is
+        # preserved: an inferred band-0 row is `never-spoke` (no bonus, no tier to corroborate), so
+        # counting it in the denominator is not leakage and dropping it would bias the base upward.
+        inferred = bool(crow) and str(crow.get("source") or "") in closeness.INFERRED_SOURCES
+        key = {2: "strong", 1: "thin"}.get(band, "never")
+        if not (inferred and key != "never"):
+            out["closeness"][key][0] += 1
+            out["closeness"][key][1] += rep
+        tstate = closeness.thread_state(crow)[0] if crow else "never"
+        cell = out["thread"].setdefault(tstate, [0, 0])
+        cell[0] += 1
+        cell[1] += rep
+    return out
+
+
+_PERSON_CELLS_CACHE = {}
+
+
+def _cells():
+    if "c" not in _PERSON_CELLS_CACHE:
+        _PERSON_CELLS_CACHE["c"] = _person_signal_cells()
+    return _PERSON_CELLS_CACHE["c"]
+
+
+def _lift(cell, base):
+    """(lift, treated, base) with the n≥15 floor: None when the treated cell is under-floor or a base
+    rate cannot be formed. Clamped so one term cannot invert the card."""
+    a_s, a_r = cell[0], cell[1]
+    b_s, b_r = base[0], base[1]
+    if a_s < PERSON_LIFT_MIN_N or not b_s or not b_r or not a_s:
+        return None, (a_r, a_s), (b_r, b_s)
+    lo, hi = PERSON_LIFT_CLAMP
+    raw = (a_r / a_s) / (b_r / b_s)
+    return max(lo, min(hi, raw)), (a_r, a_s), (b_r, b_s)
+
+
+def closeness_tier_lift():
+    """{band: (lift|None, treated, base)} for the stated-closeness bands, measured live."""
+    c = _cells()["closeness"]
+    base = c.get("never", [0, 0])
+    return {b: _lift(c.get(b, [0, 0]), base) for b in ("strong", "thin")}
+
+
+def closeness_tier_points(band, lifts):
+    """(points, reason) — the LEARNED closeness term that enters `pts`, or (0.0, None). Scores nothing
+    when the band's cell is under the floor; only orders WITHIN a band (the sort leads on close_band)."""
+    key = {2: "strong", 1: "thin"}.get(band)
+    if not key:
+        return 0.0, None
+    lift, treated, _base = lifts.get(key, (None, (0, 0), (0, 0)))
+    if lift is None:
+        return 0.0, None
+    pts = max(0.0, min(PERSON_LIFT_MAX_POINTS, (lift - 1.0) * PERSON_LIFT_MAX_POINTS))
+    if pts <= 0:
+        return 0.0, (f"closeness-tier learned: {key} lift {lift:.2f}x — no lift over never-spoke, +0")
+    return round(pts, 1), (f"📊 {key}-tier learned +{pts:.1f} "
+                           f"({treated[0]}/{treated[1]} joined replies, lift {lift:.2f}x)")
+
+
+def thread_depth_lift():
+    """(None, treated, base, reason) — ALWAYS None: thread_state is a post-send outcome ('live' ==
+    'they replied') with no dated snapshot, so it cannot be validated leakage-free."""
+    c = _cells()["thread"]
+    live = c.get("live", [0, 0])
+    never = c.get("never", [0, 0])
+    return None, (live[1], live[0]), (never[1], never[0]), \
+        "thread state is a post-send outcome (no dated snapshot) — leakage, cannot validate"
+
+
+def thread_depth_points():
+    """(0.0, None) — the thread bonus is unvalidatable (leakage), so it scores nothing."""
+    return 0.0, None
+
+
+def audit_signals():
+    """Walk every live people-scoring term, classify its basis, and print joined-n per cell every
+    run (the learner-never-learns guard). Returns the count of TYPED-UNVALIDATED terms; 0 is GREEN.
+
+    ⚖️ ONE CLASSIFIER, TWO CODE STATES: reads `_THREAD_SCORED`/`_EVTIER_RATIFIED` via
+    `globals().get(..., <RED default>)`, so a pre-WU-3 tree is RED under the identical function."""
+    LEARNED, RATIFIED, SILENT, TYPED = "LEARNED", "RATIFIED", "SCORES-NOTHING", "TYPED-UNVALIDATED"
+    thread_scored = globals().get("_THREAD_SCORED", True)
+    evtier_ratified = globals().get("_EVTIER_RATIFIED", False)
+    band_leads = bool(globals().get("CLOSE_BAND_LEADS", 0))
+    cells = _cells()
+    W = live_weights() or {}
+    wcat = W.get("per_category", {})
+    lines, typed_n = [], [0]
+
+    def row(term, status, basis, witness=""):
+        if status == TYPED:
+            typed_n[0] += 1
+        lines.append((term, status, basis, witness))
+
+    row("category multiplier ×w", LEARNED, f"reply rate per category, clamped {list(PERSON_RATE_CLAMP)}",
+        f"{W.get('joined', 0)}/{W.get('log_rows', 0)} sends joined")
+    for cat, d in sorted(wcat.items()):
+        lines.append((f"    ├ {cat}", "", f"×{d.get('w', 1):g}",
+                      f"n={d.get('sends', 0)} replies={d.get('replies', 0)}"))
+    row("exploration allowance", LEARNED, "self-repaying sampler for an under-sampled band", "e.g. senior-ic")
+    cl = closeness_tier_lift()
+    row("closeness bonus +6/+3", RATIFIED, "stated strong/thin tiers", "corroboration below")
+    for b in ("strong", "thin"):
+        lift, treated, base = cl.get(b, (None, (0, 0), (0, 0)))
+        ls = f"lift {lift:.2f}x" if lift is not None else "under n≥15 floor → scores nothing"
+        lines.append((f"    ├ {b} learned-lift", "", ls,
+                      f"n={treated[1]} replies={treated[0]} vs never n={base[1]} replies={base[0]}"))
+    any_clear = any(cl.get(b, (None,))[0] is not None for b in ("strong", "thin"))
+    row("closeness-tier learned +pts", LEARNED if any_clear else SILENT,
+        "clamp, n≥15 floor, under-floor ⇒ 0.0", "adds to pts only where a band clears the floor")
+    t = cells["thread"]
+    tw = "  ".join(f"{k}:n={t.get(k, [0, 0])[0]}/r={t.get(k, [0, 0])[1]}"
+                   for k in ("live", "cooling", "dead", "never"))
+    if thread_scored:
+        row("thread bonus +4/+2", TYPED, "typed +4/+2/0, no outcome data", tw)
+    else:
+        row("thread bonus", SILENT, "leakage: thread_state is post-send ('live'=='replied') → 0 pts", tw)
+    if evtier_ratified and band_leads:
+        row("evtier (employer evidence)", RATIFIED, "within-band ordering, demoted below closeness; 0 pts", "")
+    else:
+        row("evtier (employer evidence)", TYPED, "no outcome join; leads the sort as unvalidated primary", "")
+    row("closeness band sort-lead", RATIFIED, "WU-2: stated tier leads the sort", "")
+    row("connect-date distance/years", RATIFIED, "capped plateau-spreader proxy", "")
+
+    print("=" * 74)
+    print("  SIGNAL AUDIT — every live people-scoring term, classified (BUG-181 WU-3)")
+    print("=" * 74)
+    for term, status, basis, witness in lines:
+        if status:
+            print(f"  {status:18} {term}")
+            print(f"  {'':18}   {basis}")
+            if witness:
+                print(f"  {'':18}   witness: {witness}")
+        else:
+            print(f"  {'':18} {term:30} {basis:14} {witness}")
+    print("-" * 74)
+    print(f"  person-cell join: {cells['joined']} of {cells['delivered']} delivered sends named")
+    print(f"\n  TYPED-UNVALIDATED terms: {typed_n[0]}   "
+          f"({'✅ GREEN' if typed_n[0] == 0 else '🔴 RED'})")
+    return typed_n[0]
 
 
 def _compute_weights():
@@ -2222,6 +2483,58 @@ def nonus_tell(company):
     return m.group(1) if m else ""
 
 
+# ── PROFILE VIEWS — a SURFACE, not a scored term (BUG-181 WU-4, 2026-08-13) ─────────────────────
+# The LinkedIn connections export carries no viewers; the "Who viewed your profile" page does, and
+# `scripts/parse_views.py` ingests it into this store. The ranker reads it here and prints a reason
+# line on a matching row — it NEVER enters `pts`, the same posture `nonus_tell` takes, until it
+# clears its own outcome join at n≥15. Manual-entry data goes stale silently, so the board also
+# prints the store's age. Degrades to {} when the store is absent (the default partner install).
+PROFILE_VIEWS = os.path.join(REPO, "documents", "state", "profile-views.jsonl")
+
+
+def load_profile_views(path=None):
+    """{norm(name): newest_view_row}. {} when the store is absent, so every effect below degrades
+    to today's behavior rather than failing."""
+    path = path or PROFILE_VIEWS
+    out = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                name = row.get("name")
+                if not name:
+                    continue
+                key = re.sub(r"[^a-z0-9]", "", name.lower())
+                prev = out.get(key)
+                if prev is None or (str(row.get("view_date", "")), str(row.get("ingested_on", ""))) \
+                        >= (str(prev.get("view_date", "")), str(prev.get("ingested_on", ""))):
+                    out[key] = row
+    except OSError:
+        return {}
+    return out
+
+
+def _profile_views_age_line(views):
+    """One line naming the store's freshness, or '' when nothing is captured."""
+    if not views:
+        return ""
+    latest = max((str(r.get("view_date", "")) for r in views.values()), default="")
+    line = f"  👀 profile-views: {len(views)} viewer(s) on file"
+    if latest:
+        try:
+            days = (_date.today() - _date(*(int(x) for x in latest.split("-")))).days
+            line += f" · latest {latest} ({days}d old)"
+        except (ValueError, TypeError):
+            line += f" · latest {latest}"
+    return line + " — a SURFACE, not scored (needs n≥15 to validate)"
+
+
 _H2N_CACHE = None
 
 
@@ -2520,7 +2833,9 @@ def _people_rows():
     rows, in_pool, checked = [], False, False
     for line in rd("documents/warm-network.md").splitlines():
         if line.startswith("## "):
-            in_pool = any(k in line for k in ("Product people", "Senior decision", "Connectors"))
+            # "Senior ICs" is the fourth pool section (BUG-181 WU-6a); identical header contract.
+            in_pool = any(k in line for k in ("Product people", "Senior decision", "Connectors",
+                                              "Senior ICs"))
             checked = False
             continue
         if not in_pool or not line.strip().startswith("|"):
@@ -2574,6 +2889,10 @@ def rank_people(n=10):
     blocked = blocked_set()
     worder = (W or {}).get("founder_order", "last")
     wcat = (W or {}).get("per_category", {})
+    _cl_lifts = closeness_tier_lift()      # WU-3: learned closeness-tier lift, derived once per run
+    # WU-4: the captured "Who viewed your profile" store, read ONCE per run. A surface only — a
+    # reason line on a matching row, never `pts`. {} when the store is absent (default install).
+    _views = load_profile_views()
     out, skipped = [], []
     for name, title, company, flag, known_since in _people_rows():
         combo = company + " " + title
@@ -2625,7 +2944,23 @@ def rank_people(n=10):
         _held = closeness.is_held(crow) if closeness else None
         if _held:
             skipped.append((name, f"HELD — {_held}")); continue
-        cat = _person_category(title)
+        # 🕰 VERIFY-BEFORE-SURFACE (BUG-181 WU-5). The export freezes a title at the CONNECT date, so
+        # a `changed` verdict recorded by `/verify-titles` (via record_role.py) had no effect on the
+        # ASK the ranker produced — because classification still ran off the stale title. This is the
+        # READ path: a still-current verified role with a DIFFERENT title drives `_person_category`
+        # and `segment_read`, which can MOVE the person's category. Still NOT scored (a re-cat, not a
+        # penalty). Degrades to the export title with no store, an ENDED role, or a matching title.
+        _class_title = title
+        _recat = ""
+        if contact_signals:
+            _vrole = contact_signals.verified_role(name)
+            if _vrole and _vrole.get("still_there") is not False and _vrole.get("title") \
+                    and re.sub(r"[^a-z0-9]", "", _vrole["title"].lower()) \
+                    != re.sub(r"[^a-z0-9]", "", (title or "").lower()):
+                _class_title = _vrole["title"]
+                _recat = (f"🕰 re-categorized on verified title \"{_vrole['title']}\" "
+                          f"(was \"{title}\", verified {_vrole.get('verified_on', '?')})")
+        cat = _person_category(_class_title)
         # ── SEGMENT READ, TRI-STATE, and only a POSITIVE off-segment match may demote ─────────
         # "unknown" KEEPS the band, because most real companies do not carry their industry in
         # their name. Demoting on "no match" would push a Head of Product at a major payments
@@ -2634,7 +2969,7 @@ def rank_people(n=10):
         _evtier = 1
         _evsrc = None
         if contact_signals:
-            _segstate, _segdetail = contact_signals.segment_read(company, title)
+            _segstate, _segdetail = contact_signals.segment_read(company, _class_title)
             # 🔬 EVIDENCE TIER — the PRIMARY sort key. Never touches `pts` and never rebands, so
             # every scoring term keeps its meaning; it only decides which rows may sit ABOVE which.
             _evtier, _evsrc = contact_signals.employer_evidence(company)
@@ -2645,6 +2980,8 @@ def rank_people(n=10):
         shape = shapes.get(company.strip().lower())
         pts = float(PERSON_BASE[cat])
         reasons = [PERSON_BADGE[cat]]
+        if _recat:
+            reasons.append(_recat)
         if _reband:
             reasons.append(f"↩ off-segment employer (\"{_segdetail}\"), so {_reband} → connector "
                            f"(ask who they know, never hire-me)")
@@ -2712,22 +3049,39 @@ def rank_people(n=10):
         cbonus, cflag = 0, None
         if closeness:
             rung, band, ask, cbonus, cflag = closeness.rung_for(crow, cat)
+        # 🪜 WU-2: the closeness BAND (2/1/0) that leads the sort. Provenance-respecting and
+        # None-safe — with no closeness store it is 0 for every row, degrading to today's ordering.
+        close_band = _close_band(crow, cat)
         # 🌡️ THREAD DEPTH — the second axis. Closeness says how STRONG the tie is; this says whether
         # it is LIVE. A live thread is a warmer starting point than a cold one at the SAME closeness,
         # and the term is small on purpose so strength keeps dominating temperature.
+        # 🌡️ THREAD DEPTH is a CONTEXT line, not a scored term (WU-3): thread_state reads TODAY's
+        # thread, so "live" MEANS "they replied" — scoring it joins the reply outcome to itself
+        # (leakage), and there is no dated snapshot to read it as-of-send. `thread_depth_points`
+        # scores nothing; the state survives only as a note that changes the ASK.
         if closeness:
             _tstate, _tlast = closeness.thread_state(crow)
-            _tb = PERSON_THREAD_BONUS.get(_tstate, 0.0)
+            _tb, _ = thread_depth_points()
             if _tb:
-                pts = round(pts + _tb, 1)
+                pts = round(pts + _tb, 1)             # unreachable today; kept for a future dated snapshot
+            if _tstate in ("live", "cooling", "dead"):
                 reasons.append(f"thread {_tstate}"
-                               + (f" (last reply {_tlast}, +{_tb:g})" if _tlast else f" (+{_tb:g})"))
+                               + (f" (last reply {_tlast}, context only)" if _tlast
+                                  else " (context only)"))
         dist, yrs = "unknown", 0.0
         m_date = re.search(r"\((\d{4})-(\d{2})-(\d{2})\)", known_since)
         if cbonus:
             pts = round(pts + cbonus, 1)
             tier = (crow or {}).get("closeness", "?")
             reasons.append(f"{tier} (+{cbonus:g})")
+            # 📊 WU-3 LEARNED closeness-tier term, on top of the ratified flat bonus. Scores nothing
+            # when the band's cell is under n≥15 (then the ratified bonus stands alone). Orders only
+            # WITHIN a band — the sort leads on close_band.
+            _clp, _clr = closeness_tier_points(close_band, _cl_lifts)
+            if _clp:
+                pts = round(pts + _clp, 1)
+            if _clr:
+                reasons.append(_clr)
             dist = "stated"
             if m_date:
                 y, mo, dd = (int(x) for x in m_date.groups())
@@ -2766,6 +3120,14 @@ def rank_people(n=10):
 
         if cflag:
             reasons.append(f"⚠️ {cflag}")
+        # 👀 PROFILE VIEW (WU-4). A surface, not a scored term: printed where the human decides,
+        # never added to `pts`, until it clears its own n≥15 outcome join.
+        _vrow = _views.get(re.sub(r"[^a-z0-9]", "", name.lower())) if _views else None
+        _viewed = bool(_vrow)
+        if _vrow:
+            _vd = _vrow.get("view_date")
+            reasons.append(f"👀 viewed your profile{f' {_vd}' if _vd else ''} "
+                           f"(surface only, not scored)")
         if contact_signals:
             if _evtier == contact_signals.EV_NOT_FOUND:
                 reasons.append(f"⚪ searched and NOT placeable ({_evsrc}) — sorts below every "
@@ -2775,6 +3137,7 @@ def rank_people(n=10):
             elif _evtier == contact_signals.EV_RESOLVED:
                 reasons.append(f"🔬 employer resolved ({_evsrc})")
         out.append({"name": name, "title": title[:46], "company": company, "cat": cat,
+                    "viewed": _viewed,
                     # ⚠️ `evtier`, NOT `tier` — the `tier` key below is CLOSENESS. Reusing the
                     # name would silently overwrite it.
                     "evtier": _evtier,
@@ -2784,7 +3147,7 @@ def rank_people(n=10):
                     # defensible because closeness drives the ask SHAPE — so if the rung lives only
                     # in the reader's head that basis is unenforceable, and unenforceable is how a
                     # warm-shaped ask reaches a stranger at scale.
-                    "rung": rung, "band": band, "ask": ask,
+                    "rung": rung, "band": band, "ask": ask, "close_band": close_band,
                     "tier": (crow or {}).get("closeness"), "close_flag": cflag})
     # Sort: score desc → Ruling B tiebreak (exec/founder LAST among equals, never a deduction) →
     # longer-known first → name, so the order is TOTAL and two runs cannot disagree. The old key
@@ -2802,8 +3165,12 @@ def rank_people(n=10):
     #
     # A floor is not tunable and cannot be out-multiplied by any weight the learner later finds.
     # Points still order rows WITHIN a tier, so nothing else loses its meaning.
-    out.sort(key=lambda c: (-c["evtier"], -c["pts"], c["founder_last"], -c["yrs"],
-                            c["name"].lower()))
+    # 🪜 CLOSENESS LEADS, THEN EVIDENCE TIER (BUG-181 WU-2). The stated-closeness band sorts ABOVE
+    # evtier, so a warm contact outranks a never-spoke senior exec whatever their employer evidence.
+    # Within a band the evtier ruling still holds — resolved employers outrank unplaceable ones among
+    # closeness-equals. With no closeness store every band is 0, so the ordering is unchanged.
+    out.sort(key=lambda c: (-CLOSE_BAND_LEADS * c["close_band"], -c["evtier"], -c["pts"],
+                            c["founder_last"], -c["yrs"], c["name"].lower()))
     return _with_exposure_floor(out, n), skipped
 
 
@@ -3012,6 +3379,8 @@ def main():
     if "--recompute-weights" in sys.argv:
         recompute_weights()
         sys.exit(0)
+    if "--audit-signals" in sys.argv:
+        sys.exit(0 if audit_signals() == 0 else 2)
     if "--weights" in sys.argv:
         W = _stored_weights()
         if not W:
@@ -3126,6 +3495,9 @@ def main():
             print("    Ranked by likely-boss + relationship distance (scoring v2, 2026-07-26);")
             print("    deal-breakers only, culture waits. Tune the priors in kit_config.")
             print(_weights_age_line())
+            _vab = _profile_views_age_line(load_profile_views())
+            if _vab:
+                print(_vab)
             sys.exit(0)
         print("=" * 74)
         print("  TOP PEOPLE TO REACH — WHO CAN HELP FIRST (the boss-hunt method)")
@@ -3173,6 +3545,20 @@ def main():
         # it, and identical stated grounds means the ranker owns no feature that separates those
         # people at all — so the shared instrument fires on its own count, at its own threshold.
         print_tie_tripwires(ranked, "older connect date first")
+        # 👀 PROFILE VIEWS (WU-4). The store's age, then the viewers who are NOT in the connection
+        # pool — the natural on-ramp for a bridge sweep, since a stranger who viewed the profile is
+        # exactly the person no connections-based ranker can see.
+        _views_p = load_profile_views()
+        _va = _profile_views_age_line(_views_p)
+        if _va:
+            print(_va)
+            _pool_keys = {re.sub(r"[^a-z0-9]", "", nm.lower()) for nm, *_ in _people_rows()}
+            _strangers = [r for k, r in _views_p.items() if k not in _pool_keys]
+            for r in _strangers[:5]:
+                print(f"     · {r.get('name')} — {r.get('title') or '?'} @ "
+                      f"{r.get('company') or '?'} viewed you, NOT a connection")
+            if len(_strangers) > 5:
+                print(f"     · … and {len(_strangers) - 5} more viewer(s) who are not connections")
         # ⚖️ A board that is ALL reunions is honest but not a job search. A reunion IS a send and
         # counts as work, so this never suppresses the rows — it names the SHAPE of the day so the
         # day's picks are a choice rather than a surprise.

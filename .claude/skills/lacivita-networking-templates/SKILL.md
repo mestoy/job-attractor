@@ -140,6 +140,25 @@ And, DO NOT send them a connection request unless you have their permission."* A
 entry, not an outcome. The follow-through is a warm-rung message later, once the relationship
 exists.
 
+## The peer / common-interest note — rung 1-2, full body
+
+A rung 1-2 note to someone you are **already connected to**: celebrate their public work, one
+light give, one question. Unlike the invitation note above, this is not a connection request — it
+is a normal-length message to an existing 1st-degree connection, with a real signature and no
+character cap. It owes a genuine reason for reaching out and staying human; it does **not** owe
+the cold-boss ask (who you are / why you chose them / what you want / a one-of-a-kind anchor).
+That block is built for a work-for-you pitch, and a rung 1-2 note asks nothing of the kind.
+
+If your kit's outreach linter has a `peer` message type, run it explicitly:
+`python3 scripts/check_outreach.py <note.txt> --type peer`. Every other check (banned words, em
+dash, retired figures, signature block) still applies — only the ingredient/one-of-a-kind check is
+exempt for this type. A note run with no `--type` flag lints under the default first-contact
+profile and will false-fail on the missing pitch ingredients.
+
+⛔ **Not the same shape as the invitation note.** Invitation is a connection request to a stranger
+(character-capped, no signature, ask = acceptance). Peer is a full-length note or email to an
+**existing** connection.
+
 ## How to use this
 
 1. Classify the target's rung first: is this person a stranger, a warm 1st-degree connection, a

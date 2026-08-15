@@ -49,6 +49,12 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from kit_config import OWNER_FIRST
+except Exception:  # standalone fallback — placeholder, so confirm_sent still runs
+    OWNER_FIRST = "You"
+
 # ⚠️ HONOR `CLAUDE_PROJECT_DIR` (fixed 2026-08-05). This used to derive REPO from `__file__`
 # alone, so a test that redirected the JSONL half with `--path` still wrote the NARRATIVE half into
 # the real `outreach_log.md`. On a partner install that appended fake SENT rows to their live log,
@@ -470,6 +476,89 @@ def replace_staged_block(text, marker, entry):
     return text[:start] + entry + text[end:], True
 
 
+def confirm_sent(to, path=SENDLOG, company=None, subject=None, note=None):
+    """Flip the most recent unsent (drafted/staged) row for `to` to sent, and rewrite its STAGED
+    outreach_log block to SENT in place. The email counterpart to logging a hand-sent LinkedIn
+    message.
+
+    mail-draft.sh stages an email — an UNSENT_STATUSES row plus a `— STAGED (draft)` header
+    carrying the `<!-- STAGED · Co · Subj -->` marker — and nothing converts it once you actually
+    press send. This owns that conversion in ONE place, the same way mark_replied owns the reply
+    flip.
+
+    Returns (row, outreach_state): outreach_state is "updated" when the STAGED block was rewritten,
+    "not-staged" when the row flipped but no matching STAGED block was found. Returns (None, None)
+    when there is no unsent row for `to`.
+    """
+    rows = _load(path)
+    hits = [r for r in rows if same_recipient(r.get("to"), to)
+            and r.get("status") in UNSENT_STATUSES]
+    # When company/subject are given AND they disambiguate, flip the row the caller MEANT, not
+    # merely the newest draft. A recruiter with two open-role drafts is a routine case, and
+    # flipping the wrong one corrupts both stores.
+    if company or subject:
+        hits = [r for r in hits
+                if (not company or (r.get("company") or "") == company)
+                and (not subject or (r.get("subject") or "") == subject)]
+        # A company/subject that matches NO draft is a typo or drift, not a licence to flip the
+        # newest unrelated row: refuse rather than corrupt an unrelated send.
+    if not hits:
+        return None, None
+    row = max(hits, key=lambda r: (r.get("date", ""), r.get("ts", "")))
+    row["status"] = "sent"
+    row["sent_ts"] = datetime.datetime.now().astimezone().isoformat()
+    row["sent_confirmed_by"] = OWNER_FIRST.lower()
+    _write(rows, path)
+
+    # The SELECTED row's own company/subject drive the two markdown writers, never the caller's
+    # (possibly mistyped) values, so the join key can never point at a block that isn't this send's.
+    co = row.get("company") or company or ""
+    # Warm/referred sends leave `company` empty and mail-draft.sh keys the STAGED marker on the
+    # FIRST --targets entry. Reconstruct the same key, or the markdown blocks are never found and
+    # the three stores desync after a real send.
+    if not co:
+        # Match mail-draft.sh byte for byte: the literal FIRST comma field (blanks not skipped),
+        # trimmed of spaces only, with the "(unspecified)" sentinel when that field is empty.
+        _raw = row.get("targets") or ""
+        if _raw:
+            _first = _raw.split(",", 1)[0].strip(" ")
+            co = _first or "(unspecified)"
+    subj = row.get("subject") or subject or ""
+    # THE THIRD WRITER: flip the terse correspondence-log STAGED line too, the same parity the
+    # normal send path keeps, so all three stores agree rather than one still saying "not sent".
+    if co and os.path.exists(CORRESPONDENCE_LOG):
+        try:
+            with open(CORRESPONDENCE_LOG, encoding="utf-8") as fh:
+                ctext = fh.read()
+            new_ctext, n = advance_correspondence_line(ctext, co, to, subj)
+            if n:
+                with open(CORRESPONDENCE_LOG, "w", encoding="utf-8") as fh:
+                    fh.write(new_ctext)
+        except OSError:
+            pass
+
+    if not (co and subj) or not os.path.exists(OUTREACH_LOG):
+        return row, "not-staged"
+    with open(OUTREACH_LOG, encoding="utf-8") as fh:
+        text = fh.read()
+    channel = row.get("channel", "email")
+    rung = row.get("rung", "")
+    who = row.get("to_name") or to
+    bits = [f"## {row['date']} · {co} · {who} — ✅ SENT [{channel} · rung {rung}]",
+            f"**Status:** ✅ SENT {row['date']} on {channel}. Confirmed sent.",
+            f"**Subject:** {subj}",
+            f"**Rung:** {rung} (kind:{row.get('kind', '')}) | channel:{channel} | status:sent"]
+    if note:
+        bits.append(f"**Note:** {note}")
+    entry = "\n".join(bits) + "\n\n"
+    new_text, replaced = replace_staged_block(text, staged_marker(co, subj), entry)
+    if replaced:
+        with open(OUTREACH_LOG, "w", encoding="utf-8") as fh:
+            fh.write(new_text)
+        return row, "updated"
+    return row, "not-staged"
+
+
 def _append_narrative(row, a, rung):
     """Append a `## <date>` entry to outreach_log.md so BOTH daily counters move on one send.
 
@@ -565,6 +654,8 @@ def main(argv=None):
     ap.add_argument("--followup-due", default=None, help="YYYY-MM-DD; overrides the rung default")
     ap.add_argument("--no-followup", action="store_true", help="deliberately arm nothing")
     ap.add_argument("--mark-replied", action="store_true", help="flip the latest row for --to to replied")
+    ap.add_argument("--confirm-sent", action="store_true",
+                    help="flip a staged/drafted EMAIL row for --to to sent and rewrite its STAGED outreach_log header")
     ap.add_argument("--stage", choices=STAGES,
                     help="advance the latest row for --to to a funnel stage (monotonic; "
                          "conversation != interview)")
@@ -600,6 +691,23 @@ def main(argv=None):
         print("\n  ⚖️ conversation is NOT interview. An intro call, a coffee chat and an")
         print("     informational exchange are `conversation`. `interview` means an employer is")
         print("     evaluating him for a NAMED seat. Summing the two is the error of 2026-07-24.")
+        return 0
+    # Confirm a hand-sent EMAIL. mail-draft.sh stages the row and header; this flips the row to
+    # sent and rewrites the STAGED header in place, so both daily counters agree.
+    if a.confirm_sent:
+        row, ostate = confirm_sent(a.to, a.path, company=a.company, subject=a.subject, note=a.note)
+        if not row:
+            print(f"🔴 no drafted/staged row found for {a.to} to confirm", file=sys.stderr)
+            for cand in _near_misses(a.to, _load(a.path)):
+                print(f"   ↳ did you mean {cand['to']!r}? "
+                      f"({cand.get('date')} · rung={cand.get('rung')})", file=sys.stderr)
+            return 1
+        print(f"✅ confirmed sent: {row.get('date')} · rung={row.get('rung')} · {a.to}")
+        if ostate == "updated":
+            print("   📝 outreach_log STAGED header rewritten to SENT (both counters agree)")
+        else:
+            print("   ⚠️ send-log row flipped; no matching STAGED outreach_log block "
+                  "(company/subject differ from draft time)")
         return 0
     if a.stage:
         row, err = set_stage(a.to, a.stage, a.path, note=a.stage_note)

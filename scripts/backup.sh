@@ -39,10 +39,26 @@ if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
 else
   echo "[ok] no tracked changes since last backup."
 fi
-if git push -q 2>/dev/null; then
-  echo "[ok] pushed to your remote."
+# Push to a WRITABLE remote. A bare `git push` aims at the branch's UPSTREAM, and in the kit's
+# two-remote layout (origin = your writable fork, a shared read-only upstream you cloned from) `main`
+# tracks the READ-ONLY upstream after a sync — so a bare push fails EVERY time, and the old message
+# blamed "read-only clone or offline" when your own fork was one correct push away. Resolve the
+# remote explicitly: prefer `origin`, fall back to the branch's tracked upstream for single-remote
+# clones, and report WHICH remote failed and why instead of guessing a single cause.
+_BR="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+if git remote get-url origin >/dev/null 2>&1; then
+  _PUSH_REMOTE="origin"
 else
-  echo "[i] no push (read-only clone or offline) — your local documents/ snapshot above is your backup."
+  _PUSH_REMOTE="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null | cut -d/ -f1)"
+fi
+if [ -z "$_PUSH_REMOTE" ] || [ -z "$_BR" ]; then
+  echo "[i] no writable remote configured — your local documents/ snapshot above is your backup."
+elif _perr="$(git push -q "$_PUSH_REMOTE" "$_BR" 2>&1)"; then
+  echo "[ok] pushed $_BR to '$_PUSH_REMOTE'."
+else
+  echo "[!] push of $_BR to '$_PUSH_REMOTE' FAILED. Your local documents/ snapshot above still" >&2
+  echo "    protects you, but tracked changes are NOT on the remote. Reason:" >&2
+  printf '%s\n' "$_perr" | sed 's/^/    /' | head -3 >&2
 fi
 
 # 📝 GIT NOTES DO NOT TRAVEL WITH A NORMAL PUSH, and that silence is the whole problem.
@@ -54,10 +70,10 @@ fi
 # correction.
 # ⚖️ Its own line, and NEVER fatal: most repos have no notes, and one that does not must not fail a
 # backup over it. The failure branch is LOUD on purpose, because silence is the failure mode.
-if git rev-parse --quiet --verify refs/notes/commits >/dev/null 2>&1; then
-  if git push -q origin refs/notes/commits 2>/dev/null; then
-    echo "[ok] pushed git notes (corrections attached to commits)."
+if [ -n "$_PUSH_REMOTE" ] && git rev-parse --quiet --verify refs/notes/commits >/dev/null 2>&1; then
+  if git push -q "$_PUSH_REMOTE" refs/notes/commits 2>/dev/null; then
+    echo "[ok] pushed git notes (corrections attached to commits) to '$_PUSH_REMOTE'."
   else
-    echo "[!] git notes push failed. Any correction you attached is still LOCAL ONLY."
+    echo "[!] git notes push to '$_PUSH_REMOTE' failed. Any correction you attached is still LOCAL ONLY."
   fi
 fi

@@ -24,6 +24,7 @@ absent falls back to "unknown" and keeps the band.
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import date
 
@@ -33,6 +34,84 @@ import contact_signals as cs   # noqa: E402
 REPO = cs.REPO
 CACHE = cs.EMPLOYER_CACHE
 VALID = cs._VALID_SEGMENTS
+
+
+# #33: a source must be a CITATION, not a bare assertion. cmd_ingest used to accept any non-empty
+# source, so unsourced rows like "web search" or "well-known company" sat at the top evidence tier
+# next to a row citing the company's own site, letting an unsourced guess put an employer on the
+# board. A citation points somewhere retrievable that is not a bare web domain: a recorded ruling
+# (wikilink), an ISO-ish date (a dated ruling or filing), or a named authoritative source.
+_NOT_FOUND_TOKENS = {"not-found", "not found", "notfound"}
+_URL_RE = re.compile(r"https?://|\b[a-z0-9][a-z0-9-]*\.[a-z]{2,}\b", re.I)
+# A hedge is the tell that the source is a belief, not a citation. Checked BEFORE the URL match so a
+# guess cannot smuggle itself past the gate by name-dropping any word.tld token
+# ("google.com search results say...", "I think acme.com might be..., not confirmed").
+_HEDGE_RE = re.compile(
+    r"\b(web|internet|online|a\s+quick)\s+search\b|\b(google|bing|duckduckgo|yahoo)\b"
+    r"|\bwell[-\s]?known\b|\b(general|common|public|widely|prior|background|domain|my)\s+knowledge\b"
+    r"|\bcommon\s+sense\b|\beveryone\s+knows\b|\bbased\s+on\s+the\s+name\b|\bmy\s+training\b"
+    r"|\bi\s+(think|believe|assume|guess|reckon)\b|\bassum(e|es|ed|ing|ption)\b"
+    r"|\bpresum(e|es|ed|ing|ption|ably)\b|\bguess(ed|ing)?\b|\b(not|un)[\s-]?confirmed\b"
+    r"|\bunverified\b|\bnot\s+sure\b|\bmaybe\b|\bmight\s+be\b|\bmay\s+be\b|\blikely\b|\bprobably\b"
+    r"|\bappears?\s+to\s+be\b|\bmade\s+up\b|\bfabricat|\binvent(ed|ing)?\b|\bmaking\s+it\s+up\b",
+    re.I,
+)
+# The source IS a domain (optionally labelled or with a path), as opposed to prose that merely names
+# one. Anchored end to end so "google.com search results say..." (trailing prose) does not match.
+_BARE_DOMAIN_RE = re.compile(
+    r"^\s*(source:\s*|site:\s*|via\s+|from\s+|see\s+|at\s+)?(https?://)?(www\.)?"
+    r"[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)*\.[a-z]{2,}(/\S*)?\s*$",
+    re.I,
+)
+# Locator tokens (a URL, a wikilink, or a domain), removed before the hedge check so a hedge word
+# INSIDE a locator ("https://guess.com") is ignored while a hedge floating in the PROSE around a
+# locator ("I think it is https://sec.gov/x, not confirmed") still rejects.
+_LOCATOR_STRIP_RE = re.compile(
+    r"https?://\S+|\[\[[^\]]*\]\]|\b[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)*\.[a-z]{2,}(/\S*)?",
+    re.I,
+)
+_CITATION_RE = re.compile(
+    r"\b(19|20)\d{2}[-/]\d{1,2}\b"                        # an ISO-ish date: 2026-08-12
+    r"|\b(10[- ]?[kq]|8[- ]?k|s[- ]?1|sec|edgar|prospectus|annual report|press release|"
+    r"newsroom|filing|crunchbase|pitchbook|linkedin|glassdoor|wikipedia|careers page)\b",
+    re.I,
+)
+
+
+def _source_is_cited(src):
+    """True only when `src` POSITIVELY looks like a citation: an explicit not-found, a URL or bare
+    domain, or a named document/ruling (a wikilink, a dated ruling/filing, or an authoritative
+    source name).
+
+    Default is REJECT, matching this file's own rule that a wrong band is worse than an absent one:
+    an absent row falls back to the name read, while a bare assertion cached at the top tier corrupts
+    the board. #33 showed that blocklisting assertion phrases is defeated by any lead-in or article
+    ("Based on web search", "a well-known company"), so this requires a locator rather than
+    enumerating the ways a guess can be phrased.
+    """
+    s = (src or "").strip()
+    if not s:
+        return False
+    low = s.lower()
+    if low in _NOT_FOUND_TOKENS:
+        return True
+    # Hedge is judged on the prose with locator tokens removed, so a hedge floating around a locator
+    # rejects while a hedge word inside a hostname does not.
+    if _HEDGE_RE.search(_LOCATOR_STRIP_RE.sub(" ", low)):
+        return False
+    # A locator: a NON-EMPTY recorded-ruling wikilink whose content is not itself a bare hedge word
+    # ("[[maybe]]" is a placeholder, not a ruling), a URL, or a source that IS a bare domain.
+    _wl = re.search(r"\[\[([^\]]+)\]\]", s)
+    if _wl and not _HEDGE_RE.search(_wl.group(1).lower()):
+        return True
+    if re.search(r"https?://\S", low):
+        return True
+    if _BARE_DOMAIN_RE.match(s):
+        return True
+    # A named authoritative source or a dated ruling, with no hedge in the prose.
+    if _CITATION_RE.search(s):
+        return True
+    return False
 
 
 def pool_employers():
@@ -106,6 +185,9 @@ def cmd_ingest(args):
         if not src:
             bad.append((emp, "no source — an unsourced band is a guess, "
                             "and an unsourced not-found is an untraceable dead end")); continue
+        if not _source_is_cited(src):
+            bad.append((emp, f"source {src!r} is not a citation — a bare assertion is not a "
+                            "source; cite a URL, a named document, or not-found")); continue
         good.append({"employer": emp, "segment": seg, "industry": ind, "source": src,
                      "confidence": r.get("confidence") or "stated",
                      "note": r.get("note") or "", "date": str(date.today())})

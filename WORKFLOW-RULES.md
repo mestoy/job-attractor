@@ -32,6 +32,10 @@ The pipeline screens every company against this, in order. Fill in your own rule
 - **Human-in-the-loop at every decision point.** Any choice that shapes what goes out, which boss, which accomplishment to praise, which phrasing, which role, send vs. drop, is yours. The assistant researches and narrows to a small set of options, then presents them for your pick; it never decides unilaterally and never fires an irreversible step (mailto/send) before you choose. Present via a multiple-choice prompt or the review console so you decide without scrolling.
 - **Boss-praise is a two-stage pick:** first choose 1 of 3 researched, interest-aligned accomplishments; then choose 1 of 3 phrasings in your voice. Only then is the draft finalized.
 - **Ready-to-send packages are the FIRST decision option.** Whenever one or more outreach packages are ready to send (person vetted + email pre-filled + résumé tailored), present SEND as the first choice/button, ahead of new scorecards, queuing, or any other action. Finishing a ready package outranks preparing a new one.
+- **Picker design (house rule, 2026-08-14, kit #6).** Three rules for any decision or NEXT-STEP picker:
+  1. **NEVER use the `preview` field on a decision picker.** A preview flips the whole component into the narrow side-by-side layout (a thin label list beside a preview panel), which makes the option ROWS smaller, the opposite of readable. Keep rows tall and stacked by putting the rationale in `description` instead.
+  2. **Aim each `description` at roughly one to two lines:** long enough to fill a readable row, short enough not to wrap forever.
+  3. **Option copy NEVER presents a finished draft to accept or edit** (the retired draft-for-review doctrine). Options offer ANGLES or BEATS to co-construct, because co-construction is canonical, so the picker narrows a choice rather than handing over a communication. Reserve `preview` only for a genuine visual comparison (a mockup, code, a diagram), never for a communication draft.
 
 ---
 

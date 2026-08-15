@@ -300,7 +300,15 @@ def contacted_companies():
     return names
 
 
-def classify(pos):
+# 🧩 THE FOURTH BUCKET (BUG-181 WU-6a). Seniority words `SENIOR` (executive titles only) does not
+# match: Senior, Staff, Lead, Manager, Executive, Group — carried by non-exec ICs/managers who refer,
+# near-never hire. ⛔ They must NOT be folded into "senior": that bucket feeds a LEARNED category
+# weight, so admitting individual contributors into it would corrupt it. A FOURTH bucket admits them
+# at UNCHANGED treatment (base = "other"'s value), widening admission without inventing a weight.
+SENIOR_IC = re.compile(r"\b(senior|staff|lead|manager|executive|group)\b", re.I)
+
+
+def classify(pos, close_admit=False):
     pos = pos or ""
     if is_pm(pos):
         return "product"
@@ -308,6 +316,20 @@ def classify(pos):
         return "senior"
     if CONNECTOR.search(pos):
         return "connector"
+    # 🧩 THE FOURTH BUCKET (BUG-181 WU-6a). Runs LAST, so it only catches a seniority word carried by
+    # a title none of the sharper reads matched. Gets its own "Senior ICs" table and `senior-ic`
+    # category (base = "other"'s value); rank_criteria._people_rows() reads that section.
+    if SENIOR_IC.search(pos):
+        return "senior-ic"
+    # 🧩 BUG-181 LEVER 2 (2026-08-13). Runs DEAD LAST, after every title read has failed. A contact
+    # you STATED a strong tier for (worked-together / know-well / personal-friend) is admitted even
+    # when their current title carries no signal — a relationship FACT beats a title regex.
+    # `close_admit` is computed by the caller from `closeness.admits_on_closeness()`; an inferred
+    # tier or an absent store (no answers recorded yet) yields False, so title-only behavior is
+    # unchanged. Admitted rows land in `senior-ic`, whose base is "other"'s value: WIDER ADMISSION,
+    # NOT a new weight.
+    if close_admit:
+        return "senior-ic"
     return "other"
 
 
@@ -453,11 +475,29 @@ def main():
               "The valuable bridges are the departed teammates, and only you can name them.")
 
     blocked, contacted = blocked_companies(), contacted_companies()
-    buckets = {"product": [], "senior": [], "connector": [], "other": []}
-    n_email = 0
+    # 🧩 BUG-181 LEVER 2: load the closeness store once so a STATED strong tier can admit a contact
+    # whose title carries no signal. Absent store (no answers recorded yet) => close_store is None
+    # => admits_on_closeness returns False for everyone => classify keeps its title-only path.
+    close_store = None
+    try:
+        import closeness
+        close_store = closeness.load()
+    except Exception:
+        closeness = None
+    buckets = {"product": [], "senior": [], "connector": [], "senior-ic": [], "other": []}
+    n_email = n_close_admit = 0
     for r in rows:
         co = (r.get("Company") or "").strip()
-        kind = classify(r.get("Position"))
+        close_admit = False
+        if close_store:
+            try:
+                name = f"{r.get('First Name','')} {r.get('Last Name','')}"
+                close_admit = closeness.admits_on_closeness(closeness.tier_for(name, close_store))
+            except Exception:
+                close_admit = False
+        kind = classify(r.get("Position"), close_admit)
+        if close_admit and classify(r.get("Position")) == "other":
+            n_close_admit += 1
         # Accept EITHER column. The raw LinkedIn export carries `Email Address`; the PII-stripped
         # copy in documents/linkedin-exports/ carries a `Has Email` boolean instead, because third
         # party addresses must never be committed (scripts/ingest_export.py). Only the boolean was
@@ -482,7 +522,7 @@ def main():
                               f"{badge} {dlabel}".strip()))
 
     print(f"contacts with an email exposed: {n_email}")
-    for k in ("product", "senior", "connector", "other"):
+    for k in ("product", "senior", "connector", "senior-ic", "other"):
         print(f"  {k:10} {len(buckets[k])}")
     # 📊 THE CONSEQUENCE OF "other", SAID OUT LOUD (kit issue #27, 2026-08-11). Only the product,
     # senior and connector tables are written below, and rank_criteria._people_rows() reads exactly
@@ -491,9 +531,11 @@ def main():
     # correct ("PSO Senior Consultant" is neither a leadership title nor a connector title), which
     # is the reason to DISCLOSE the number rather than loosen the categories: the operator can then
     # question a pool whose denominator he can see.
-    _pool_n = sum(len(buckets[k]) for k in ("product", "senior", "connector"))
+    _pool_n = sum(len(buckets[k]) for k in ("product", "senior", "connector", "senior-ic"))
     print(f"  ranker pool: {_pool_n} of {len(rows)} contacts "
           f"({len(buckets['other'])} uncategorised, not rankable)")
+    if n_close_admit:
+        print(f"  🧩 admitted by STATED closeness (Lever 2, title had no signal): {n_close_admit}")
 
     excl_note = ""
     if EXCLUSION_CONFIGURED:
@@ -515,7 +557,7 @@ def main():
             # 📊 kit issue #27. The three tables below ARE the ranker's pool; everyone else is only
             # in the full roster at the bottom. Printing the denominator here is the difference
             # between a filter and a thin network.
-            f"> 📊 **Ranker pool: {_pool_n} of {len(rows)} contacts.** The three tables below are the "
+            f"> 📊 **Ranker pool: {_pool_n} of {len(rows)} contacts.** The four tables below are the "
             f"only sections `rank_criteria.rank_people()` reads. The other "
             f"{len(buckets['other'])} carry a title that is neither a leadership title nor a "
             f"connector title, so they are **not rankable**. They appear ONLY in the full "
@@ -532,7 +574,10 @@ def main():
             ""]
     for k, title in (("product", "Product people — potential boss or peer"),
                      ("senior", "Senior decision-makers — can hire or refer"),
-                     ("connector", "Connectors — recruiters, talent, people-ops")):
+                     ("connector", "Connectors — recruiters, talent, people-ops"),
+                     # 🧩 BUG-181 WU-6a: the fourth pool section. The header keyword "Senior ICs" is
+                     # what rank_criteria._people_rows() matches, so keep it stable.
+                     ("senior-ic", "Senior ICs & managers — peers who refer, rarely hire")):
         b = sorted(buckets[k], key=lambda x: -x[0])
         out += [f"## {title} ({len(b)})", "",
                 PEOPLE_TABLE_HEADER, PEOPLE_TABLE_RULE]

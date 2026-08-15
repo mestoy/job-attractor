@@ -339,6 +339,55 @@ LATEX_DROP_CMDS = (
 _LATEX_INNER = r"(?:\[[^\]]*\])*(?:\{[^{}]*\})+"
 
 
+def _blank_marker_blocks(text, marker_pattern):
+    """Within each CONTIGUOUS block of non-blank lines, blank from the FIRST marker-matching line
+    FORWARD, keeping every line ABOVE it. Blank lines bound the blocks, so this cannot spread into
+    an unrelated paragraph.
+
+    ⚠️ SOURCE SIDE ONLY. This runs via strip_latex -> source_signature, on the .tex. The PDF side
+    (verify_resume.render_signature) does NOT call this; it blanks contact lines line-by-line and
+    collapses identifiers via _IDENT_RE. #41's PDF-side wrapped-tail survival is handled there,
+    independently of this function.
+
+    Why forward-from-the-marker and not the whole block (kit #51 REGRESSION, fixed the #41 fix):
+    blanking the WHOLE block was too broad. A résumé header is three ADJACENT lines (name, then
+    tagline, then contact) with no blank between them, so a whole-block blank ate the name and the
+    tagline on the SOURCE side while the PDF side (line-by-line) kept them. The two signatures then
+    differed by exactly the header, build_drift scored ~0.99 against the 0.999 threshold, and every
+    résumé failed the NEVER_WAIVABLE STALE BUILD check and could not be exported. Keeping the lines
+    ABOVE the first marker preserves the name and tagline, which sit above the contact line, so the
+    two signatures agree again (build_drift 1.000 on a conventional header).
+
+    ⚖️ Two template conventions are load-bearing for correctness, not cosmetic, and real templates
+    satisfy both: (1) the contact line sits BELOW the name/tagline (a contact-above-name layout would
+    blank the name); (2) the header is blank-line-separated from the body, because this blanks ALL
+    forward lines in the block, so any non-marker content sharing the contact's block with no blank
+    separator is dropped on the source side while the PDF keeps it.
+    """
+    lines = text.split("\n")
+    marker_re = re.compile(marker_pattern)
+    blocks, current = [], []
+    for ln in lines:
+        if ln.strip() == "":
+            if current:
+                blocks.append(current)
+                current = []
+            blocks.append([ln])
+        else:
+            current.append(ln)
+    if current:
+        blocks.append(current)
+    out = []
+    for block in blocks:
+        first = next((i for i, ln in enumerate(block) if marker_re.search(ln)), None)
+        if first is None:
+            out.extend(block)
+        else:
+            out.extend(block[:first])              # keep name / tagline above the contact line
+            out.extend("" for _ in block[first:])   # blank the contact line + its forward-wrapped tail
+    return "\n".join(out)
+
+
 def strip_latex(text):
     """Reduce a .tex source to the words a reader sees, so the prose rules can run on it.
 
@@ -362,12 +411,22 @@ def strip_latex(text):
     text = re.sub(r"(?<!\\)%.*", "", text)
     # 3. \href{target}{label} keeps the label only
     text = re.sub(r"\\href\s*\{[^{}]*\}\s*\{([^{}]*)\}", r"\1", text)
-    # 4. the contact/header line is identifiers, not prose
+    # 4. the contact/header line is identifiers, not prose.
+    # ⚠️ This used to blank LINE BY LINE. In the .tex source the whole header (all its \href's,
+    # now reduced to label text by step 3) is ONE physical line, so a per-line blank wipes it
+    # whole. But pdftotext -layout WRAPS that same header across several physical PDF lines with
+    # no blank line between them, and a per-line blank only wipes the wrapped line that still
+    # literally contains the email/phone/linkedin marker — any trailing \href label (e.g. the
+    # website or github label) that wrapped onto its own line carries none of those markers and
+    # survives unblanked on the PDF side while the source side has nothing there, a text-wrap
+    # artifact a stale-build check can misread as real drift. Fixed by blanking the whole
+    # CONTIGUOUS block of non-blank lines (the paragraph) once any line in it matches, not just
+    # the one matching line — wrap-insensitive on both sides, blank-line-bounded, so it cannot
+    # reach into an unrelated paragraph.
     _contact = "|".join(re.escape(s) for s in (
         cfg.OWNER_EMAIL, cfg.OWNER_PHONE, "linkedin.com/in/") if s)
-    text = "\n".join(
-        "" if (_contact and re.search(_contact, ln)) else ln
-        for ln in text.split("\n"))
+    if _contact:
+        text = _blank_marker_blocks(text, _contact)
     text = re.sub(r"https?://\S+", " ", text)
     text = re.sub(r"\b[\w.-]+@[\w.-]+\.\w+\b", " ", text)
     # 5. markup-only commands go whole; everything else surrenders its braces and keeps the text

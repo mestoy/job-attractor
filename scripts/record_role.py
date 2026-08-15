@@ -5,20 +5,20 @@ WHY THIS EXISTS (2026-08-04). `Connections.csv` records a contact's company and 
 when the connection was MADE, and `parse_network.py` copies that into `warm-network.md`, where the
 ranker treats it as current. Nothing re-verifies it, ever.
 
-The cost, measured: **a contact ranked #1** on a stored title. That role
-ran **Jan 2019 to Feb 2020**. It had ended SIX YEARS before the ranker offered him as a warm target,
-and a brief was written describing him in the present tense off it.
+The cost, measured: a contact **ranked #1** as "Director, Services @ SomeCo", off a title that had
+ended **years earlier**. The role was long over before the ranker offered them as a warm target,
+and a brief was written describing them in the present tense off it.
 
 ⛔ WRITE HERE, NEVER INTO `warm-network.md`. That file is REGENERATED from the export on every
 `parse_network.py` run, so a correction made there is erased the next time anyone parses. This store
 is append-only, dated, sourced, and survives.
 
-  record_role.py --name "Dana Reyes" --title "Associate Director, Technology" \
-                 --company "Northwind Health" --source-type company-page \
-                 --source "https://example.com/leadership, retrieved 2026-08-11"
+  record_role.py --name "Jane Doe" --title "Associate Director, Technology" \
+                 --company "SomeCo" --source-type company-page \
+                 --source "https://someco.example.com/leadership, retrieved 2026-08-11"
 
   record_role.py --name "Jane Doe" --left --source "linkedin.com/in/..., experience section" \
-                 --note "that role ran Jan 2019 to Feb 2020"
+                 --note "prior role ran Jan 2019 to Feb 2020"
 
 ⚖️ A SOURCE IS MANDATORY, for the same reason the employer cache demands one: an unsourced
 verification is a memory, and a memory is what produced the defect.
@@ -82,6 +82,13 @@ def main():
         return 2
 
     stype = (a.source_type or "").strip()
+    # ⛔ THE SOURCE TYPE IS NOT THE CALLER'S TO ASSERT WHEN THE URL SAYS OTHERWISE (2026-08-11).
+    # Three wrong boss names landed in one evening, all from aggregators, all stated confidently,
+    # and one was a step away from a real message. See `boss_registry.AGGREGATOR_DOMAINS`.
+    # This can only ever make a claim WEAKER, never stronger, and it says so out loud.
+    stype, _demoted = br.demote_if_aggregator(a.source, stype)
+    if _demoted:
+        print(f"⚠️  {_demoted}", file=sys.stderr)
     if stype and stype not in SOURCE_TYPES:
         print(f"⛔ BLOCKED: --source-type {stype!r} is not one of: {', '.join(SOURCE_TYPES)}",
               file=sys.stderr)

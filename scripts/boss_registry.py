@@ -4,13 +4,12 @@
 WHY THIS EXISTS. Three failures, all the same shape: research happened, nothing recorded it, and the
 gap was invisible because no gate ever asked.
 
-  1. A person judged the likelier direct boss, with that judgement living nowhere. Weighing a person
-     now produces a row AT THE MOMENT OF WEIGHING (the capture-as-you-go pattern).
-  2. Send-log rows carrying no recipient identity at all, so the sends cannot be attributed to a
-     person and the research behind them is unrecoverable. `--boss` becomes required on cold-boss
-     sends, in BOTH writers.
-  3. A finalist recorded on press-release evidence, which turned out to be wrong. A `finalist`
-     verdict is REFUSED unless verification is `linkedin-live` or `company-page`.
+  1. The Nucleus VP was judged the likelier direct boss and that judgement lives nowhere. Weighing a
+     person now produces a row AT THE MOMENT OF WEIGHING (the capture-as-you-go pattern).
+  2. 96 send-log rows carry no recipient identity at all, so 96 cold-boss sends cannot be attributed
+     to a person. `--boss` becomes required on cold-boss sends, in BOTH writers.
+  3. The Pindrop incident: a finalist recorded on press-release evidence. A `finalist` verdict is
+     REFUSED unless verification is `linkedin-live` or `company-page`.
 
 ⛔ THIS IS NOT AN AUTHORIZATION LEDGER, AND MUST NOT BE HARDENED INTO ONE. The rows are deliberately
 unsigned. `documents/decision-ledger.jsonl` is MAC-signed because it records THE OWNER'S CONSENT, which
@@ -22,12 +21,12 @@ Storage: `documents/state/boss.jsonl` via scripts/state.py's fifth kind. Append-
 are NEW rows, and the latest `ts` per key wins, the same read rule the rest of the store uses.
 
 Usage:
-    boss_registry.py add --person "Dana Fake" --company "Acme" \
+    boss_registry.py add --person "Jake Cornelius" --company "Nucleus Security" \
         --verdict candidate --boss-read likely-boss --verified linkedin-live \
-        --role-status current --linkedin danafake --title "Principal PM, Core Platform"
-    boss_registry.py add ... --verdict finalist --why "owns the half of the product you'd hire into"
-    boss_registry.py show --company "Acme"
-    boss_registry.py check --company "Acme" --person "Dana Fake"
+        --role-status current --linkedin jakecornelius --title "Principal PM, Core Platform"
+    boss_registry.py add ... --verdict finalist --why "owns the half of the product he'd hire into"
+    boss_registry.py show --company "Nucleus Security"
+    boss_registry.py check --company "Nucleus Security" --person "Jake Cornelius"
 """
 import argparse
 import datetime
@@ -45,19 +44,55 @@ import state  # noqa: E402  (path must be set first)
 VERDICTS = ("candidate", "finalist", "ruled-out", "contacted")
 BOSS_READS = ("direct-boss", "likely-boss", "founder-fallback", "hiring-authority", "not-the-boss")
 VERIFIED = ("linkedin-live", "company-page", "press-release", "secondhand", "unverified")
+
+# ⛔ AN AGGREGATOR IS ALWAYS `secondhand`, WHATEVER THE CALLER CLAIMS (added 2026-08-11).
+# 📊 THREE WRONG BOSS NAMES IN ONE EVENING, all from aggregators, all confidently stated:
+#   · One company     two aggregators gave two different names for the same role, and the
+#                     employer's OWN leadership page named a THIRD. One wrong name was a step
+#                     from entering a real message. Two other companies did the same thing that night.
+# ⚖️ These sites are not lying, they are STALE and unaccountable: they scrape, they keep a departed
+# exec for months, and nobody corrects them. That makes them fine for FINDING a name to check and
+# unfit for BELIEVING one. The whole point of a rung 3-4 note is that it names the right human.
+# 🎯 So the source TYPE is not the caller's to assert when the URL says otherwise. A name from one
+# of these domains is `secondhand` by construction, and a `secondhand` boss must be confirmed
+# against the employer's own materials before it reaches a message.
+AGGREGATOR_DOMAINS = ("theorg.com", "zoominfo.com", "rocketreach.co", "apollo.io", "signalhire.com",
+                      "adapt.io", "lusha.com", "crunchbase.com", "pitchbook.com", "tracxn.com",
+                      "leadiq.com", "contactout.com", "seamless.ai", "clearbit.com", "owler.com",
+                      "datanyze.com", "equilar.com", "people.equilar.com", "wiza.co")
+
+
+def is_aggregator(source):
+    """True when a source string points at a scraped directory rather than the employer itself."""
+    low = (source or "").lower()
+    return any(d in low for d in AGGREGATOR_DOMAINS)
+
+
+def demote_if_aggregator(source, source_type):
+    """(source_type, note_or_None). Forces `secondhand` when the source is an aggregator.
+
+    Returns the type unchanged when the source is the employer's own site, a press release, or a
+    live profile read. Never UPGRADES anything: this can only ever make a claim weaker.
+    """
+    if source_type in ("secondhand", "unverified") or not is_aggregator(source):
+        return source_type, None
+    return "secondhand", (f"source-type demoted to secondhand: {source!r} is an aggregator, which "
+                          f"is fine for FINDING a name and unfit for believing one. Confirm against "
+                          f"the employer's own materials before this name reaches a message.")
 ROLE_STATUS = ("current", "departed", "unverified")
 
 # A verdict that carries weight must say WHY, in the person's own record, at the time it was made.
 WHY_REQUIRED = ("finalist", "ruled-out")
 
-# THE FIRSTHAND-ONLY RULE. A finalist is a claim about a real person's real job. Press coverage and
+# THE PINDROP RULE. A finalist is a claim about a real person's real job. Press coverage and
 # aggregators are secondhand and have been wrong here before, so they cannot mint one.
 FINALIST_VERIFICATION = ("linkedin-live", "company-page")
 
 # Verdicts that do NOT satisfy the send gate: ruled-out means the research concluded "not this one".
 GATE_OK_VERDICTS = ("candidate", "finalist", "contacted")
 
-# Freshness window, in days. Tune it to how fast your targets change jobs.
+# ⚠️ PROPOSAL, NOT A RULING (2026-07-27). A proposed number, never set by the owner. The block message
+# prints this provenance so nobody mistakes it for a decision he made.
 BOSS_FRESH_DAYS = 30
 
 # Any RETROSPECTIVE sweep (checking historical send-log rows against this registry) must require
@@ -130,28 +165,37 @@ def cmd_add(a):
         return 4
 
     if a.verdict == "finalist" and a.verified not in FINALIST_VERIFICATION:
-        print(f"⛔ BLOCKED: a finalist cannot rest on --verified {a.verified!r} (secondhand evidence).",
+        print(f"⛔ BLOCKED: a finalist cannot rest on --verified {a.verified!r} (the Pindrop rule).",
               file=sys.stderr)
         print(f"   Finalists require one of: {', '.join(FINALIST_VERIFICATION)}.", file=sys.stderr)
         print("   Press coverage and aggregators are secondhand and have been wrong here before.", file=sys.stderr)
         print("   Record this person as 'candidate' instead, then verify and re-add.", file=sys.stderr)
         return 4
 
-    raw_key = a.linkedin or f"{a.company}/{a.person}"
-    # ── PROVENANCE, IN THE VOCABULARY `state.py` RECOGNIZES ──────────────────────────────────────
+    # ⛔ KEY ON THE PERSON, because that is what the READER looks up (2026-07-30).
+    # This used to be `a.linkedin or f"{a.company}/{a.person}"`, while `check()` has always used
+    # `state.key_for("boss", a.person)`. The two disagreed, so a row written with a LinkedIn slug
+    # that was not exactly the person's name landed where the reader would never look: 14 of 15
+    # recorded bosses were UNFINDABLE, and the cold-boss send gate blocked people whose research
+    # had been done and recorded. It only ever appeared to work when a slug happened to equal the
+    # name. Same defect class as the known_companies gap the same day: the producer and the
+    # consumer derived the key differently, and only the producer was ever tested.
+    # The LinkedIn URL is still recorded in its own `linkedin` field; it is identity, not the key.
+    raw_key = a.person
+    # ── PROVENANCE, IN THE VOCABULARY `state.py` ACTUALLY RECOGNIZES (BUG-023, fixed 2026-08-08) ──
     #
-    # 🔴 THE DEFECT THIS CLOSES. This writer emitted `ts` and `date` and stopped there. `state.py`
-    # reads `as_of` for recency and `as_of_source` for provenance, and `_source_family()` recognizes
-    # four families and no others: live, authored, export, git. A row carrying neither field is
-    # UNDATED to every reader in that module and its provenance counts as **invalid**, so recorded
-    # boss research is invisible to the recency rules that decide which record wins.
+    # 🔴 THE DEFECT. This writer emitted `ts` and `date` and stopped there. `state.py` reads
+    # `as_of` for recency and `as_of_source` for provenance, and `_source_family()` recognizes
+    # exactly four families: live, authored, export, git. A row with neither field is UNDATED to
+    # every reader in that module and its provenance counts as **invalid**, which is what
+    # `LiveStoreShapeTests` had been reporting for all 24 rows.
     #
     # ⚖️ THE FAMILY IS DERIVED FROM HOW THE SEAT WAS VERIFIED, not stamped as a constant. A seat
-    # confirmed against a live profile is `live:` evidence and outranks one a human asserted, which
-    # is what `SOURCE_PRECEDENCE` expresses. Flattening every row to `authored` would make the store
-    # look consistent while discarding the distinction.
-    # ⛔ An unrecognized or absent `--verified` falls to `authored`, NEVER to a `live:` family. The
-    # error that matters is claiming verification that did not happen.
+    # confirmed against a live LinkedIn profile is `live:` evidence and outranks one a human simply
+    # asserted, which is the whole point of `SOURCE_PRECEDENCE`. Flattening every row to `authored`
+    # would have made the check green while throwing away the distinction it exists to carry.
+    # ⛔ An unrecognized or absent `--verified` falls to `authored`, never to a `live:` family. The
+    # error that matters here is claiming verification that did not happen.
     _VERIFIED_FAMILY = {"linkedin-live": "live:linkedin",
                         "company-page": "live:company-page",
                         "press-release": "live:press-release"}
@@ -226,7 +270,7 @@ def cmd_check(a):
         print(f"⛔ BOSS REGISTRY: {reason}", file=sys.stderr)
         print(f"   {fix}", file=sys.stderr)
         print(f"   Freshness window is {max_age} days "
-              f"(BOSS_FRESH_DAYS = {BOSS_FRESH_DAYS}).",
+              f"(BOSS_FRESH_DAYS = {BOSS_FRESH_DAYS}, a PROPOSAL not yet ruled by the owner).",
               file=sys.stderr)
         return 1
 

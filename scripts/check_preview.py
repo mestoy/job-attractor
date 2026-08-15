@@ -192,6 +192,67 @@ def _has_build_ruling(tool_input=None):
     return any(re.search(r"(?<![a-z0-9])" + re.escape(co) + r"(?![a-z0-9])", blob)
                for co in rulings)
 
+def _no_boss_rung_lead(tool_input):
+    """A rung-aware LEAD for the BUILD-gate refusal, naming the exemption marker for THIS shape.
+
+    The refusal below prescribes a Boss Match Scorecard, which has NO valid inputs at a warm,
+    rung-1-2, referral, inbound or application shape (no boss, no company to screen, no lane,
+    nothing for the live-role verify to check). Without this, the operator is handed an impossible
+    instruction and has to read this file to find the marker that is the actual escape hatch.
+
+    This detects the shape of the blocked question and returns a short banner that LEADS with the
+    applicable marker(s). It is ADVISORY COPY ONLY — it authorizes nothing, matches no store, and
+    every real exemption is still gated by its own non-forgeable anchor above. When no no-boss shape
+    is recognized it returns "" and the enumeration below (which names all six markers) still stands.
+    """
+    blob = " ".join(str(t) for _, t in _strings_from_questions(tool_input or {}))
+    low = blob.lower()
+    hits = []  # (marker, one-line remedy), most-specific shape first
+    _greets_a_name = re.search(
+        r"(?:^|[\n\r>\"'“]|\s)(?i:hi|hey|hello|dear|greetings|good morning|good afternoon)"
+        r"(?:[ \t]*,[ \t]*|[ \t]+)(?i:there(?:[ \t]*,[ \t]*|[ \t]+))?[A-Z][a-z]+", blob)
+    if re.search(r"\breferr|\bintroduc|\bvia\b|\bintro\b", low):
+        hits.append(("REFERRED: <Contact> VIA <Introducer>",
+                     "a rung 8/9 referral is 2nd-degree and has no scorecard; the INTRODUCER must "
+                     "appear in documents/warm-network.md."))
+    if re.search(r"\brung ?1\b|\brung ?1-2\b|\brung ?2\b|zero-ask|zero ask|common (?:interest|ground)"
+                 r"|connect(?:ion)? note|peer note", low):
+        hits.append(("RUNG12: <Full Name>",
+                     "a rung 1-2 zero-ask connect note to a 1st-degree contact (contact.jsonl or the "
+                     "newest Connections-*.csv) with no ask vocabulary needs no BUILD ruling."))
+    if re.search(r"follow(?:[ -]?up| ?ing up)|floating .* back|bump(?:ing)? (?:the|my|it)", low):
+        hits.append(("FOLLOWUP: <Company>",
+                     "a follow-up to a company already SENT in outreach_log.md carries its first "
+                     "send's ruling; it needs no fresh one."))
+    if re.search(r"\breply\b|\breplied\b|inbound|wrote to (?:me|him)|reached out to (?:me|him)"
+                 r"|recruiter|unsolicited", low):
+        hits.append(("INBOUND: <Full Name>",
+                     "replying to someone who wrote to you first has no campaign; the person must "
+                     "appear in an INBOUND header in documents/correspondence-log.md. Missing? "
+                     "capture the inbound verbatim first, then re-ask."))
+    if re.search(r"screening|free.response|interview (?:story|answer)|application (?:answer|question)"
+                 r"|applying\b", low):
+        hits.append(("APPLYING: <Company>",
+                     "co-creating application/interview content for a role in flight has no boss; the "
+                     "company needs a folder under documents/applications/ holding a real artifact."))
+    if _greets_a_name or re.search(r"\bwarm(?:[ -]rung)?\b|\bconnector\b", low):
+        hits.insert(0, ("WARM-RUNG: <Full Name>",
+                        "a rung 5/6/7 warm ask has no boss and no scorecard; the name must appear in "
+                        "documents/warm-network.md AND carry a warm-sanctioned tier in "
+                        "documents/contact-closeness.json."))
+    if not hits:
+        return ""
+    seen, lines = set(), []
+    for marker, remedy in hits:
+        if marker in seen:
+            continue
+        seen.add(marker)
+        lines.append(f"     · `{marker}` — {remedy}")
+    return ("⛔ THIS BLOCK LOOKS LIKE A NO-BOSS RUNG. The Boss Match Scorecard the message below "
+            "prescribes has no valid inputs here (no boss, no company to screen, no lane). Use the "
+            "exemption marker for your shape instead:\n" + "\n".join(lines))
+
+
 def _carries_drafted_voice(tool_input):
     """Does this question show text written in YOUR voice for an outreach message?
 
@@ -1084,10 +1145,45 @@ def main():
                 # 30-second path out of it, not a pointer to documentation.
                 for _r in _CLOSENESS_REFUSALS[:3]:
                     print(f"⛔ {_r}", file=sys.stderr)
+            # LEAD with the marker for THIS shape when it reads as a no-boss rung, so the operator is
+            # not handed the scorecard prescription that cannot be followed here.
+            _lead = _no_boss_rung_lead(tool_input)
+            if _lead:
+                print(_lead, file=sys.stderr)
             print(
                 "⛔ AskUserQuestion BLOCKED by check_preview: BUILD GATE not passed.\n"
-                "This question shows drafted outreach text (a praise beat / hook / phrasing), "
-                "but the decision ledger holds NO recorded BUILD ruling.\n"
+                "▶ FIRST, CHECK WHETHER THIS BLOCK IS EVEN CORRECT. The scorecard prescribed below has "
+                "no valid inputs at a warm, rung-1-2, referral, inbound or application shape (no boss, "
+                "no company to screen, no lane). Each such shape has an exemption MARKER, and the block "
+                "clears the moment the right one is present with its non-forgeable anchor:\n"
+                "   (a) WARM rung (5/6/7 connector ask)? Exempt via `WARM-RUNG: <Full Name>` where the "
+                "name appears in documents/warm-network.md AND the closeness store sanctions a warm "
+                "shape for them.\n"
+                "   (a2) Rung 1-2 zero-ask connect note to a 1st-degree contact? Exempt via "
+                "`RUNG12: <Full Name>` where the name is a recorded connection (contact.jsonl or the "
+                "newest Connections-*.csv export) AND the text carries no ask vocabulary.\n"
+                "   (a3) Rung 8/9 REFERRAL through someone you know? Exempt via "
+                "`REFERRED: <Contact> VIA <Introducer>` where the INTRODUCER appears in "
+                "documents/warm-network.md and the closeness store sanctions a warm shape for them. A "
+                "referral's contact is 2nd-degree by definition, so it can never satisfy the WARM-RUNG "
+                "anchor — this is its marker.\n"
+                "   (b) Follow-up/reply/thank-you to a company YOU contacted first? Exempt via "
+                "`FOLLOWUP: <Company>`, which requires that company to carry a SENT record in "
+                "outreach_log.md.\n"
+                "   (b2) Replying to someone who wrote to YOU first (recruiter, inbound cold pitch, "
+                "unsolicited note)? That is NOT a follow-up and has no SENT record. Exempt via "
+                "`INBOUND: <Full Name>` where that person appears in an INBOUND event header in "
+                "documents/correspondence-log.md. If it does not fire, the missing piece is the "
+                "RECORD: capture the inbound verbatim first, then re-ask. Replying is authorized; "
+                "applying is not.\n"
+                "   (b3) Co-creating APPLICATION or INTERVIEW content (screening answers, free-response, "
+                "interview stories) for a role already in flight? None of the above will fire, because "
+                "there is no boss and no campaign. Exempt via `APPLYING: <Company>` where that company "
+                "has a folder under documents/applications/ holding a real artifact (job_posting.md, the "
+                "JD, or a cv_draft). If it does not fire, the missing piece is the FOLDER: save the "
+                "posting first.\n"
+                "▶ IF THE BLOCK IS CORRECT: this question shows drafted outreach text (a praise beat / "
+                "hook / phrasing), but the decision ledger holds NO recorded BUILD ruling.\n"
                 "Present the Boss Match Scorecard (badge · boss + lane · a 2-3 sentence org/product/"
                 "why-this-boss narrative · the screen table · \'👉 YOUR CALL\') with all gaps CLOSED, and "
                 "WAIT for an explicit build/skip ruling. The live-role verify (check_ats.py) must have run "

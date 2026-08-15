@@ -298,6 +298,36 @@ def tier_for(name, store):
     return store.get(normalize_name(name))
 
 
+# 🧩 BUG-181 LEVER 2 (2026-08-13): a STATED strong tier is itself an ADMISSION signal.
+# The people ranker admitted contacts to its pool by TITLE regex (parse_network.classify), so a
+# strong-tier contact whose CURRENT title carries no PM/senior/connector/manager tell never entered
+# the pool — even though the closeness store already recorded that you worked with them, know them
+# well, or are personal friends. A relationship FACT you stated is a better admission signal than a
+# title guess, so the writer can rescue those rows into the pool at the base their category already
+# carries. This WIDENS ADMISSION ONLY; it invents no weight and grants no rung.
+#
+# ⛔ Scoped to the three STATED strong tiers. An INFERRED strong tier (levelled from message traffic,
+# not stated) does NOT admit — the same provenance rule that scores it thin, so a machine inference
+# can never widen the pool. Degrades safe when no store exists (a partner install with no answers
+# yet): `admits_on_closeness(None)` is False, so classify() keeps its title-only behavior exactly.
+STRONG_STATED_TIERS = {"worked-together", "know-well", "personal-friend"}
+
+
+def admits_on_closeness(row):
+    """True when this row's STATED tier admits the contact to the ranker pool regardless of title.
+
+    ADMISSION only — grants no score and no rung; an admitted row still ranks at whatever base its
+    TITLE-derived category carries. Degrades SAFE to False: a missing row (absent / no store), an
+    absent/never-spoke/thin tier, or a strong tier that was INFERRED rather than stated.
+    """
+    if not row:
+        return False
+    tier = TIER_ALIASES.get(row.get("closeness"), row.get("closeness"))
+    if tier not in STRONG_STATED_TIERS:
+        return False
+    return str(row.get("source") or "") not in INFERRED_SOURCES
+
+
 def is_held(row):
     """Handling state, which overrides closeness entirely. Returns a reason or None.
 
