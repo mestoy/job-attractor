@@ -937,65 +937,6 @@ def _rung12_text_has_ask(blob):
     return any(p.search(blob) for p in pats)
 
 
-def _rung12_person_is_first_degree(name):
-    """Is `name` a recorded 1st-degree connection, per documents/state/contact.jsonl (kind=contact)
-    or the newest documents/linkedin-exports/Connections-*.csv?
-
-    Unlike the WARM-RUNG anchor, this does NOT consult the closeness store: rung 1-2 is a zero-ask
-    connect note, the floor of the ladder, and by design carries no scorecard/closeness expectation
-    (HARD-INVARIANTS §"SCREEN DEPTH IS TIERED BY RUNG"). A missing closeness row must not fail this closed.
-    """
-    repo = os.environ.get("CLAUDE_PROJECT_DIR") or \
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    target = re.sub(r"\s+", " ", name.strip()).lower()
-    if not target:
-        return False
-    # (1) documents/state/contact.jsonl, kind=contact, payload.name
-    try:
-        p = os.path.join(repo, "documents", "state", "contact.jsonl")
-        with open(p, encoding="utf-8", errors="ignore") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except Exception:
-                    continue
-                if row.get("kind") != "contact":
-                    continue
-                nm = ((row.get("payload") or {}).get("name") or "").strip().lower()
-                if nm and nm == target:
-                    return True
-    except Exception:
-        pass
-    # (2) the newest documents/linkedin-exports/Connections-*.csv
-    try:
-        import glob, csv
-        exports = sorted(glob.glob(os.path.join(repo, "documents", "linkedin-exports",
-                                                  "Connections-*.csv")))
-        if exports:
-            newest = exports[-1]
-            with open(newest, encoding="utf-8", errors="ignore") as fh:
-                # LinkedIn's export prefixes the real header with a "Notes:" preamble; find the
-                # real header row before handing off to csv.DictReader.
-                lines = fh.readlines()
-            start = 0
-            for i, ln in enumerate(lines):
-                if ln.strip().lower().startswith("first name,last name"):
-                    start = i
-                    break
-            reader = csv.DictReader(lines[start:])
-            for row in reader:
-                full = f"{(row.get('First Name') or '').strip()} {(row.get('Last Name') or '').strip()}"
-                full = re.sub(r"\s+", " ", full).strip().lower()
-                if full and full == target:
-                    return True
-    except Exception:
-        pass
-    return False
-
-
 def _is_rung12_zero_ask_note(tool_input):
     """LaCivita rung 1-2: a zero-ask common-interest note to a recorded 1st-degree connection.
 

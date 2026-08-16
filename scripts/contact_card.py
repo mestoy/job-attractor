@@ -76,16 +76,19 @@ def _shown_path():
     return SHOWN
 TIE_BAND = 0.1     # the ranker's own tie width; anyone inside it is not distinguishable
 
-# ⏳ A CARD IS GOOD FOR ONE PICKER, WITHIN TWO HOURS. Matched deliberately to
-# `record_scorecard.TTL_SECONDS`, so the contact card and the company scorecard age the same way
-# and there is one rule to remember rather than two.
-# ⛔ WHY BOTH HALVES. A TTL alone lets one card authorize an unbounded number of pickers inside the
-# window; consumption alone lets a card shown last week satisfy today. The company analog carries
-# both (a 2h read window in record_scorecard.read, and _pending_clear on use in
-# record_chat_ruling.py), and the first cut of THIS file carried neither — `was_shown` returned
-# True for any row ever written, so a card shown once would have opened every future picker for
-# that person forever. Found by writing the plan, not by the code failing.
-TTL_SECONDS = 2 * 60 * 60
+# ⏳ A CARD IS GOOD FOR THE CALENDAR DAY IT WAS SHOWN.
+# ⛔ WHY THIS DIVERGES FROM record_scorecard, on purpose. The company scorecard AUTHORIZES a build,
+# so it must age fast (a 2h window) and be spent per picker — one ruling cannot open an unbounded
+# build. This card AUTHORIZES NOTHING (it carries no MAC); it records only that the human was SHOWN
+# who a person is. An information token is not "spent": being shown who someone is once covers every
+# beat of that same note. An earlier cut copied BOTH authorization halves — a 120-min TTL and
+# one-picker consumption — and both were category errors here. Co-construction runs the WHOLE
+# message beat by beat (many pickers over a long build), so the 2h TTL lapsed mid-build and the next
+# beat false-blocked; and the consumption half was dead code no caller ever wrote to. The property
+# worth keeping is STALENESS: a card shown on a PRIOR day may name a rank/title/screen that has
+# since moved, so it must not satisfy. The calendar day is exactly that line — one showing spans a
+# whole note-build, while yesterday's card blocks. consume() is retired with this change: an
+# unreferenced "check" reads like a working gate and is worse than none.
 
 
 
@@ -324,49 +327,62 @@ def _rows_for(name):
     return out
 
 
-def _age_seconds(row):
+def _same_day(ts, now=None):
+    """True when ISO timestamp `ts` falls on the same calendar day as `now`, in the MACHINE's local
+    timezone.
+
+    Local, not UTC: a UTC day would roll over mid-afternoon for a user west of Greenwich and
+    re-introduce the exact mid-build false-block this fix removes. `now` is injectable so a test can
+    pin the clock without a real midnight to wait for. Fails CLOSED (False) on any parse error: an
+    unreadable stamp is not a card shown today.
+    """
     try:
-        ts = datetime.datetime.fromisoformat(row["ts"])
-        now = datetime.datetime.now(datetime.timezone.utc)
-        return (now - ts).total_seconds()
+        when = datetime.datetime.fromisoformat(ts)
     except Exception:
-        return None
+        return False
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    try:
+        return when.astimezone().date() == now.astimezone().date()
+    except Exception:
+        return False
 
 
-def was_shown(name, ttl=TTL_SECONDS):
-    """True when a card was shown for this contact recently AND has not been consumed since.
+def was_shown(name, now=None):
+    """True when a card was shown for this contact on the CURRENT calendar day.
 
-    ⛔ A NEGATIVE AGE IS NOT FRESH. A row stamped in the future (clock skew, a hand-edited file)
-    would otherwise read as age<=ttl and satisfy the gate forever, which is the failure
-    `record_scorecard.read` guards with `age < 0 or age > TTL`. Same guard here.
+    The card is INFORMATION, not authorization — it records that the human was shown who this person
+    is, carries no MAC, and clears no BUILD ruling. It was first modeled on record_scorecard's
+    AUTHORIZATION semantics (a 120-min TTL plus one-picker consumption), which is a category error:
+    co-construction runs the WHOLE message beat by beat (many pickers over a long build), so a note
+    with research routinely outlived the 2h TTL and the next beat's picker false-blocked.
+
+    THE FIX, both halves (see the TTL note above):
+      1. THE CONSUMPTION CLAUSE IS GONE. Information is not "spent" per picker — being shown who a
+         person is once covers every beat of that same note. It was also dead: nothing in production
+         ever wrote a `contact-card-consumed` row.
+      2. VALIDITY IS THE CURRENT CALENDAR DAY. One showing spans a whole note-build, while a card
+         shown on a PRIOR day still blocks — the real point of the old stale check.
+
+    ⛔ A NEGATIVE AGE IS NEVER FRESH. A row stamped in the future (clock skew, a hand-edited file)
+    could otherwise land on today's date and satisfy the gate; guarded against the same clock the
+    day check uses. `now` is injectable for tests.
     """
     rows = _rows_for(name)
     shown = [r for r in rows if r.get("kind") == "contact-card-shown"]
     if not shown:
         return False
     latest = shown[-1]
-    age = _age_seconds(latest)
-    if age is None or age < 0 or age > ttl:
+    try:
+        when = datetime.datetime.fromisoformat(latest.get("ts"))
+    except Exception:
         return False
-    # consumed AFTER the newest showing means the card has already opened its one picker
-    for r in rows:
-        if r.get("kind") != "contact-card-consumed":
-            continue
-        a = _age_seconds(r)
-        if a is not None and a <= age:
+    ref = now or datetime.datetime.now(datetime.timezone.utc)
+    try:
+        if (ref - when).total_seconds() < 0:
             return False
-    return True
-
-
-def consume(name):
-    """Spend the card. One card opens one picker, exactly like a pending scorecard."""
-    p = _shown_path()
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"kind": "contact-card-consumed", "name": name,
-                             "ts": datetime.datetime.now(datetime.timezone.utc).isoformat()},
-                            ensure_ascii=False) + "\n")
-    return 0
+    except Exception:
+        return False
+    return _same_day(latest.get("ts"), now)
 
 
 def main():
@@ -374,11 +390,8 @@ def main():
     ap.add_argument("name", nargs="?")
     ap.add_argument("--record", action="store_true")
     ap.add_argument("--shown", metavar="NAME")
-    ap.add_argument("--consume", metavar="NAME")
     ap.add_argument("--n", type=int, default=40)
     a = ap.parse_args()
-    if a.consume:
-        return consume(a.consume)
     if a.shown:
         ok = was_shown(a.shown)
         print(f"{a.shown}: card {'SHOWN' if ok else 'NOT shown'}")

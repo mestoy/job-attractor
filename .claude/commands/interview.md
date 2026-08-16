@@ -70,10 +70,13 @@ A short list of the specific claims the submitted CV and cover letter make (achi
 ### 4. Tough questions, customized
 The relevant entries from `07`'s tough-question list with per-application answers - "Why this company specifically?" must use the verified hooks from Step 2, never a generic line.
 
-### 5. Questions to ask
-Pick 4-6 from `07`'s categories, customized to the research and the stage: role and team questions at screens, tech and growth questions at technical rounds, culture and leadership questions by the final round (that is the last chance to detect a deal-breaker). Cut any question the research already answers publicly - asking it signals you didn't look.
+### 5. Questions to ask (LaCivita Top-5 are MANDATORY)
+Always include the LaCivita Top-5 from `07`, then add stage-specific ones. Three are non-negotiable, ask them of every panelist: (a) the "one-year raging success" question (what does success look like a year in), (b) their management style, and (c) the first-week surprise. Two of these double as the culture and leadership stability screen, the first hard factor. Then add role and team questions at screens, tech and growth at technical rounds, culture and leadership by the final round (the last chance to detect a deal-breaker). Cut any question the research already answers publicly, asking it signals you didn't look.
 
-### 6. Logistics
+### 6. Close and Reservations (MANDATORY, the weakest-covered LaCivita step)
+Every pack ends with the close block from `07`, so you run it in the room: **Confirm** the role's core needs, **Assure** by recapping your matching strengths, **Close** by stating interest and asking next steps, then ask **"Do you have any reservations about hiring me?"** That last question surfaces reframe-able objections (a background stretch, a missing credential, a fit stretch) while you are still in the room to address them. Do not omit this section.
+
+### 7. Logistics
 The phone/video tips from `07` when the format calls for them, plus date and interviewer names as a header.
 
 Save the pack to `documents/applications/<company>_<role>/interview_prep_<stage>.md` (create the folder if this application predates `/outcome`). The folder is gitignored, so the pack stays personal; one file per stage, so earlier packs remain as history. Present the pack in chat as well - the file is the artifact, the conversation is the delivery.

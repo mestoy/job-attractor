@@ -2093,7 +2093,7 @@ def audit_signals():
     evtier_ratified = globals().get("_EVTIER_RATIFIED", False)
     band_leads = bool(globals().get("CLOSE_BAND_LEADS", 0))
     cells = _cells()
-    W = live_weights() or {}
+    W = live_weights(stamp=False) or {}   # inspection mode: derive but do NOT write the stamp (DoD #6, kit parity)
     wcat = W.get("per_category", {})
     lines, typed_n = [], [0]
 
@@ -2209,8 +2209,15 @@ def _stored_weights():
 _LIVE_WEIGHTS = {}
 
 
-def live_weights():
+def live_weights(stamp=True):
     """The weights the ranker actually scores with: DERIVED from the send log, on every run.
+
+    ⛔ `stamp=False` is the READ-ONLY path (BUG-181 DoD #6, 2026-08-13). `--audit-signals` is an
+    inspection mode and must not mutate the tree, but a plain call derives weights AND writes
+    `documents/state/weights-derive.json` via `_stamp_derivation`. The audit still READS that file
+    for its witness line — it just must not be the thing that writes it. When the process-cache is
+    already warm the stamp was (or was not) written by the first caller, so this flag only governs
+    the deriving call. ([[never-measure-a-tree-with-two-writers]] — the same guard main carries.)
 
     ⚖️ CONTINUOUS LEARNING, not read-a-stored-row. Every send in the log is already learned from by
     the time this returns; there is no command to remember and no age to go stale. The stored row is
@@ -2227,7 +2234,8 @@ def live_weights():
     if "w" not in _LIVE_WEIGHTS:
         try:
             _LIVE_WEIGHTS["w"] = _compute_weights()
-            _stamp_derivation(_LIVE_WEIGHTS["w"])
+            if stamp:
+                _stamp_derivation(_LIVE_WEIGHTS["w"])
         except Exception:
             _LIVE_WEIGHTS["w"] = _stored_weights()
     return _LIVE_WEIGHTS["w"]

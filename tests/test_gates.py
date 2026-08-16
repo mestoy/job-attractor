@@ -3814,6 +3814,109 @@ class TestReferralsInTheDecisionTable(unittest.TestCase):
         self.assertNotIn("referred send", d["alternates"][0]["label"])
 
 
+class TestContactCardValidityWindow(unittest.TestCase):
+    """contact_card.was_shown — a card is INFORMATION, not authorization. It is valid for the whole
+    CALENDAR DAY it was shown (so a beat-by-beat build over many pickers never false-blocks), it is
+    NOT spent per picker (consumption is retired), and a PRIOR-day card still blocks (staleness).
+    Clock is injected so 'shown hours ago, same day' is deterministic near midnight."""
+
+    def setUp(self):
+        if SCRIPTS not in sys.path:
+            sys.path.insert(0, SCRIPTS)
+        self.cc = importlib.import_module("contact_card")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        os.makedirs(os.path.join(self.tmp.name, "documents", "state"), exist_ok=True)
+        os.environ["CLAUDE_PROJECT_DIR"] = self.tmp.name
+        self.addCleanup(lambda: os.environ.pop("CLAUDE_PROJECT_DIR", None))
+        self.now = datetime.datetime(2026, 8, 15, 14, 0, 0, tzinfo=datetime.timezone.utc)
+
+    def _write(self, rows):
+        p = os.path.join(self.tmp.name, "documents", "state", "contact-cards-shown.jsonl")
+        with open(p, "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+
+    def _shown_at(self, dt):
+        return {"kind": "contact-card-shown", "name": "Jane Doe",
+                "ts": dt.astimezone(datetime.timezone.utc).isoformat()}
+
+    def test_no_card_blocks(self):
+        self._write([])
+        self.assertFalse(self.cc.was_shown("Jane Doe", now=self.now))
+
+    def test_shown_hours_ago_same_day_passes(self):
+        """The fix: three hours is well past the retired 120-min TTL, but same day, so it passes."""
+        self._write([self._shown_at(self.now - datetime.timedelta(hours=3))])
+        self.assertTrue(self.cc.was_shown("Jane Doe", now=self.now))
+
+    def test_shown_yesterday_blocks(self):
+        self._write([self._shown_at(self.now - datetime.timedelta(days=1))])
+        self.assertFalse(self.cc.was_shown("Jane Doe", now=self.now))
+
+    def test_future_stamp_is_never_fresh(self):
+        self._write([self._shown_at(self.now + datetime.timedelta(hours=2))])
+        self.assertFalse(self.cc.was_shown("Jane Doe", now=self.now))
+
+    def test_a_consumed_row_does_not_block(self):
+        """Consumption is retired: an information token is not spent per picker."""
+        self._write([self._shown_at(self.now - datetime.timedelta(minutes=5)),
+                     {"kind": "contact-card-consumed", "name": "Jane Doe",
+                      "ts": (self.now - datetime.timedelta(minutes=4))
+                      .astimezone(datetime.timezone.utc).isoformat()}])
+        self.assertTrue(self.cc.was_shown("Jane Doe", now=self.now))
+
+
+class TestNextTargetBandSkip(unittest.TestCase):
+    """pair_brief.next_target — the derived 'next initial contact' must be a boss-hunt vector. A
+    rung 1-2 COLD STRANGER (an eligible-category person with an unrecorded tie) is a common-interest
+    connect, not a boss hunt, so it is skipped in favor of the cold-boss COMPANY target; a cold-boss
+    (rung 3-4) vector is kept."""
+
+    def setUp(self):
+        if SCRIPTS not in sys.path:
+            sys.path.insert(0, SCRIPTS)
+        self.pb = importlib.import_module("pair_brief")
+        import rank_criteria
+        import closeness
+        self.rc, self.cl = rank_criteria, closeness
+        self._restore = []
+
+        def stash(mod, attr, val):
+            self._restore.append((mod, attr, getattr(mod, attr)))
+            setattr(mod, attr, val)
+        self._stash = stash
+        stash(closeness, "load", lambda *a, **k: {})
+        stash(self.pb, "_held", lambda name, store: False)
+        stash(self.pb, "_already_contacted", lambda name, company: False)
+
+    def tearDown(self):
+        for mod, attr, val in reversed(self._restore):
+            setattr(mod, attr, val)
+
+    def test_a_rung12_cold_stranger_falls_through_to_the_company_target(self):
+        self._stash(self.rc, "rank_people", lambda n=10: (
+            [{"name": "Cold Stranger", "title": "Director", "company": "SomeCo",
+              "cat": "senior-exec", "rung": "cold-stranger", "band": "rung 1-2"}], []))
+        self._stash(self.rc, "rank", lambda n=10: ([{"company": "TargetCo", "lane": "payments"}], []))
+        label, src = self.pb.next_target()
+        self.assertEqual(src, "rank")
+        self.assertIn("TargetCo", label)
+        self.assertNotIn("Cold Stranger", label)
+
+    def test_a_cold_boss_rung34_is_kept(self):
+        self._stash(self.rc, "rank_people", lambda n=10: (
+            [{"name": "Real Boss", "title": "VP Product", "company": "TargetCo",
+              "cat": "product-leader", "rung": "cold-boss", "band": "rung 3-4"}], []))
+        label, src = self.pb.next_target()
+        self.assertEqual(src, "rank_people")
+        self.assertIn("Real Boss", label)
+
+    def test_the_band_label_matches_the_producer(self):
+        self.assertEqual(self.cl._cold("senior-exec")[1], "rung 1-2",
+                         "cold-stranger band label moved; update next_target's skip")
+
+
 class TestStaleDraftedSuperseded(unittest.TestCase):
     """pair_brief.stale_drafted — an append-only flip row must retire the staging row, and a
     genuinely unflipped draft must still be surfaced."""
@@ -4500,6 +4603,56 @@ class TestWeekendIsNotAWorkday(unittest.TestCase):
         for phrase in ("Rest. The 3-3-3 is a workday loop and today is not a work day",
                        "Screening debt on the banked pool", "Bug and test work"):
             self.assertIsNone(pb.SEND_SHAPED.search(phrase), phrase)
+
+
+class TestDeclaredWorkdayBeatsWeekend(unittest.TestCase):
+    """A DECLARED workday beats the weekend Rest override while its window is open, and only then.
+    Ported to the kit for guardrail parity: without it a user who declares a weekend a work day is
+    still nagged to Rest as option 1."""
+
+    def _mod(self, workday=None):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "pb_declared", os.path.join(SCRIPTS, "pair_brief.py"))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        m.WORKDAY_FILE = os.path.join(self.tmp.name, "workday.json")
+        if workday is not None:
+            with open(m.WORKDAY_FILE, "w", encoding="utf-8") as fh:
+                json.dump(workday, fh)
+        return m
+
+    def test_no_declaration_is_not_a_workday(self):
+        self.assertFalse(self._mod()._workday_declared("2026-08-09"))
+
+    def test_declared_window_open_is_a_workday(self):
+        pb = self._mod({"date": "2026-08-09", "until_et": "20:00"})
+        self.assertTrue(pb._workday_declared(
+            "2026-08-09", now=datetime.datetime(2026, 8, 9, 14, 0)))
+
+    def test_after_the_declared_window_reverts(self):
+        pb = self._mod({"date": "2026-08-09", "until_et": "20:00"})
+        self.assertFalse(pb._workday_declared(
+            "2026-08-09", now=datetime.datetime(2026, 8, 9, 21, 0)))
+
+    def test_a_stale_declaration_for_another_date_is_ignored(self):
+        pb = self._mod({"date": "2026-08-08", "until_et": "23:00"})
+        self.assertFalse(pb._workday_declared(
+            "2026-08-09", now=datetime.datetime(2026, 8, 9, 12, 0)))
+
+    def test_the_weekend_rule_consults_the_declaration(self):
+        """The wiring is in derive()'s Rule 1b, which reads live repo state and is awkward to drive
+        e2e, so pin it structurally (the kit's own pattern for hard-to-exercise wiring): the weekend
+        Rest override must be guarded by `not _workday_declared(today)`, or a declared work day is
+        still nagged to Rest."""
+        src = open(os.path.join(SCRIPTS, "pair_brief.py"), encoding="utf-8").read()
+        weekend_rule = [ln for ln in src.splitlines()
+                        if "_is_weekend(today)" in ln and "SEND_SHAPED" in ln]
+        self.assertTrue(weekend_rule, "the weekend Rule 1b line was not found")
+        self.assertIn("not _workday_declared(today)", weekend_rule[0],
+                      "the weekend Rest override does not consult the workday declaration")
 
 
 class TestApplicationEnrollment(unittest.TestCase):
@@ -7294,6 +7447,84 @@ class TestResumeHeaderSurvivesStyleStrip(unittest.TestCase):
         self.assertGreaterEqual(
             ratio, 0.999,
             f"a freshly built résumé must not read as STALE BUILD; got {ratio:.4f} ({sample[:80]})")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# rung 1-2 exemption must match a credential-suffixed surname (kit-parity MAJOR, 2026-08-14).
+# check_preview.py defined _rung12_person_is_first_degree TWICE; Python bound the later def, which
+# dropped the _name_key suffix fix and compared names by exact ==, so a 1st-degree contact whose
+# stored surname carries a suffix (", COO", ", MBA", ", PMP®") was NOT matched and Matthew's rung
+# 1-2 zero-ask note (his highest-volume shape) was silently BLOCKED. The fix deletes the stale
+# duplicate so the _name_key-based def is live.
+# ─────────────────────────────────────────────────────────────────────────────
+class TestRung12ExemptionMatchesSuffixedSurname(unittest.TestCase):
+    check_preview = importlib.import_module("check_preview")
+
+    def _seed(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        os.makedirs(os.path.join(d, "documents", "state"))
+        with open(os.path.join(d, "documents", "state", "contact.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"kind": "contact", "payload": {"name": "Ron Macomb, COO"}}) + "\n")
+        return d
+
+    def _under(self, project_dir, name):
+        old = os.environ.get("CLAUDE_PROJECT_DIR")
+        os.environ["CLAUDE_PROJECT_DIR"] = project_dir
+        try:
+            return self.check_preview._rung12_person_is_first_degree(name)
+        finally:
+            if old is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = old
+
+    def test_suffixed_surname_contact_is_recognized_as_first_degree(self):
+        # stored "Ron Macomb, COO", queried "Ron Macomb": _name_key strips the suffix on both sides.
+        # RED on the stale duplicate (exact ==), which is what wrongly blocked the rung 1-2 note.
+        self.assertTrue(self._under(self._seed(), "Ron Macomb"),
+                        "a 1st-degree contact with a credential-suffixed surname must be recognized")
+
+    def test_a_true_stranger_is_still_not_matched(self):
+        # the fix must not become a skeleton key: an unrelated name is still not first-degree.
+        self.assertFalse(self._under(self._seed(), "Someone Unrelated"))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pair_brief P4 must not default to "Stop for the day" (kit-parity, 2026-08-14).
+# A closed 3-3-3 past the outbound window defaults to STARTING THE NEXT LOOP; the day's end is the
+# human's to DECLARE by picking "Stop for the day" out of the alternates, never the script's to
+# assume. And next_target skips the base-5 warm categories so the derived next contact is a plausible
+# boss/connector/peer, not a dormant warm tie who cannot hire.
+# ─────────────────────────────────────────────────────────────────────────────
+class TestP4DoesNotDefaultToStop(unittest.TestCase):
+    def setUp(self):
+        if SCRIPTS not in sys.path:
+            sys.path.insert(0, SCRIPTS)
+        self.mod = importlib.import_module("pair_brief")
+        try:
+            from zoneinfo import ZoneInfo
+            late = datetime.datetime(2026, 8, 14, 23, 0, tzinfo=ZoneInfo("America/New_York"))
+        except Exception:
+            late = datetime.datetime(2026, 8, 14, 23, 0)
+        self.state = {"today": "2026-08-14", "stale_drafted": [], "inbound": [], "tripwires": [],
+                      "sends_today": 3, "target": ("Jane Doe · PM @ SomeCo · rung 3-4", "rank_people"),
+                      "referred_gap": False, "warm_sends": 0, "now": late}
+
+    def test_default_starts_the_next_loop_not_stop(self):
+        d = self.mod.decide(self.state)
+        self.assertEqual(d["priority"], "P4")
+        self.assertIn("Start the next loop", d["default"])
+        self.assertNotIn("Stop for the day", d["default"])
+
+    def test_stop_is_offered_as_a_demoted_alternate(self):
+        d = self.mod.decide(self.state)
+        self.assertTrue(any(a["label"] == "Stop for the day" for a in d["alternates"]),
+                        "past the window, stop must still be OFFERED, just not the default")
+
+    def test_next_target_boss_hunt_filter_constant_exists(self):
+        # Fix 3(b): the filter that skips base-5 warm ties so next_target derives a boss/connector/peer.
+        self.assertEqual(self.mod.NON_BOSS_HUNT_CATS, {"other", "senior-ic"})
 
 
 # ⛔ THIS GUARD MUST BE THE LAST THING IN THE FILE, AND IT WAS NOT (fixed 2026-08-11).

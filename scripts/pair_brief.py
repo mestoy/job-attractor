@@ -182,6 +182,43 @@ def _declared_workday_end(now):
     return max(end, float(OUTBOUND_WINDOW_CLOSES_ET))
 
 
+def _workday_declared(today=None, now=None):
+    """True only while a DECLARED workday window is STILL OPEN for `today` (local time).
+
+    🕰 A DECLARED WORKDAY BEATS THE WEEKEND REST OVERRIDE. Same shape as _declared_workday_end
+    beating the configured floor: the weekend rule forces "Rest" because the file assumes Sat/Sun is
+    not a work day, but when you have said today IS a work day the assumption is wrong and the
+    send-shaped default must stand.
+
+    ⛔ WITHIN THE WINDOW, NOT THE WHOLE DAY. It honors the declared end the way its sibling
+    _declared_workday_end does, so once the declared window closes the honest weekend default
+    returns; matching the DATE alone would re-plant the weekend nag for the rest of the calendar day.
+    TODAY ONLY: a stale declaration for another date is ignored. Fails CLOSED on every error path, so
+    a missing/malformed file leaves the weekend Rest override in place. `now` is injectable for tests.
+    """
+    import datetime
+    n = now or datetime.datetime.now()
+    if isinstance(today, str):
+        d = today[:10]
+    elif today is not None:
+        d = today.strftime("%Y-%m-%d")
+    else:
+        d = n.strftime("%Y-%m-%d")
+    try:
+        with open(WORKDAY_FILE, encoding="utf-8") as fh:
+            row = json.load(fh)
+    except Exception:
+        return False
+    if not isinstance(row, dict) or str(row.get("date") or "") != d:
+        return False
+    try:
+        hh, _, mm = str(row.get("until_et") or "").partition(":")
+        end = int(hh) + (int(mm) / 60.0 if mm else 0.0)
+    except (ValueError, AttributeError):
+        return False
+    return (n.hour + n.minute / 60.0) < end
+
+
 def _set_working_until(value):
     """Record when TODAY ends. `clear` removes the declaration. Prints what it did."""
     if str(value).strip().lower() == "clear":
@@ -755,18 +792,41 @@ def _already_contacted(name, company):
     return False
 
 
+# ⛔ A WARM TIE WHO CANNOT HIRE IS NOT AN INITIAL-CONTACT TARGET. The people pool is mostly 1st-degree
+# connections, most of them base-5 `other` warm ties, so the raw top row is often a dormant contact
+# with no line to a target role. Andy's 90% is finding and reaching the RIGHT people (plausible bosses
+# and referral paths), so next_target skips these categories and lets a genuine boss, connector, or
+# peer, or the cold-boss COMPANY target below, be the derived default. Skipped warm ties are never
+# lost: they stay on the people board and in warm-network.md, workable whenever the human picks them.
+NON_BOSS_HUNT_CATS = {"other", "senior-ic"}
+
+
 def next_target(repo=None):
     """(label, source) for the next INITIAL contact. Never a person on hold.
 
-    Falls back through people -> companies -> "refill the board", mirroring session_start's ranked
-    fallbacks: a briefing that goes blank teaches the operator to stop reading it.
+    Falls back through boss-hunt people -> companies -> "refill the board", mirroring session_start's
+    ranked fallbacks: a briefing that goes blank teaches the operator to stop reading it.
     """
     try:
         import closeness
         import rank_criteria
         store = closeness.load()
-        people, _skipped = rank_criteria.rank_people(10)
+        # Pull a deeper slice than the 10 shown on the board: after the base-5 floor is filtered out,
+        # a real boss/connector/peer may sit below the wall of warm `other` ties that top the pool.
+        people, _skipped = rank_criteria.rank_people(40)
         for c in people:
+            if c.get("cat") in NON_BOSS_HUNT_CATS:
+                continue
+            # ⛔ RUNG 1-2 IS NOT A BOSS-HUNT VECTOR. The category skip above is necessary but NOT
+            # sufficient: closeness._cold() only returns cold-boss (rung 3-4) for the boss
+            # categories. Every other eligible category (senior-exec, product-ic, connector), when
+            # the tie is unrecorded / never-spoke, resolves to cold-stranger "rung 1-2 · connect
+            # only, zero ask" — a common-interest connect, not a boss hunt. The sanctioned RUNG, not
+            # the category, is the discriminator: a cold-boss (rung 3-4) or a warm rung 5-7 boss/
+            # peer/connector stays; a rung 1-2 cold stranger is skipped so the cold-boss COMPANY
+            # target below — where the target bosses live — becomes the default.
+            if str(c.get("band", "")).strip() == "rung 1-2":
+                continue
             if _held(c.get("name", ""), store):
                 continue
             if _already_contacted(c.get("name", ""), c.get("company", "")):
@@ -961,21 +1021,30 @@ def decide(state):
             "alternates": alts,
         }
 
+    # P4: the 3-3-3 floor is met past the outbound window. The default is NOT "Stop for the day":
+    # the workday's end is the human's to DECLARE by picking it out of the alternates, never the
+    # script's to assume. The never-ending-loop framing derives STARTING THE NEXT LOOP as the default,
+    # with "Stop for the day" a demoted alternate (offerable past the window, never the recommendation).
+    label, _src = state.get("target", ("run discovery to refill the board", "empty"))
     return {
         "priority": "P4",
-        "default": "Stop for the day",
+        "default": f"Start the next loop · next initial contact: {label}",
         "andy_read": [
-            "The loop closed: 3 messages are out, and the method's daily unit is done.",
-            "The method's own framing is a never-ending daily loop, not a longer day. Deskwork after "
-            "the loop closes is deskwork.",
+            "The 3-3-3 floor is met, but the method's framing is a NEVER-ENDING daily loop, so a "
+            "closed unit begins the next one, it does not end the day.",
+            "HOUSE METHOD: the workday's end is yours to DECLARE, never the script's to assume. Past "
+            "the outbound window 'Stop for the day' is OFFERED as an alternate you can pick, but it "
+            "is never the default.",
         ],
-        "cite": "the method's daily loop",
-        "evidence": [f"3-3-3 at {n}/3"],
+        "cite": "the method's never-ending loop · the day's end is declared, not assumed",
+        "evidence": [f"3-3-3 at {n}/3", f"target source: {state.get('target', ('', ''))[1]}"],
         "alternates": [
             {"badge": "🟡", "label": "Refill the board with a discovery run",
              "state": "the ranked board thins out as targets are worked"},
             {"badge": "🟢", "label": "Screening debt on the banked pool",
              "state": "banked rows are not rankable until they are screened"},
+            {"badge": "🟢", "label": "Stop for the day",
+             "state": f"the 3-3-3 is closed at {n}/3 · your call to end the day"},
         ],
     }
 
@@ -1071,7 +1140,9 @@ def derive(today=None, repo=None):
                           "available as the last alternate."]
     # Rule 1b: NOT ON A WEEKEND. A send-shaped default on a Saturday is the pipeline pressuring a
     # loop that is not running. The alternates stay, so if you want to work you still can.
-    if _is_weekend(today) and SEND_SHAPED.search(d["default"]):
+    # ⛔ UNLESS you DECLARED today a work day: a declaration beats the weekend assumption while its
+    # window is open (see _workday_declared), so the send-shaped default stands and Rest is demoted.
+    if _is_weekend(today) and SEND_SHAPED.search(d["default"]) and not _workday_declared(today):
         d["default"] = "Rest. The 3-3-3 is a workday loop and today is not a work day"
         d["andy_read"] = ["The method's loop is daily on WORKING days. A weekend nag is the "
                           "pipeline pressuring a counter that should not be running.",
