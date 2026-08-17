@@ -617,3 +617,15 @@ RESUME_CORE_LENSES = {}
 #
 # e.g. RESUME_EXPERT_LENSES = ["Jane Doe (Some Accelerator) — interview rigor, structured answers"]
 RESUME_EXPERT_LENSES = []
+
+
+# ── RUNTIME CAPS for the unattended crons + the multi-agent workflow (BUG-215, 2026-08-16) ────────
+# The ONE shared ceiling scripts/runtime_budget.py enforces mechanically at every fan-out entry
+# point (auto-sweep.sh, job-attractor-prep.sh, the workflow runner). These are DELIBERATELY
+# conservative / fail-safe first cuts — retune on real usage. They are HARD stops, not targets: a run
+# over the daily budget aborts before spending; max-turns + a wall-clock timeout bound each run.
+MAX_TURNS_PER_AGENT = 20          # claude -p --max-turns; hard per-agent turn cap
+RUN_WALL_CLOCK_SECONDS = 720      # shell timeout per run (12 min)
+MAX_COMPANIES_PER_SWEEP = 8       # record_finding refuses beyond this per day
+DAILY_TOKEN_BUDGET = 500_000      # summed from the ledger; a run over it aborts
+DAILY_AGENT_BUDGET = 10           # same

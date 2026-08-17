@@ -61,7 +61,7 @@ MATRIX = os.path.join(REPO, "documents", "employer-criteria-matrix.md")
 INVARIANTS = os.path.join(REPO, "docs", "HARD-INVARIANTS.md")
 
 # ⚠️ KIT DEVIATION — THIS IS THE TABLE YOU EDIT.
-# The upstream pipeline hardcodes one person's 15 veto rows. Yours are your own, so the mapping ships
+# The upstream pipeline hardcodes one person's own set of veto rows. Yours are your own, so the mapping ships
 # GENERIC and is meant to be retuned. Each veto maps a pattern matching a row of YOUR matrix
 # section A to the CATEGORY on the never-waived line that would carry it.
 #
@@ -178,7 +178,15 @@ def canonical_vetoes():
     try:
         sys.path.insert(0, HERE)
         import state
-        return [state.current("ruling", k, raw_key=True) for k in state.keys("ruling")]
+        # never_waived ONLY: a ruling retracted to a scored tier carries a never_waived:false row, and
+        # section A holds only the never-waived vetoes, so the store's never-waived set is what must
+        # match section A. Without this, moving a veto to a scored tier leaves a phantom in the store.
+        out = []
+        for k in state.keys("ruling"):
+            r = state.current("ruling", k, raw_key=True)
+            if r and (r.get("payload") or {}).get("never_waived"):
+                out.append(r)
+        return out
     except Exception:
         return []
 

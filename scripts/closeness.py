@@ -36,6 +36,79 @@ import re
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(HERE)
 STORE = os.path.join(REPO, "documents", "contact-closeness.json")
+LOCK = STORE + ".lock"
+
+
+# ── the ONE writer of contact-closeness.json (P1-3) ────────────────────────────────────────────
+# ⛔ contact-closeness.json is a WHOLE-FILE json dict. Three scripts rewrite it: level_contacts
+# (interview/infer), parse_messages (--write) and sync_contacted (--write). Before P1-3 the last two
+# did a direct `json.dump(data, open(STORE, "w"))` — a truncate-then-write, so a crash or a
+# concurrent reader mid-dump saw a torn file, and two writers racing the load→mutate→write span lost
+# an update (last writer wins). These two helpers are the single writer every script now routes
+# through: store_lock() serializes the read-modify-write span ACROSS processes (all writers flock the
+# same LOCK path), and atomic_write() swaps via tmp+os.replace so a reader sees whole-old or
+# whole-new, never torn. Callers keep their own serialization FORMAT (indent / ensure_ascii /
+# trailing newline) so the fix causes no diff churn.
+import contextlib as _contextlib  # noqa: E402
+
+
+@_contextlib.contextmanager
+def store_lock(path=None):
+    """Exclusive cross-process lock over the store's read-modify-write span. Every writer of
+    contact-closeness.json shares this lock (same LOCK file), so their whole-file rewrites take
+    turns. No-op if fcntl is unavailable (non-unix); atomic_write still prevents truncation there,
+    only cross-process ORDERING is lost. Hold it across BOTH the read and the write, never the write
+    alone, or a concurrent update between a stale read and the write is still clobbered.
+
+    ⛔ NON-REENTRANT. flock on a second open() of the same path IN ONE PROCESS blocks forever, so a
+    caller holding this lock must never call another writer that re-acquires it (or level_contacts'
+    twin _store_lock, which flocks the same path). atomic_write is deliberately lock-free so the
+    write inside this span does not self-deadlock; keep it that way."""
+    lock_path = (path or STORE) + ".lock" if path else LOCK
+    try:
+        import fcntl
+    except Exception:
+        yield
+        return
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    fh = open(lock_path, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        finally:
+            fh.close()
+
+
+def atomic_write(data, *, indent=1, ensure_ascii=False, trailing_newline=False,
+                 set_updated=False, backup=True, path=None):
+    """Write the whole-file closeness store ATOMICALLY: `.bak` first (also atomic), then tmp +
+    os.replace. Serialization of the read-modify-write across processes is the caller's job, via
+    store_lock(). Format knobs default to level_contacts' convention; each caller passes its own so
+    the reconciled diff shows only real changes."""
+    target = path or STORE
+    if set_updated:
+        import datetime
+        data["_updated"] = datetime.date.today().isoformat()
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    if backup and os.path.exists(target):
+        try:
+            with open(target, encoding="utf-8") as src:
+                cur = src.read()
+            tmpbak = target + ".bak.tmp"
+            with open(tmpbak, "w", encoding="utf-8") as bf:
+                bf.write(cur)
+            os.replace(tmpbak, target + ".bak")
+        except Exception:
+            pass
+    tmp = target + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=indent, ensure_ascii=ensure_ascii)
+        if trailing_newline:
+            fh.write("\n")
+    os.replace(tmp, target)
 
 # Score bonuses, used by the ranker when it is wired to this module. The shipped defaults were
 # ratified on the upstream repo's live pool: big enough that people you know sort ahead of

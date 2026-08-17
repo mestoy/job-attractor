@@ -210,6 +210,37 @@ def record(args):
 
     os.makedirs(FINDINGS_DIR, exist_ok=True)
     path = os.path.join(FINDINGS_DIR, f"{row['run']}.jsonl")
+    # ── BUG-215 COMPANY CEILING (mechanical, per run). An unattended sweep must not screen an
+    # unbounded number of companies on the strength of a prose "8 or so": once the run has recorded
+    # MAX_COMPANIES_PER_SWEEP DISTINCT companies, a NEW one is REFUSED loudly (never silently). Another
+    # finding for a company already in this run is not a new company and is always allowed.
+    # ⚖️ Fails OPEN on a limiter-import error: the coarser run-level caps (daily budget, --max-turns,
+    # wall-clock timeout) still bound spend, so a reporting tool must not brick a legitimate recording.
+    def _norm_company(s):
+        # Fold trivial variants to one key so "Acme Inc", "Acme  Inc", "Acme, Inc" and "Acme Inc."
+        # count as ONE company against the ceiling (the panel walked the cap with these variants).
+        # Punctuation becomes a space, runs of whitespace collapse, then lowercase.
+        import unicodedata
+        norm = unicodedata.normalize("NFKC", s or "")   # fold fullwidth/compatibility forms
+        cleaned = "".join(c if (c.isalnum() or c.isspace()) else " " for c in norm)
+        return " ".join(cleaned.split()).lower()
+
+    try:
+        import runtime_budget
+        _cap = runtime_budget.limit("MAX_COMPANIES_PER_SWEEP")
+        _seen = set()
+        if os.path.exists(path):
+            for _line in open(path, encoding="utf-8"):
+                try:
+                    _seen.add(_norm_company(json.loads(_line).get("company")))
+                except Exception:
+                    continue
+        if _norm_company(company) not in _seen and len(_seen) >= _cap:
+            print(f"⛔ not recorded: this run already screened {len(_seen)} companies "
+                  f"(MAX_COMPANIES_PER_SWEEP={_cap}); {company!r} is over the ceiling. Stop the sweep.")
+            return 2
+    except Exception:
+        pass
     # Append-only, one line, flushed. See the crash-safety note in the module docstring.
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")

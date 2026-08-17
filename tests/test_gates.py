@@ -6068,12 +6068,22 @@ class TestResumeCorePanelIsConfigurable(unittest.TestCase):
                 self.assertEqual(sorted(rr.LENSES), ["ceo", "cpo", "cto"])
 
     def test_the_expert_hook_is_a_separate_mechanism(self):
-        """The two are complementary: one names a PERSON, the other names a SEAT."""
+        """The two are complementary: one names a PERSON, the other names a SEAT. Both are OPTIONAL
+        config — review_resume reads each with a default and falls back to the ceo/cpo/cto seats — so
+        a RECIPIENT whose kit_config predates either attribute must NOT fail the suite over it. Assert
+        the RELATIONSHIP that must hold when they are present, not strict existence on a file the
+        recipient owns and updates on their own cadence (copy-if-absent; never clobbered on update)."""
         import kit_config
-        self.assertTrue(hasattr(kit_config, "RESUME_EXPERT_LENSES"))
-        self.assertTrue(hasattr(kit_config, "RESUME_CORE_LENSES"))
+        # the expert hook, WHEN present, ships empty — a named person is the recipient's to add.
         self.assertEqual([], list(getattr(kit_config, "RESUME_EXPERT_LENSES", [])),
-                         "the expert hook must still ship empty")
+                         "the expert hook, when present, must ship empty")
+        # the seat-based core ALSO ships empty (the recipient fills it; review_resume falls back to
+        # ceo/cpo/cto when it is empty), so assert only that, WHEN present, it is the right container
+        # type — never that it is populated, which would fail on the as-shipped empty default.
+        core = getattr(kit_config, "RESUME_CORE_LENSES", None)
+        if core is not None:
+            self.assertIsInstance(core, (dict, list),
+                                  "RESUME_CORE_LENSES must be a dict/list when set")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7305,6 +7315,13 @@ class TestBackupPushResolvesWritableRemote(unittest.TestCase):
         self._git(work, "config", "user.name", "T")
         self._git(work, "checkout", "-q", "-b", "main")
         shutil.copy(os.path.join(SCRIPTS, "backup.sh"), os.path.join(work, "scripts", "backup.sh"))
+        # backup.sh REFUSES to push unless pii_gate.py sits next to it and returns clean (the P0-1
+        # HARD gate). This test's subject is REMOTE RESOLUTION, not the PII vocabulary, and the real
+        # gate fails closed on a minimal fixture (its own floors demand hundreds of names / dozens of
+        # files). So stub the gate to a clean exit here — the same way this file stubs osascript/dig
+        # for the mail tests — and leave the gate's behavior to its dedicated pii_gate tests.
+        with open(os.path.join(work, "scripts", "pii_gate.py"), "w", encoding="utf-8") as fh:
+            fh.write("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
         with open(os.path.join(work, "seed.txt"), "w") as fh:
             fh.write("seed")
         self._git(work, "add", "-A")
@@ -7399,7 +7416,7 @@ class TestResumeHeaderSurvivesStyleStrip(unittest.TestCase):
     # A real résumé header: three ADJACENT lines, only the third carries a contact marker.
     HEADER = (r"{\fontsize{18}{20}\selectfont\bfseries Jane Doe}\\[2pt]" "\n"
               r"{\fontsize{10.5}{12}\selectfont Product Operations and Business Analysis}\\[3pt]" "\n"
-              r"Jacksonville, FL $\cdot$ Remote (US) $\mid$ (407) 401-1778 $\mid$ linkedin.com/in/janedoe")
+              r"Jacksonville, FL $\cdot$ Remote (US) $\mid$ (555) 555-0100 $\mid$ linkedin.com/in/janedoe")
 
     def test_name_and_tagline_survive_the_contact_blank(self):
         out = self.check_style._blank_marker_blocks(self.HEADER, "linkedin.com/in/")
@@ -7409,7 +7426,7 @@ class TestResumeHeaderSurvivesStyleStrip(unittest.TestCase):
     def test_the_contact_line_is_still_blanked(self):
         out = self.check_style._blank_marker_blocks(self.HEADER, "linkedin.com/in/")
         self.assertNotIn("linkedin.com/in/janedoe", out)
-        self.assertNotIn("401-1778", out)
+        self.assertNotIn("555-0100", out)
 
     def test_41_forward_wrap_still_blanks_the_whole_contact_header(self):
         # #41's case: the contact line wraps FORWARD onto a tail line carrying only an href label
@@ -7425,7 +7442,7 @@ class TestResumeHeaderSurvivesStyleStrip(unittest.TestCase):
         self.assertIn("Jane Doe", s)
         self.assertIn("Product Operations", s)
         self.assertNotIn("janedoe", s)
-        self.assertNotIn("401-1778", s)
+        self.assertNotIn("555-0100", s)
 
     def test_build_drift_scores_a_freshly_built_resume_at_1_0(self):
         # The ACTUAL gate: verify_resume.build_drift(tex_src, pdf_text) compares source_signature
@@ -7440,7 +7457,7 @@ class TestResumeHeaderSurvivesStyleStrip(unittest.TestCase):
                "Product operations and business analysis, building the systems that make teams faster.\n"
                "\\end{document}")
         pdf = ("Jane Doe\nProduct Operations and Business Analysis\n"
-               "Jacksonville, FL \u00b7 Remote (US) | (407) 401-1778 | linkedin.com/in/janedoe\n\n"
+               "Jacksonville, FL \u00b7 Remote (US) | (555) 555-0100 | linkedin.com/in/janedoe\n\n"
                "Objective\n"
                "Product operations and business analysis, building the systems that make teams faster.")
         ratio, sample = vr.build_drift(tex, pdf)

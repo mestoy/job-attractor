@@ -47,6 +47,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # indices, and state.py owns the ONE recency rule every reader funnels through.
 import schema  # noqa: E402
 import state  # noqa: E402
+# BUG-135: the remote veto reads the ✅/🔴 verdict marker first, and only falls back to a keyword scan
+# when no marker is present — and that fallback must be NEGATION-AWARE (a disqualifier offset by a
+# remote-confirm phrase is not a fail). Reuse check_screen_gate's canonical lists so the two never
+# drift; if it cannot be imported, degrade to marker-only (never silently re-add the naive scan).
+_LEGACY_REMOTE_DISQUAL = [r"hybrid", r"onsite required", r"relocat", r"\brto\b", r"in[- ]office"]
+try:
+    from check_screen_gate import REMOTE_DISQUAL as _REMOTE_DISQUAL  # noqa: E402
+except Exception:
+    _REMOTE_DISQUAL = _LEGACY_REMOTE_DISQUAL
 # The tier → rung → ask contract. Imported, never copied: check_preview.py refuses a wrong-shaped ask
 # from the SAME table this recommends from, and two copies of one rule drift the first time either is
 # fixed. Degrades to a stub when the closeness store has never been built, so a partner who has not
@@ -689,6 +698,28 @@ def _desk_points(desk):
     return pts, reasons
 
 
+def _remote_is_disqualifying(remote):
+    """(True, reason) when the recorded remote evidence is a FAIL, else (False, "").
+
+    BUG-135: the recorded field is PROSE the screener wrote, so a clean seat proves itself by NAMING
+    the disqualifiers it lacks ("No hybrid, RTO or relocation clause"). Reading topic words vetoed
+    exactly those confirmations. Read the ✅/🔴 VERDICT MARKER the field carries instead; only when
+    NEITHER marker is present do we fall back to check_screen_gate's NEGATION-AWARE scan (a
+    disqualifier that no remote-confirm phrase offsets). A pattern that matches the TOPIC is not a
+    check on the VERDICT."""
+    text = remote or ""
+    if "🔴" in text:
+        return True, text.strip() or "marked disqualified"
+    if "✅" in text:
+        return False, ""                       # marked-clean: trust the screener's remote verdict
+    low = text.lower()
+    if any(re.search(d, low) for d in _REMOTE_DISQUAL):
+        return True, text.strip() or "disqualifying arrangement (unmarked)"
+    if "remote" not in low:
+        return True, text.strip() or "not confirmed"
+    return False, ""
+
+
 def _score_fields(company, lane, remote, culture, nonpe, boss, praise, desk=None):
     """The scoring core, shared by the positional and the state-store readers.
 
@@ -703,8 +734,9 @@ def _score_fields(company, lane, remote, culture, nonpe, boss, praise, desk=None
     _v = _industry_vetoed(lane + " " + company)
     if _v:
         return None, f"veto industry ({', '.join(_v)})"
-    if re.search(r"hybrid|onsite required|relocat", remote, re.I) or "✅" not in remote and "remote" not in remote.lower():
-        return None, f"veto (remote): {remote.strip() or 'not confirmed'}"
+    _rem_bad, _rem_reason = _remote_is_disqualifying(remote)
+    if _rem_bad:
+        return None, f"veto (remote): {_rem_reason}"
     if any(re.search(p, nonpe, re.I) for p in PE_FLAG) and "✅" not in nonpe:
         return None, f"veto (PE): {nonpe.strip()}"
 
@@ -1151,6 +1183,91 @@ def banked_topup(have, done, blocked, need):
     return out[:need]
 
 
+def network_topup(have, done, blocked, need):
+    """Fill from companies where you ALREADY KNOW SOMEONE, which no ranker read until this was added.
+
+    ⛔ THE GAP THIS CLOSES. `rank_network_companies.py` ranks companies by who you know there, and the
+    network-companies ranker's own step order (pick the company first, then who-you-know) says that is
+    where to start — but the board never consulted it. Meanwhile the warm-path term ratified
+    2026-08-11 scored every board row at zero, because the pool was built entirely from companies
+    where you know nobody.
+    📊 The evidence that makes that the wrong pool to draw from: replies were markedly more likely
+    where a path existed than where none did, and the board was systematically sourcing from the
+    weaker side.
+
+    ⚠️ THESE ARE UNSCREENED, and they say so. A network company has passed no gate beyond the
+    industry and blocked checks `rank_network_companies` already applies, so it enters at the same
+    low `pts` as a banked row and can never outrank a screened one. The warm-path term then scores
+    it on its own merits, which is the whole point: it earns its place through the ratified signal
+    rather than through a hand-placed bonus.
+    """
+    out = []
+    try:
+        import rank_network_companies as rnc
+        ranked = rnc.rank(need * 4)
+        ranked = ranked[0] if isinstance(ranked, tuple) else ranked
+    except Exception:
+        return out
+    havenames = {c["company"].lower() for c in have}
+    for r in ranked:
+        co = (r.get("company") or "").strip()
+        low = co.lower()
+        if not co or low in havenames or low in done or low in blocked:
+            continue
+        if _industry_vetoed(co) or is_artifact(co):
+            continue
+        # ⛔ A WARM DOOR IS NOT A TARGET UNTIL IT IS ALSO A VIABLE EMPLOYER, and this is the line
+        # that was missing when wiring this source made the board worse. Ranked on who you know
+        # ALONE, the top of the network list is dominated by mega-caps and incumbents: real doors,
+        # none of them somewhere you would work. Requiring a POSITIVE target-segment read is the
+        # cheapest disqualifier available and it does the whole job: the pool narrows sharply.
+        # ⚖️ POSITIVE ONLY. An `unknown` segment is not admitted here, which is the opposite of the
+        # tri-state rule for DEMOTING a person, and deliberately so: this source ADDS rows to a pick
+        # surface rather than reordering ones already screened, so the burden of proof runs the
+        # other way (employer industry needs real data, never a name match).
+        try:
+            _seg, _detail = contact_signals.segment_read(company=co)
+        except Exception:
+            continue
+        if _seg != "relevant":
+            continue
+        # ⛔ THE DISQUALIFIERS RUN HERE, NOT IN THE CHAT (ruled 2026-08-11: disqualifiers must be
+        # screened before reaching the reviewer, not filtered by hand in the chat).
+        # 📊 THE OCCASION. The first network top-up surfaced companies that were dead on arrival:
+        # foreign firms that failed remote-US, and government agencies that were govtech, which you
+        # deprioritized. They were filtered by hand in the chat, which fixes one run and leaves the
+        # next one identical. A disqualifier applied in prose is not applied.
+        # ⚖️ READ OFF THE RESOLVED INDUSTRY TEXT, which is sourced and already in hand, so this
+        # costs nothing and cannot invent a reason. It is a CHEAP first pass, never the remote
+        # gate itself: a US company is not cleared for remote by surviving this (cheapest
+        # disqualifier first; remote is absolute).
+        _d = str(_detail or "")
+        # ⛔ A NAME-PATTERN MATCH IS NOT A SEGMENT READ, and admitting one here would repeat the
+        # mistake this source was built to undo. `segment_read` falls back to matching the COMPANY
+        # NAME when the sourced cache has no row, and returns `payments (matched "FinTech")` for a
+        # company whose NAME merely contains a segment word, which nobody screened. The vast
+        # majority of employers are unresolvable from the name alone.
+        # ⚖️ So this source requires a SOURCED read. The cache writes a real industry sentence and a
+        # URL; the fallback writes `(matched "...")` and nothing else. Requiring the source is the
+        # difference between "we know what they do" and "their name contains a word".
+        if 'matched "' in _d or "·" not in _d:
+            continue
+        if _NON_US_TELL.search(_d):
+            continue
+        if _seg == "relevant" and _detail and "govtech" in _d.lower():
+            continue          # deprioritized by your ruling; not a veto, so it simply does not top up
+        out.append({"company": co, "lane": f"FROM YOUR NETWORK · {str(_detail)[:40]}",
+                    "tier": 1, "pts": 0.5, "seats": 0,
+                    "reasons": [f"🔗 {r.get('people', 0)} known there"
+                                + (f" ({r.get('product', 0)} in product)" if r.get("product") else "")
+                                + ". NOT screened: remote, PE, culture and boss all still owed."],
+                    "boss": "", "source": "network"})
+        havenames.add(low)
+        if len(out) >= need:
+            break
+    return out
+
+
 def discovery_topup(have, done, blocked, need):
     """Fill toward N from the discovery board when the green board is thin. These are NOT fully
     screened, so they are tagged 💡 and sorted below every green-board row by construction."""
@@ -1208,8 +1325,26 @@ def rank(n=10):
     # the pool would stop topping up at n and then hand back fewer.
     if len(cands) < n:
         cands += _drop_deferred(banked_topup(cands, done, blocked, n - len(cands)), skipped, supp)
+    # 🔗 THEN COMPANIES YOU ALREADY HAVE A PATH INTO. Wired only AFTER the segment gate went in:
+    # ranking on who-you-know alone surfaces mega-caps and incumbents you would never work at. The
+    # warm-path signal is real; a pool sourced ONLY on it is not. See network_topup.
+    if len(cands) < n:
+        cands += _drop_deferred(network_topup(cands, done, blocked, n - len(cands)), skipped, supp)
     if len(cands) < n:
         cands += _drop_deferred(discovery_topup(cands, done, blocked, n - len(cands)), skipped, supp)
+    # 🔗 WARM PATH, the ratified term (2026-08-11). Measured live, so a run where the evidence thins
+    # below the floor scores NOTHING rather than carrying yesterday's weight.
+    _lift, _wc, _woc = warm_path_lift()
+    if _lift is None:
+        print(f"  ⚪ warm path NOT scored: {_wc[1]} joinable send(s) with a path, under the "
+              f"n={WARM_PATH_MIN_N} floor. The signal is unmeasurable today, so it weighs nothing.",
+              file=sys.stderr)
+    for c in cands:
+        _p, _why = warm_path_points(c.get("company", ""), _lift)
+        if _why:
+            c.setdefault("reasons", []).append(_why)
+        if _p:
+            c["pts"] = round(float(c.get("pts") or 0) + _p, 1)
     # Sort by the final criteria score, which ALREADY folds in culture-screen confidence (the
     # per-tier multiplier in score_board_row). A verified clean row therefore floats up on merit
     # rather than by fiat, and the number the user reads is the number they are sorted by — no
@@ -1951,6 +2086,144 @@ def _category_evidence():
     return per, joined, len(rows), attributable
 
 
+# A predictor may only read what was known ON THE SEND DATE. A title from an export snapshot passes.
+# Anything read from today's thread state (they replied, the thread is live, closeness was later
+# stated) is reading the outcome back into the predictor, and it will look brilliant and predict
+# nothing.
+LEAKY_FIELDS = ("replied", "reply_date", "reply_kind", "stage", "stage_at", "replied_note",
+                "outcome", "followup_due")
+
+
+# ── WARM PATH: the first signal to clear the validation gate (ratified 2026-08-11) ──────────────
+#
+# 📊 THE EVIDENCE IT RATIFIED ON, measured over this user's own send log: replies were markedly
+# more likely where a path into the company already existed BEFORE the send than where none did.
+# First signal to pass since the gate killed three endorsement variants.
+#
+# ⚠️ THE SAME SIGNAL READ FLAT SIX HOURS EARLIER and that was an ARTEFACT, not a null. The join was
+# starved: `company` and `to_name` were missing on precisely the rungs that convert, so the joinable
+# half was a cold-boss sample with a depressed base rate against the true one. Reporting it as a
+# kill would have retired the one feature the outcome record points at.
+# ⛔ Do not call an underpowered result a negative one.
+#
+# ⚖️ THE WEIGHT IS LEARNED, NEVER TYPED. `warm_path_lift()` re-measures the ratio from the live send
+# log on every run, so the bonus tracks the evidence instead of freezing a number someone liked in
+# August (learned weights, never typed; a validated signal, not a hand-placed bonus).
+# 🌏 A COUNTRY NAMED IN THE RESOLVED INDUSTRY TEXT IS A CHEAP REMOTE-US TELL. The segment cache
+# writes a plain-language industry line ("Nigerian microfinance bank offering...", "Singapore-based
+# super-app"), so the country is usually right there for free. Deliberately CONSERVATIVE: it fires
+# only on an explicit national adjective or a country name, never on a city, so a US company with a
+# foreign office survives and reaches the real remote gate.
+_NON_US_TELL = re.compile(
+    r"\b(nigerian?|indian?|singapore(an)?|chinese|china|brazil(ian)?|mexican|mexico|"
+    r"german(y)?|french|france|spanish|spain|italian|italy|dutch|netherlands|swedish|sweden|"
+    r"norwegian|norway|danish|denmark|finnish|finland|polish|poland|israeli|israel|"
+    r"japanese|japan|korean|korea|australian|australia|kenyan|kenya|"
+    r"south africa(n)?|indonesia(n)?|philippin|vietnam(ese)?|thai(land)?|malaysia(n)?|"
+    r"south ?east asia|latin america|emea|apac|uk[- ]based|british)\b", re.I)
+
+WARM_PATH_MIN_N = 15          # the same floor `validate_signal` refuses to ratify under
+WARM_PATH_MAX_POINTS = 10.0   # ceiling, so one learned term cannot swamp the whole 36-criterion card
+
+
+def warm_path_lift():
+    """(lift, with_cell, without_cell) measured live, or (None, ...) when the evidence is too thin.
+
+    Returns None for the lift when `n` is under the floor, and every caller must then score NOTHING.
+    A signal that cannot be measured today must not carry yesterday's weight.
+    """
+    try:
+        from rung_ladder import load as _load, NOT_DELIVERED as _ND
+        import send_identity as _si
+        from screen_sweep import canon as _canon
+        from datetime import datetime as _dt
+        import parse_network as _pn
+    except Exception:
+        return None, (0, 0), (0, 0)
+    known = _known_people_by_company(_pn, _canon)
+    if not known:
+        return None, (0, 0), (0, 0)
+    cache = _si.store()
+    a_s = a_r = b_s = b_r = 0
+    for r in _load():
+        if str(r.get("status", "")).lower() in _ND:
+            continue
+        co = _canon(_si.company_for(r, cache=cache)[0])
+        if not co:
+            continue
+        try:
+            sd = _dt.strptime((r.get("date") or "")[:10], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        me = re.sub(r"[^a-z0-9]", "", (_si.name_for(r, cache=cache)[0] or "").lower())
+        # ⛔ STRICTLY BEFORE, and never the recipient themself. Without the date guard every cold
+        # send that LATER became a connection counts as a path that existed beforehand, which is
+        # the outcome leaking into the predictor.
+        hit = any(d < sd and re.sub(r"[^a-z0-9]", "", w.lower()) != me for d, w in known.get(co, ()))
+        if hit:
+            a_s += 1; a_r += 1 if r.get("replied") else 0
+        else:
+            b_s += 1; b_r += 1 if r.get("replied") else 0
+    if a_s < WARM_PATH_MIN_N or not b_s or not b_r:
+        return None, (a_r, a_s), (b_r, b_s)
+    return (a_r / a_s) / (b_r / b_s), (a_r, a_s), (b_r, b_s)
+
+
+_KNOWN_BY_CO = None
+
+
+def _known_people_by_company(pn, canon):
+    """company key -> [(connect_date, person)], from the export. Cached for the process."""
+    global _KNOWN_BY_CO
+    if _KNOWN_BY_CO is not None:
+        return _KNOWN_BY_CO
+    out = collections.defaultdict(list)
+    d = os.path.join(REPO, "documents", "linkedin-exports")
+    if os.path.isdir(d):
+        best = {}
+        for fn in sorted(os.listdir(d)):
+            if not fn.lower().endswith(".csv"):
+                continue
+            try:
+                text = open(os.path.join(d, fn), encoding="utf-8-sig", errors="replace").read()
+            except Exception:
+                continue
+            for r in pn.parse_rows(text):
+                key = (r.get("URL") or "").strip().lower()
+                when = pn.connected_on(r.get("Connected On"))
+                co = (r.get("Company") or "").strip()
+                who = f"{r.get('First Name', '')} {r.get('Last Name', '')}".strip()
+                if not key or not when or not co or not who:
+                    continue
+                if key not in best or when < best[key][0]:
+                    best[key] = (when, co, who)
+        for when, co, who in best.values():
+            k = canon(co)
+            if k:
+                out[k].append((when, who))
+    _KNOWN_BY_CO = out
+    return out
+
+
+def warm_path_points(company, lift):
+    """(points, reason) for one company. Scores NOTHING when the signal is unmeasurable today."""
+    if lift is None or not company:
+        return 0.0, None
+    try:
+        from screen_sweep import canon as _canon
+        import parse_network as _pn
+    except Exception:
+        return 0.0, None
+    people = _known_people_by_company(_pn, _canon).get(_canon(company), [])
+    if not people:
+        return 0.0, "warm path: none known there"
+    # Scaled by the MEASURED lift, capped, and flat in the count: knowing six people is not six
+    # times one door. The evidence says a path exists or it does not.
+    pts = min(WARM_PATH_MAX_POINTS, (lift - 1.0) * WARM_PATH_MAX_POINTS)
+    return max(0.0, pts), (f"🔗 warm path: {len(people)} known there "
+                           f"(+{max(0.0, pts):.1f}, learned lift {lift:.2f}x)")
+
+
 # ── PERSON-LEVEL LEARNED TERMS (BUG-181 WU-3) ────────────────────────────────────────────────────
 # Among equally-warm peers the score is band-uniform, so a tie collapses onto the connect date. WU-3
 # derives per-person candidates the same way the category weights are derived: measure a reply-rate
@@ -2118,6 +2391,12 @@ def audit_signals():
     any_clear = any(cl.get(b, (None,))[0] is not None for b in ("strong", "thin"))
     row("closeness-tier learned +pts", LEARNED if any_clear else SILENT,
         "clamp, n≥15 floor, under-floor ⇒ 0.0", "adds to pts only where a band clears the floor")
+    # warm path (company-level) — ratified + learned lift, re-measured every run.
+    wl, wa, wb = warm_path_lift()
+    row("warm path (company)", RATIFIED,
+        "ratified 2026-08-11; lift re-measured every run",
+        (f"with n={wa[1]} replies={wa[0]} vs without n={wb[1]} replies={wb[0]}; "
+         + (f"lift {wl:.2f}x" if wl is not None else "under floor → scores nothing")))
     t = cells["thread"]
     tw = "  ".join(f"{k}:n={t.get(k, [0, 0])[0]}/r={t.get(k, [0, 0])[1]}"
                    for k in ("live", "cooling", "dead", "never"))
@@ -2148,6 +2427,130 @@ def audit_signals():
     print(f"\n  TYPED-UNVALIDATED terms: {typed_n[0]}   "
           f"({'✅ GREEN' if typed_n[0] == 0 else '🔴 RED'})")
     return typed_n[0]
+
+
+_SEND_IDENTITY_CACHE = None
+
+
+def _send_identity_name(row):
+    """The recipient's name for a send row, filling from the sidecar where the row is silent.
+
+    ⚠️ DEGRADES TO THE ROW, never to a guess. If the sidecar is missing or unreadable this returns
+    exactly what the row already said, so the join gets no worse than it was.
+    """
+    global _SEND_IDENTITY_CACHE
+    try:
+        import send_identity
+        if _SEND_IDENTITY_CACHE is None:
+            _SEND_IDENTITY_CACHE = send_identity.store()
+        return send_identity.name_for(row, cache=_SEND_IDENTITY_CACHE)[0]
+    except Exception:
+        return (row.get("to_name") or "").strip()
+
+
+def validate_signal(name, predicate=None, path=None, population="note"):
+    """Join a candidate predicate to the send log and report whether it discriminates.
+
+    Returns a dict; prints a human report. NEVER scores anything — ratification is yours.
+
+    `population` chooses WHERE the predicate is matched to build the flagged set:
+      · "note"   — the closeness store's `note` field (the original path; loose, note-dependent).
+      · "titles" — the recipient's TITLE from `_people_rows()`, the export-snapshot title frozen at
+                   the connect date (for title-shaped hypotheses like function relevance). A title is
+                   a SEND-DATE-safe feature, so it clears leakage by construction. Added so the
+                   harness can test title predicates without misreading them against `note`.
+    """
+    known = {
+        # Title-shaped, computable from the export snapshot as of the send date.
+        "recruiter": (r"recruit|talent|sourcer|staffing|people ops|acquisition|headhunt",
+                      "note", "title carries a placement-side word"),
+        "founder": (r"founder|ceo|co-?founder|owner|principal", "note", "title carries an owner word"),
+    }
+    pred = predicate
+    field, why = "note", "custom predicate"
+    if pred is None:
+        if name not in known:
+            print(f"🔴 unknown signal {name!r}. Known: {', '.join(sorted(known))}, "
+                  f"or pass a regex.")
+            return {"error": "unknown"}
+        pred, field, why = known[name]
+    if population == "titles":
+        field = "title"
+        why = f"{why} · matched over TITLES (_people_rows)"
+
+    # ── LEAKAGE TEST, first, because a leaky feature must never reach the join ──
+    leaks = [f for f in LEAKY_FIELDS if f in (pred or "")]
+    if leaks or field in LEAKY_FIELDS:
+        print(f"🔴 REFUSED: {name!r} reads {leaks or [field]}, which is only known AFTER the send.")
+        print("   That is the outcome leaking into the predictor. It would score beautifully and")
+        print("   predict nothing. A feature must be computable from what was known on the SEND DATE.")
+        return {"error": "leaky", "fields": leaks or [field]}
+
+    rx = re.compile(pred, re.I)
+    norm = lambda x: re.sub(r"[^a-z0-9]", "", (x or "").lower())
+    if population == "titles":
+        # Flag by TITLE from the people rows (name, title, company, flag, known_since).
+        flagged = set()
+        try:
+            for _row in _people_rows():
+                _nm, _title = _row[0], _row[1]
+                if rx.search(str(_title or "")):
+                    flagged.add(norm(_nm))
+        except Exception:
+            pass
+    else:
+        store = {}
+        try:
+            cl_path = os.path.join(REPO, "documents", "contact-closeness.json")
+            store = json.load(open(cl_path, encoding="utf-8")).get("contacts", {})
+        except Exception:
+            pass
+        flagged = {norm(k) for k, v in store.items() if rx.search(str(v.get(field) or ""))}
+
+    try:
+        from rung_ladder import load as _load_sends, NOT_DELIVERED
+        rows = _load_sends()
+    except Exception:
+        print("🔴 cannot read the send log; nothing to validate against.")
+        return {"error": "no-log"}
+
+    a_s = a_r = b_s = b_r = unjoined = 0
+    for r in rows:
+        if str(r.get("status", "")).lower() in NOT_DELIVERED:
+            continue
+        # 🔗 THE SIDECAR FILLS THE SILENCE (BUG-166). A large share of delivered sends carry no
+        # `to_name`, and most replies sit in that group, so this join saw a fraction of the evidence
+        # and two separate signals died of it. The log is NEVER rewritten, so the name lives beside
+        # it keyed on the address the row DOES carry. `name_for` puts the row's own `to_name` first
+        # and answers only where the row is silent.
+        who = norm(_send_identity_name(r))
+        if not who:
+            unjoined += 1
+            continue
+        hit = who in flagged
+        if hit:
+            a_s += 1
+            a_r += 1 if r.get("replied") else 0
+        else:
+            b_s += 1
+            b_r += 1 if r.get("replied") else 0
+
+    print(f"\n── SIGNAL: {name} ── ({why})")
+    if a_s == 0:
+        print(f"   ⚪ CANNOT BE VALIDATED: 0 joinable sends carry this signal.")
+        print(f"      {unjoined} row(s) carry no recipient NAME at all and can never join.")
+        print("      This is not a 0% rate. It is an absence of evidence, and scoring it would be")
+        print("      typing a weight from nothing. Send to some and re-run.")
+        return {"error": "no-cells", "unjoined": unjoined}
+
+    # ⛔ CELL COUNTS, never bare percentages. A rate with no n invites a ruling the data cannot carry.
+    print(f"   carries it   : {a_r}/{a_s} replied")
+    print(f"   does not     : {b_r}/{b_s} replied")
+    print(f"   unjoinable   : {unjoined} row(s) with no recipient name")
+    if a_s < 15:
+        print(f"   ⚠️  n={a_s} is TOO SMALL to rank. Report it as a hint and keep sending; do not")
+        print("      ratify a weight on it. The exploration allowance already samples thin bands.")
+    return {"signal": name, "with": [a_r, a_s], "without": [b_r, b_s], "unjoined": unjoined}
 
 
 def _compute_weights():
@@ -3389,6 +3792,18 @@ def main():
         sys.exit(0)
     if "--audit-signals" in sys.argv:
         sys.exit(0 if audit_signals() == 0 else 2)
+    if "--validate-signal" in sys.argv:
+        _i = sys.argv.index("--validate-signal")
+        _name = sys.argv[_i + 1] if _i + 1 < len(sys.argv) else ""
+        _pred = None
+        if "--predicate" in sys.argv:
+            _j = sys.argv.index("--predicate")
+            _pred = sys.argv[_j + 1] if _j + 1 < len(sys.argv) else None
+        if not _name:
+            print('usage: --validate-signal <name> [--predicate <regex>]')
+            sys.exit(3)
+        validate_signal(_name, _pred)
+        sys.exit(0)
     if "--weights" in sys.argv:
         W = _stored_weights()
         if not W:

@@ -362,6 +362,23 @@ def main():
     else:
         print("  ✅ nothing outstanding")
 
+    # BOARD TRIAGE (Michael 2026-08-16): the bug/issue board, auto-triaged into buckets and
+    # refreshed at most once a day (triage_board caches, so only the first session pays the `gh`
+    # call). Uptime threats surface at sign-in so a broken gate is seen, but nothing pings mid-day —
+    # "minimal interruptions." Guarded on its own so a board/`gh`/offline failure degrades to a note
+    # and can never blank the rest of the brief.
+    try:
+        import triage_board
+        _dig, _note = triage_board.get_digest()
+        section("A2. BOARD TRIAGE")
+        if _dig is not None:
+            print(triage_board.render_session(_dig, _note, header=False))
+        else:
+            print(f"  ⚪ board triage unavailable ({_note})")
+    except Exception as _e:
+        section("A2. BOARD TRIAGE")
+        print(f"  ⚪ board triage skipped ({type(_e).__name__})")
+
     section(f"B. TODAY'S 3-3-3  ({date.today().isoformat()})")
     n = sends_today()
     print(f"  messages sent today: {n} / 3" + ("   ✅ loop closed" if n >= 3 else "   ⬅ not yet done"))

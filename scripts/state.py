@@ -190,6 +190,40 @@ def _canon_boss(raw):
     return slug or _canon_person(raw)
 
 
+def _handle_slug(linkedin):
+    """The raw LinkedIn handle slug for a contact ("michael-edmonson"), or "" when none is derivable.
+
+    BUG-180: the store keyed on a SQUASHED display name (`_canon_person`), not invertible and it
+    collides with real strangers' handles. The recoverable identity is the handle in
+    `payload.linkedin`. Reuse `sync_contacted._slug_from_to` (the parser `_canon_boss` uses) so every
+    field shape (bare handle, `linkedin:handle`, full URL, trailing slash, query string) yields one slug.
+    """
+    if not linkedin:
+        return ""
+    sys.path.insert(0, HERE)
+    try:
+        from sync_contacted import _slug_from_to
+        slug = (_slug_from_to(linkedin) or "").strip().lower()
+    except Exception:
+        slug = ""
+    if slug:
+        return slug
+    v = str(linkedin).strip().lower()
+    if v and "@" not in v and " " not in v and "-" in v and re.match(r"^[a-z0-9/\-]+$", v):
+        return v.strip("/")
+    return ""
+
+
+def _handle_key(linkedin):
+    """The NAMESPACED contact key for a handle, "li:<slug>", or "" when no handle is derivable.
+
+    The `li:` prefix keeps the handle key space DISJOINT from the squashed-name space (a squash is
+    bare alphanumerics and can never contain a colon), so two different people cannot collide across
+    the two spaces even when a handle is hyphenless (BUG-180)."""
+    slug = _handle_slug(linkedin)
+    return ("li:" + slug) if slug else ""
+
+
 _KEYERS = {
     "company": _canon_company,
     "contact": _canon_person,
@@ -199,11 +233,36 @@ _KEYERS = {
 }
 
 
-def key_for(kind, raw):
-    """Normalize a raw name into this kind's canonical key. The ONLY way callers should build keys."""
+def key_for(kind, raw, linkedin=None):
+    """Normalize a raw name into this kind's canonical key. The ONLY way callers should build keys.
+
+    BUG-180: for a CONTACT with a LinkedIn handle available (`linkedin=`, from the row's payload), key
+    on the HANDLE (collision-free), falling back to the squashed name only when no handle exists.
+    Other kinds ignore `linkedin`. Backward compatible: no handle passed means prior behavior."""
     if kind not in KINDS:
         raise StateError(f"unknown kind {kind!r} (known: {', '.join(KINDS)})")
+    if kind == "contact" and linkedin:
+        h = _handle_key(linkedin)
+        if h:
+            return h
     return _KEYERS[kind](raw)
+
+
+def _candidate_keys(kind, raw, linkedin=None):
+    """The keys a NAME lookup should check. BUG-180 dual-key: a contact may live under its HANDLE key
+    ("li:<slug>") OR its squashed-name key, so a name lookup checks BOTH (handle first). The spaces
+    cannot cross-collide (the "li:" prefix the squash can never produce). Other kinds: one key."""
+    if kind == "contact":
+        out = []
+        h = _handle_key(linkedin)
+        if h:
+            out.append(h)
+        sq = _canon_person(raw)
+        if sq and sq not in out:
+            out.append(sq)
+        return out
+    k = key_for(kind, raw)
+    return [k] if k else []
 
 
 # ── dates ────────────────────────────────────────────────────────────────────────────────────
@@ -338,16 +397,20 @@ def _sort_key(rec):
     return (as_of, prec, rec.get("_seq", 0))
 
 
-def history(kind, key, raw_key=False):
-    """Every record for one key, NEWEST FIRST."""
-    k = key if raw_key else key_for(kind, key)
+def history(kind, key, raw_key=False, linkedin=None):
+    """Every record for one key, NEWEST FIRST.
+
+    BUG-180 dual-key: for a contact NAME lookup, pass `linkedin=` (from the export/row) and this checks
+    BOTH the handle key and the squashed-name key, so a person keyed either way resolves without
+    rewriting any row. `raw_key=True` still matches exactly one key."""
+    ks = [key] if raw_key else _candidate_keys(kind, key, linkedin)
     rows, _ = _read_raw(kind)
-    return sorted([r for r in rows if r.get("key") == k], key=_sort_key, reverse=True)
+    return sorted([r for r in rows if r.get("key") in ks], key=_sort_key, reverse=True)
 
 
-def current(kind, key, raw_key=False):
+def current(kind, key, raw_key=False, linkedin=None):
     """The newest record for one key, or None. The function the whole design exists to provide."""
-    h = history(kind, key, raw_key=raw_key)
+    h = history(kind, key, raw_key=raw_key, linkedin=linkedin)
     return h[0] if h else None
 
 
@@ -444,7 +507,7 @@ def append(kind, key, as_of=None, as_of_source=None, source_file=None,
             "Must be one of: authored · live:<url> · export:<name> · git:<sha>"
         )
 
-    k = key_for(kind, key)
+    k = key_for(kind, key, linkedin=payload.get("linkedin"))
     if not k:
         raise StateError(f"refusing to write {kind} record with an empty key (raw {key!r})")
 
@@ -941,7 +1004,7 @@ def _note_alias_override(kind, scraped_key, canonical_key):
         pass
 
 
-def resolve(kind, raw):
+def resolve(kind, raw, linkedin=None):
     """The canonical key for a raw name, or None when the store has never heard of it.
 
     Returns None rather than the normalized key for an unknown name ON PURPOSE. `key_for()` always
@@ -968,17 +1031,35 @@ def resolve(kind, raw):
     ⚠️ An override is LOGGED rather than silent, because the failure mode of this rule is merging two
     genuinely different companies, and that must be visible in the run that does it.
     """
-    k = key_for(kind, raw)
-    if not k:
-        return None
-    aliased = _alias_index(kind).get(k)
-    if aliased and aliased != k:
+    # BUG-180 dual-key: check the handle key AND the squashed-name key (handle first). First
+    # known/aliased candidate wins; unknown across all candidates still returns None.
+    for k in _candidate_keys(kind, raw, linkedin):
+        aliased = _alias_index(kind).get(k)
+        if aliased and aliased != k:
+            if k in _known_keys(kind):
+                _note_alias_override(kind, k, aliased)
+            return aliased
         if k in _known_keys(kind):
-            _note_alias_override(kind, k, aliased)
-        return aliased
-    if k in _known_keys(kind):
-        return k
+            return k
     return None
+
+
+def address_for(contact_row):
+    """The paste-ready LinkedIn URL to ADDRESS a contact, strictly from its handle, NEVER the key.
+
+    BUG-180 ADDRESSING GUARD. The store's top-level `key` is a squashed display name that can resolve
+    to a DIFFERENT, vetoed human, so a note addressed off the key can reach the wrong person. The
+    recoverable identity is the handle in `payload.linkedin`. This is the ONE sanctioned way to turn a
+    stored contact into a send address: it derives from `payload.linkedin` and RAISES when none exists
+    rather than fall back to the key. Accepts a full store row or a bare payload dict."""
+    row = contact_row or {}
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else row
+    handle = _handle_slug((payload or {}).get("linkedin"))
+    if not handle:
+        raise StateError(
+            "no LinkedIn handle for this contact (payload.linkedin missing/unparseable) - refusing to "
+            "address off the squashed key, which can resolve to a DIFFERENT person (BUG-180).")
+    return f"https://www.linkedin.com/in/{handle}"
 
 
 def register(kind, name, alias=None, as_of=None, as_of_source=None, **fields):

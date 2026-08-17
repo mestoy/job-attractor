@@ -47,8 +47,10 @@ Usage:
 
 Exit: 0 = ok · 2 = missing input (no export / no store where one is needed) · 3 = usage
 """
+import contextlib
 import csv
 import datetime
+import functools
 import glob
 import io
 import json
@@ -137,16 +139,78 @@ def ensure_store():
     return data, True
 
 
-def _write(data, fresh=False):
-    """Write the store, `.bak` first — the same contract parse_messages.py honors for this file."""
-    data["_updated"] = datetime.date.today().isoformat()
-    if not fresh:
+LOCK = STORE + ".lock"
+
+
+@contextlib.contextmanager
+def _store_lock():
+    """Serialize the read-modify-write of contact-closeness.json ACROSS PROCESSES (BUG-221, kit port).
+
+    ⛔ WHY. The store is a WHOLE-FILE json dict: load_raw/ensure_store read it, _write rewrites it,
+    and the mutation lives in the caller between those two. Two writers racing that read→write span
+    silently lose one update (last writer wins) — a real hazard the moment a second session, or the
+    auto-fired new-contact sweep -> infer, writes at the same time as the live interview. An
+    exclusive flock held across the whole span (via the @_under_store_lock decorator on the two
+    mutating entry points) makes the writers take turns. This mirrors the workspace fix (BUG-221) so
+    the kit's interview writer — the MOST FREQUENT writer of this file — locks against the same LOCK
+    path parse_messages and sync_contacted already share, rather than clobbering a concurrent write.
+
+    Degrades to a NO-OP lock if fcntl is unavailable (non-unix); the atomic _write below still
+    prevents truncation/corruption there, only cross-process ordering is lost. Non-reentrant on
+    purpose: the two decorated entry points (infer, record) never call each other, and ensure_store
+    (which they call) is NOT decorated, so a single process never double-acquires and deadlocks.
+    """
+    try:
+        import fcntl
+    except Exception:
+        yield
+        return
+    os.makedirs(os.path.dirname(LOCK), exist_ok=True)
+    fh = open(LOCK, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+    finally:
         try:
-            open(BACKUP, "w", encoding="utf-8").write(open(STORE, encoding="utf-8").read())
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        finally:
+            fh.close()
+
+
+def _under_store_lock(fn):
+    """Run `fn` holding the exclusive store lock, so its load→mutate→write span cannot interleave
+    with another writer's. Applied to the two entry points that rewrite the whole store."""
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _store_lock():
+            return fn(*args, **kwargs)
+    return wrapped
+
+
+def _write(data, fresh=False):
+    """Write the store ATOMICALLY (tmp + os.replace), `.bak` first (BUG-221, kit port).
+
+    ⛔ The old form was `json.dump(data, open(STORE, "w"))` — a direct truncate-then-write, so a
+    crash or a concurrent reader mid-dump saw a truncated/half-written store, and the `.bak` was
+    written the same non-atomic way. Now every file swap is tmp+os.replace, which is atomic on POSIX:
+    a reader sees either the whole old file or the whole new one, never a torn one. Serialization of
+    the read-modify-write across processes is the caller's job, via @_under_store_lock."""
+    data["_updated"] = datetime.date.today().isoformat()
+    os.makedirs(os.path.dirname(STORE), exist_ok=True)
+    if not fresh and os.path.exists(STORE):
+        try:
+            with open(STORE, encoding="utf-8") as src:
+                cur = src.read()
+            tmpbak = BACKUP + ".tmp"
+            with open(tmpbak, "w", encoding="utf-8") as bf:
+                bf.write(cur)
+            os.replace(tmpbak, BACKUP)
         except Exception:
             pass
-    os.makedirs(os.path.dirname(STORE), exist_ok=True)
-    json.dump(data, open(STORE, "w", encoding="utf-8"), indent=1, ensure_ascii=False)
+    tmp = STORE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=1, ensure_ascii=False)
+    os.replace(tmp, STORE)
 
 
 def _index(contacts):
@@ -363,6 +427,7 @@ def _infer_tier(m):
     return None, None
 
 
+@_under_store_lock
 def infer(write=True):
     """The machine pass. Creates/updates INFERRED rows; never touches a human answer.
 
@@ -461,6 +526,7 @@ def pending(data=None):
     return out
 
 
+@_under_store_lock
 def record(pairs):
     """Record stated answers. Immediate write, `.bak` first. Returns (n_recorded, errors).
 

@@ -39,6 +39,30 @@ if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
 else
   echo "[ok] no tracked changes since last backup."
 fi
+
+# ── PII HARD GATE before any push to your WRITABLE fork (P0-1). Your private working data (contacts,
+# bosses, thread text) lives in this tree; a bare push would send whatever `git add -A` caught to your
+# fork with NO scan. Refuse the push if the gate finds PII (exit 3) OR cannot build a trustworthy
+# vocabulary (exit 2 = a fresh/empty install: configure your identity + contact stores first, so the
+# gate knows whose PII to look for). Fail CLOSED: the local commit + documents/ snapshot above still
+# protect you; only the PUSH is withheld until the tree is clean.
+_PG="$(dirname "$0")/pii_gate.py"
+if [ -f "$_PG" ]; then
+  _ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
+  if python3 "$_PG" --scan "$_ROOT" --quiet; then
+    echo "[ok] PII gate clean."
+  else
+    echo "[!] ⛔ PUSH WITHHELD by the PII gate. Nothing was pushed to your fork." >&2
+    echo "    Fresh install? Fill in your identity + contact stores, then re-run backup." >&2
+    echo "    PII found in a tracked file? Remove it, then re-run. Your local commit and the" >&2
+    echo "    documents/ snapshot above still protect your work." >&2
+    exit 3
+  fi
+else
+  echo "[!] pii_gate.py not found next to backup.sh — refusing to push unscanned. Restore it and re-run." >&2
+  exit 3
+fi
+
 # Push to a WRITABLE remote. A bare `git push` aims at the branch's UPSTREAM, and in the kit's
 # two-remote layout (origin = your writable fork, a shared read-only upstream you cloned from) `main`
 # tracks the READ-ONLY upstream after a sync — so a bare push fails EVERY time, and the old message
@@ -51,8 +75,8 @@ if git remote get-url origin >/dev/null 2>&1; then
 else
   _PUSH_REMOTE="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null | cut -d/ -f1)"
 fi
-if [ -z "$_PUSH_REMOTE" ] || [ -z "$_BR" ]; then
-  echo "[i] no writable remote configured — your local documents/ snapshot above is your backup."
+if [ -z "$_PUSH_REMOTE" ] || [ -z "$_BR" ] || [ "$_BR" = "HEAD" ]; then
+  echo "[i] no writable remote (or a detached HEAD) — your local documents/ snapshot above is your backup."
 elif _perr="$(git push -q "$_PUSH_REMOTE" "$_BR" 2>&1)"; then
   echo "[ok] pushed $_BR to '$_PUSH_REMOTE'."
 else

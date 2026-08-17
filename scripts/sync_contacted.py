@@ -34,7 +34,14 @@ contact-closeness.json is written to contact-closeness.json.bak before any write
 """
 import sys, os, re, json
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Env-aware root, matching closeness/parse_messages/level_contacts. Before P1-3 sync both read AND
+# wrote its own dirname-derived CLOSENESS, so it was self-consistent; routing the WRITE through
+# closeness.atomic_write (which resolves via CLAUDE_PROJECT_DIR) would otherwise read one tree and
+# write another whenever the env dir differs from the script's parent (adversarial panel).
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+import closeness  # the ONE writer of contact-closeness.json (P1-3)
 CLOSENESS = os.path.join(REPO, "documents", "contact-closeness.json")
 SENDLOG = os.path.join(REPO, "documents", "send-log.jsonl")
 BACKUP = CLOSENESS + ".bak"
@@ -289,28 +296,35 @@ def run(write=False):
     # ---- write --------------------------------------------------------------------
     if write:
         if sync_gap:
-            # back up first
-            with open(CLOSENESS, encoding="utf-8") as f:
-                original = f.read()
-            with open(BACKUP, "w", encoding="utf-8") as f:
-                f.write(original)
+            # Hold the store lock across the RE-READ and the write (P1-3). Re-reading fresh under
+            # the lock, rather than writing the copy loaded up in the report above, is what keeps a
+            # concurrent writer's update (level_contacts' interview, parse_messages --write) from
+            # being clobbered: sync_gap carries only names + match info, so it re-applies cleanly to
+            # the freshly read store.
+            with closeness.store_lock():
+                with open(CLOSENESS, encoding="utf-8") as f:
+                    original = f.read()
+                fresh = json.loads(original)
+                fresh_contacts = fresh.get("contacts", {})
+                for name, m in sync_gap:
+                    rec = fresh_contacts.get(name)
+                    if rec is None:
+                        continue
+                    rung = (m["rung"] or "").strip()
+                    date = (m["date"] or "").strip()
+                    val = " ".join(p for p in [date, rung] if p) + " [synced-from-send-log]"
+                    rec["sent"] = val.strip()
+                # Match the source file's unicode-escaping convention so the diff shows ONLY
+                # the reconciled `sent` fields, not 1000+ lines of emoji re-encoding churn.
+                # If the source ships fully ASCII-escaped (\uXXXX), writing literal UTF-8 would
+                # rewrite nearly every line and bury the real change. So: keep literal unicode
+                # only if the source already had it.
+                source_has_literal_unicode = any(ord(ch) > 127 for ch in original)
+                # atomic .bak + tmp+os.replace, keeping this file's indent=2 / trailing-newline shape
+                closeness.atomic_write(fresh, indent=2,
+                                       ensure_ascii=not source_has_literal_unicode,
+                                       trailing_newline=True)
             print(f"backup written: {BACKUP}")
-            for name, m in sync_gap:
-                rec = contacts[name]
-                rung = (m["rung"] or "").strip()
-                date = (m["date"] or "").strip()
-                val = " ".join(p for p in [date, rung] if p) + " [synced-from-send-log]"
-                rec["sent"] = val.strip()
-            # Match the source file's unicode-escaping convention so the diff shows ONLY
-            # the reconciled `sent` fields, not 1000+ lines of emoji re-encoding churn.
-            # If the source ships fully ASCII-escaped (\uXXXX), writing literal UTF-8 would
-            # rewrite nearly every line and bury the real change. So: keep literal unicode
-            # only if the source already had it.
-            source_has_literal_unicode = any(ord(ch) > 127 for ch in original)
-            with open(CLOSENESS, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2,
-                          ensure_ascii=not source_has_literal_unicode)
-                f.write("\n")
             print(f"WROTE {len(sync_gap)} reconciled `sent` values to contact-closeness.json")
             print(f"(ensure_ascii={not source_has_literal_unicode}, matching source convention)")
         else:

@@ -86,12 +86,41 @@ def clear() -> None:
         print("no pending scorecard")
 
 
-if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if a.strip()]
+USAGE = (
+    "usage: record_scorecard.py [COMPANY | --clear]\n"
+    "  (no args)   print the current pending scorecard, if any\n"
+    "  COMPANY     record COMPANY as the scorecard's subject (a context HINT, not authorization)\n"
+    "  --clear     clear the pending scorecard\n"
+    "  -h, --help  show this message\n"
+)
+
+
+def main(argv) -> int:
+    args = [a for a in argv if a.strip()]
     if not args:
         co, ts = read()
         print(f"pending: {co or '(none)'}" + (f"  (recorded {ts})" if ts else ""))
-    elif args[0] == "--clear":
+        return 0
+    if args[0] in ("-h", "--help"):
+        print(USAGE)
+        return 0
+    if args[0] == "--clear":
         clear()
-    else:
-        write(" ".join(args))
+        return 0
+    # BUG-152: a flag is not a company. `record_scorecard.py --help` used to write {"company":
+    # "--help"} into the file that gates whether a scorecard exists. Reject any leading-dash token
+    # (no real employer name starts with "-") so a typo, a shell glob, or an unknown flag can never
+    # land in the authorization record silently, and refuse an all-whitespace name.
+    if args[0].startswith("-"):
+        sys.stderr.write(f"record_scorecard.py: unknown option {args[0]!r}\n{USAGE}")
+        return 2
+    company = " ".join(args).strip()
+    if not company:
+        sys.stderr.write("record_scorecard.py: refusing to record an empty company name\n")
+        return 2
+    write(company)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

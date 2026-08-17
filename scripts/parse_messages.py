@@ -25,6 +25,7 @@ Usage:
 
 Exit: 0 = ok · 2 = no export or no closeness file · 3 = usage
 """
+import contextlib
 import csv
 import io
 import json
@@ -39,6 +40,7 @@ CLOSENESS = os.path.join(REPO, "documents", "contact-closeness.json")
 BACKUP = CLOSENESS + ".bak"
 
 sys.path.insert(0, HERE)
+import closeness  # the ONE writer of contact-closeness.json (P1-3)  # noqa: E402
 
 
 def _owner_names(rows):
@@ -142,34 +144,34 @@ CURATED = ("closeness", "note", "evidence", "sent", "source", "level_source", "o
 
 
 def merge(counts, write=False):
-    try:
-        data = json.load(open(CLOSENESS, encoding="utf-8"))
-    except Exception as e:
-        print(f"❌ cannot read {os.path.relpath(CLOSENESS, REPO)} ({type(e).__name__})")
-        return 2, {}
-    contacts = data.get("contacts", {})
-    changed, added, unmatched = 0, 0, 0
-    for name, m in counts.items():
-        rec = contacts.get(name)
-        if rec is None:
-            unmatched += 1
-            continue
-        before = rec.get("messages")
-        if before != m:
-            rec["messages"] = m
-            changed += 1
-            if before is None:
-                added += 1
-    if write and changed:
-        # .bak BEFORE the write, exactly as sync_contacted.py does for this same file.
+    # Hold the store lock across the read AND the write, so a concurrent writer (level_contacts'
+    # interview, sync_contacted) cannot slip an update between our read and our write and lose it.
+    # Read-only dry runs take no lock. (P1-3)
+    with (closeness.store_lock() if write else contextlib.nullcontext()):
         try:
-            open(BACKUP, "w", encoding="utf-8").write(open(CLOSENESS, encoding="utf-8").read())
-        except Exception:
-            pass
-        data["contacts"] = contacts
-        json.dump(data, open(CLOSENESS, "w", encoding="utf-8"), indent=1, ensure_ascii=False)
-    return 0, {"changed": changed, "added": added, "unmatched": unmatched,
-               "covered": len(counts)}
+            data = json.load(open(CLOSENESS, encoding="utf-8"))
+        except Exception as e:
+            print(f"❌ cannot read {os.path.relpath(CLOSENESS, REPO)} ({type(e).__name__})")
+            return 2, {}
+        contacts = data.get("contacts", {})
+        changed, added, unmatched = 0, 0, 0
+        for name, m in counts.items():
+            rec = contacts.get(name)
+            if rec is None:
+                unmatched += 1
+                continue
+            before = rec.get("messages")
+            if before != m:
+                rec["messages"] = m
+                changed += 1
+                if before is None:
+                    added += 1
+        if write and changed:
+            data["contacts"] = contacts
+            # atomic .bak + tmp+os.replace, keeping this file's indent=1 / ensure_ascii=False format
+            closeness.atomic_write(data, indent=1, ensure_ascii=False)
+        return 0, {"changed": changed, "added": added, "unmatched": unmatched,
+                   "covered": len(counts)}
 
 
 def main():
