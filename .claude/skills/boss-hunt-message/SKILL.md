@@ -13,6 +13,7 @@ The initial outreach is an **EMAIL with your résumé attached**, fuller than a 
 > Hi, [First]!
 > [why you're reaching out + the hook, in your voice]
 > [ONE boss-praise beat — a specific, verifiable public accomplishment, mirrored by a specific accomplishment of YOURS. Not two separate compliments.]
+> [SEND-VALUE beat — name the org's core-promise number in plain words as the problem you'd want to work on (the co-constructed value-stream step below); show don't tell, no coined term.]
 > Here's what I'd bring as I [one-line identity]. I:
 > - [concrete proof 1 from your PROFILE; NO years-of-experience]
 > - [concrete proof 2]
@@ -26,6 +27,18 @@ The initial outreach is an **EMAIL with your résumé attached**, fuller than a 
 
 ## Boss-praise = ONE beat, genuinely specific on both sides
 LaCivita's template uses a single "I was impressed with your [specifics]" slot (in your own words, not the literal "I was impressed" if that's not your voice). Praise ONE specific, verifiable accomplishment of the boss, and mirror it with a SPECIFIC accomplishment of yours from `PROFILE.md` (honest figures). Never two unrelated compliments; never vague ("your leadership").
+
+## SEND VALUE = a co-constructed value-stream number (Issue #65)
+Every boss-hunt note must **send value, not just praise.** Carry a research-grounded read of the org's value stream and name the single number that captures it — the org's **core promise to its customer, expressed as the customer's time or cost to value, in the org's own language** (NOT internal-ops, NOT scale/breadth). Framed as "the problem I'd want to work on."
+
+This is a **repeatable, co-constructed step, not a from-memory redo.** Run it, don't reconstruct it:
+1. **Fan research out** across the team/sessions (earnings, press, announcements, social — you have no internal data).
+2. **Generate MULTIPLE candidate numbers,** each a different core-promise number.
+3. **Panel-vet to ≥95** — a CEO/CTO/CPO-style panel scores each candidate before you ever see it.
+4. **Pick via a picker:** `scripts/vsm_component.py present --company "<Org>" --candidates <json>` filters to the lens + panel survivors and prints the picker **with the panel default as option 1**; you pick. Candidates carry `{kind, unit, voice, panel:{ceo,cto,cpo}, default, plain}`; off-lens or sub-95 candidates are refused, never shown.
+5. **Show don't tell:** phrase the picked number in **plain words — no coined metric term, never labeled "the value stream."** Asking the sharp number IS the demonstration. `scripts/vsm_component.py pick --option N --sentence "<plain words>"` gates it (exit 3 on a violation) before it lands in the note.
+
+**Required for boss-hunt rungs; optional** for warm/reply/thank-you/other comms (`vsm_component.py --require-required <rung>`).
 
 ## For any wording you'll send: 3 options + a recommendation + "add your own"
 Offer 3 distinct drafted options, name a recommended pick with the reasoning, and always include a free-response "add your own" slot. Draw them from your `writing-style-guide.md`. Avoid AI tells: em dashes, "I was impressed", "exact/actually/honestly", empty superlatives, and parroting the boss's own phrases.
