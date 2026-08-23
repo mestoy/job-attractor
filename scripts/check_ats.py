@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
-"""check_ats.py — is there a LIVE PM role? (Greenhouse / Ashby / Lever, authoritative)
+"""check_ats.py — is there a LIVE in-lane role? (Greenhouse / Ashby / Lever, authoritative)
 
 Gap-close step for "verify a live role via the ATS API, not a stale aggregator"
 (WORKFLOW-RULES §4). Probes all three major ATS boards for a company, reports live
-Product-Manager roles with location / remote / comp, so a RADAR vs live-application
-call is made from the source of truth.
+in-lane roles with location / remote / comp, so a RADAR vs live-application call is
+made from the source of truth.
+
+⭐ "IN-LANE" READS `kit_config.SEAT_TITLE` (kit issue #52). The lane test used to be
+hard-coded to product-management titles, so an install whose lane is business analysis,
+process improvement or program management was blind to its own primary lane and could
+misreport a company as "no live role" while a genuinely in-lane req sat live on its board.
+`SEAT_TITLE` is the SAME knob `screen_sweep.py`'s discovery filter already reads — one
+definition of "my lane" across the kit, not two that can drift — and ships empty, so an
+install that has not declared one keeps the shipped product-management default unchanged.
 
 Usage:
     scripts/check_ats.py "<company>"          # derive candidate tokens
@@ -34,8 +42,38 @@ def get_json(url, timeout=12):
     except Exception:
         return None
 
-def is_pm(title: str) -> bool:
-    """True if the title is a product-management seat.
+def is_in_lane(title: str) -> bool:
+    """True if the title is a seat in YOUR lane.
+
+    Reads `kit_config.SEAT_TITLE` when you have set one — your own lane vocabulary, matched
+    case-insensitively as a regex — so this test is scoped to whatever lane you actually
+    hunt, not to product management specifically. Falls back to `_is_pm_default()` (the
+    shipped product-management test, unchanged) when `SEAT_TITLE` is empty, exactly as before
+    this fix, so an install that has not declared a lane sees no behavior change.
+
+    ⚠️ THIS IS YOUR OWN REGEX, TAKEN AS WRITTEN. Unlike the PM default below, it carries no
+    built-in false-positive guards (no "Product Marketing is not Product Management" carve-out)
+    — `SEAT_TITLE` is a positive include list you authored for your own lane, the same contract
+    `screen_sweep.py` already holds it to, so getting the precision right is on you, the same
+    way it already is there.
+    """
+    try:
+        import kit_config
+        if kit_config.SEAT_TITLE:
+            return bool(re.search(kit_config.SEAT_TITLE, title, re.I))
+    except Exception:
+        pass
+    return _is_pm_default(title)
+
+
+# Backward-compat alias: existing callers (including code outside this file) that imported
+# `is_pm` directly keep working unchanged. New code should call `is_in_lane`.
+is_pm = is_in_lane
+
+
+def _is_pm_default(title: str) -> bool:
+    """True if the title is a product-management seat. The SHIPPED DEFAULT `is_in_lane()` falls
+    back to when `kit_config.SEAT_TITLE` is empty — unchanged from before kit issue #52.
 
     FIXED 2026-07-19 (pipeline audit). Two bugs made real PM seats invisible, each one
     silently downgrading a company to '🟡 no live PM role → RADAR':
@@ -281,12 +319,12 @@ def main():
         print("     These are probably DIFFERENT COMPANIES that share a name. Identify the right")
         print("     one below, then re-run with the exact token:\n")
         for ats, tk, total, roles in boards:
-            print(f"     ▸ {ats} board '{tk}' — {total} open roles, {len(roles)} product role(s)")
+            print(f"     ▸ {ats} board '{tk}' — {total} open roles, {len(roles)} in-lane role(s)")
             print(f"        who this is: {board_identity(ats, tk)}")
             print(f"        → python3 scripts/check_ats.py --token {tk}")
         print("\n  VERDICT: 🔴 UNRESOLVED — live-role status is UNVERIFIED until a token is chosen.")
         print("     ⛔ Do NOT build off either board. Picking the wrong one is how a company with")
-        print("        six open PM seats gets recorded as having zero.")
+        print("        six open in-lane seats gets recorded as having zero.")
         sys.exit(2)
 
     if not boards:
@@ -294,11 +332,11 @@ def main():
         print("     → treat live-role as UNVERIFIED; check the company careers page manually.")
         sys.exit(2)
 
-    any_pm = False
+    any_in_lane = False
     for ats, tk, total, roles in boards:
         print(f"  ✅ {ats} board '{tk}' — {total} open roles total")
         if roles:
-            any_pm = True
+            any_in_lane = True
             for r in roles:
                 # Title, location and comp band are strings the EMPLOYER wrote, printed verbatim
                 # into an agent's context. defang() leaves them readable but strips the leverage
@@ -310,13 +348,13 @@ def main():
                 if r["url"]:
                     print(f"        {r['url']}")
         else:
-            print("     (no Product-Manager role on this board)")
+            print("     (no in-lane role on this board)")
     print()
-    if any_pm:
-        print("  VERDICT: 🔵 LIVE PM ROLE(S) — potential application + paired boss-hunt.")
+    if any_in_lane:
+        print("  VERDICT: 🔵 LIVE IN-LANE ROLE(S) — potential application + paired boss-hunt.")
         sys.exit(0)
     else:
-        print("  VERDICT: 🟡 NO live PM role → RADAR (verify remote/travel/culture at company level; tag hiring-history timing).")
+        print("  VERDICT: 🟡 NO live in-lane role → RADAR (verify remote/travel/culture at company level; tag hiring-history timing).")
         # Exit 1 = "no live role" so a CALLER can branch on it (closes register gap G8's exit half).
         # This is NOT a drop: no-live-role is a valid RADAR reach. It exists so the build path is
         # forced into the RADAR register instead of silently writing live-role framing

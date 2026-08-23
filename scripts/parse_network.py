@@ -186,8 +186,31 @@ def _rank(path):
     return (d or date.fromtimestamp(mt), mt)
 
 
-def find_export(explicit=None):
-    """Newest Connections.csv from an explicit path, a LinkedIn export dir, or a .zip."""
+def _has_member(path, connections_member, member):
+    """True when `member` sits alongside this candidate's Connections.csv.
+
+    kit#58: the repo's own `documents/linkedin-exports/Connections-*.csv` mirror is a PII-stripped
+    COPY of one file, never a full export — it has no messages.csv or Invitations.csv beside it. Used
+    to rank identically to a real export by filename date alone, so a real export sitting in
+    ~/Downloads lost to a same-day repo mirror and callers asking for messages.csv got nothing.
+    """
+    if connections_member is None:
+        return os.path.exists(os.path.join(os.path.dirname(path), member))
+    try:
+        with zipfile.ZipFile(path) as zf:
+            prefix = connections_member.rsplit("/", 1)[0] + "/" if "/" in connections_member else ""
+            return any(n == prefix + member for n in zf.namelist())
+    except (zipfile.BadZipFile, OSError):
+        return False
+
+
+def find_export(explicit=None, member=None):
+    """Newest Connections.csv from an explicit path, a LinkedIn export dir, or a .zip.
+
+    `member`: when given (e.g. "messages.csv"), candidates lacking that file alongside their
+    Connections.csv are excluded from ranking — see `_has_member`. Falls back to the unfiltered
+    ranking when nothing has the member, so a caller that does not need it still gets an answer.
+    """
     if explicit:
         return explicit, open(explicit, encoding="utf-8-sig", errors="ignore").read()
     cands = []
@@ -220,10 +243,14 @@ def find_export(explicit=None):
                 continue
     if not cands:
         return None, None
-    _, path, member = max(cands, key=lambda c: c[0])
     if member:
+        filtered = [c for c in cands if _has_member(c[1], c[2], member)]
+        if filtered:
+            cands = filtered
+    _, path, zmember = max(cands, key=lambda c: c[0])
+    if zmember:
         with zipfile.ZipFile(path) as zf:
-            return f"{path}::{member}", zf.read(member).decode("utf-8-sig", "ignore")
+            return f"{path}::{zmember}", zf.read(zmember).decode("utf-8-sig", "ignore")
     return path, open(path, encoding="utf-8-sig", errors="ignore").read()
 
 

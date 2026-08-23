@@ -38,7 +38,7 @@ import json
 import os
 import sys
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = os.path.abspath(os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 STORE = os.path.join(REPO, "documents", "org-reactions.jsonl")
 
 DECISIONS = ["PURSUE", "SKIP", "BLOCK", "BOSS-HUNT", "DEFER", "REVISIT", "NOTE"]

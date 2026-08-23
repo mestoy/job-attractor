@@ -141,6 +141,21 @@ def _conn_dates(export=None):
     return out
 
 
+def _utc_day(raw_ts):
+    """messages.csv's DATE is UTC ("2026-08-02 02:36:15 UTC"). BUG-176: the double-count guard's
+    join key used to be this string's first 10 characters — the UTC calendar day — compared against
+    the send-log's LOCAL-ET `date` field. A send after 20:00 ET is already past midnight UTC, so it
+    landed on the day AFTER the one log_linkedin_send.py stamped and every guard check missed it.
+    Converts to the same local day the send log itself uses, via astimezone() reading the system
+    timezone rather than hardcoding one, since that is what wrote the log rows to begin with.
+    """
+    try:
+        dt = datetime.strptime(raw_ts[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return raw_ts[:10]
+    return dt.astimezone().date().isoformat()
+
+
 def threads(export=None):
     """(by_conv, owner). by_conv[conversation id] = [{slug, name, date, inbound}], date-sorted.
 
@@ -203,7 +218,7 @@ def candidates(since, until=None, export=None):
         for m in msgs:
             if m["inbound"]:
                 continue
-            day = m["date"][:10]
+            day = _utc_day(m["date"])
             if not day or day < since or (until and day > until):
                 continue
             if first_inbound:
@@ -282,10 +297,23 @@ def already_logged(events, rows):
     return fresh, skipped
 
 
+def _local_midnight_iso(day):
+    """Midnight of `day` (a LOCAL calendar day, post-BUG-176) tagged with the system's ACTUAL utc
+    offset. `day` used to be a UTC day, so hardcoding +00:00 was coherent; now that _utc_day()
+    converts it to local before it reaches here, a hardcoded +00:00 would silently reintroduce the
+    exact day-attribution bug this file exists to fix, one field over.
+    """
+    try:
+        naive = datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        return f"{day}T00:00:00+00:00"
+    return naive.astimezone().isoformat()
+
+
 def to_row(e, sends_only=False):
     """One send-log row. Shape mirrors what mail-draft.sh writes, plus the backfill marker."""
     return {
-        "ts": f"{e['date']}T00:00:00+00:00",
+        "ts": _local_midnight_iso(e["date"]),
         "date": e["date"],
         "rung": e["rung"],
         "to": _to_field(e),

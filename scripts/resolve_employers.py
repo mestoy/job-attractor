@@ -188,8 +188,12 @@ def cmd_ingest(args):
         if not _source_is_cited(src):
             bad.append((emp, f"source {src!r} is not a citation — a bare assertion is not a "
                             "source; cite a URL, a named document, or not-found")); continue
+        # BUG-001: country is OPTIONAL and free text on purpose — only ever feeds a printed
+        # surface (nonus_tell), never a score or a filter. Left "" when a resolver did not look it
+        # up; that degrades to prior suffix-guess behavior, never a false claim.
         good.append({"employer": emp, "segment": seg, "industry": ind, "source": src,
                      "confidence": r.get("confidence") or "stated",
+                     "country": (r.get("country") or "").strip(),
                      "note": r.get("note") or "", "date": str(date.today())})
     os.makedirs(os.path.dirname(CACHE), exist_ok=True)
     if good and not args.dry_run:

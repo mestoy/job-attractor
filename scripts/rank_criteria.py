@@ -39,7 +39,7 @@ import re
 import sys
 from datetime import date as _date
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = os.path.abspath(os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # The column contract and the durable store. Same import-never-copy rule as the veto lists below:
@@ -959,11 +959,16 @@ def survivor_rulings():
     removed upstream by `_drop_deferred`; DROP never reaches here because the reconciler writes it
     to the blocked list. Widening this set past SURVIVOR would put an unfinished screen in front of
     you wearing a finished badge, which is the failure this reader exists to prevent.
+
+    ⛔ THE DEFECT THIS CLOSES. The `==` test used to compare the raw field, so a row recorded as
+    `"SURVIVOR (qualified)"` failed it and fell back to the conservative default, unnoticed —
+    `findings_ledger.normalize_verdict()` recovers the token from that prose without widening
+    what counts as SURVIVOR.
     """
     try:
         import findings_ledger
         return {k: r for k, r in findings_ledger.rulings().items()
-                if str(r.get("verdict") or "") == "SURVIVOR"}
+                if findings_ledger.normalize_verdict(r.get("verdict")) == "SURVIVOR"}
     except Exception:
         return {}
 
@@ -1094,19 +1099,26 @@ def banked_topup(have, done, blocked, need):
         except Exception:
             continue
         skipped_by_shape = 0
-        parsed_lines = 0
+        found_in_this_file = 0
         for line in text.splitlines():
             # rows look like:  Company A · Company B · **Company C** ·  (batch lists)
             if not line.strip() or line.lstrip().startswith(("#", ">", "|", "-")):
                 if line.strip():
                     skipped_by_shape += 1
                 continue
-            parsed_lines += 1
             for chunk in line.split("·"):
                 co = chunk.strip().strip("*~ ").strip()
                 co = re.sub(r"\s*\(.*?\)\s*$", "", co).strip()
                 if not (2 <= len(co) <= 34) or not re.match(r"^[A-Z][\w&.\-' ]+$", co):
                     continue
+                # Counted here, not at the output append: a plain-English intro line ("Here are
+                # the companies I found:") is not a header or a bullet, so it is never skipped by
+                # shape, but it also produces no company-shaped token — a lines-present counter
+                # would treat it as content and silently suppress the shape warning below. This
+                # counts an actual TOKEN this file produced, the instant it passes the shape/regex
+                # test — before dedup/veto, so a file that is genuinely readable but 100% redundant
+                # with an already-known company still counts as readable.
+                found_in_this_file += 1
                 low = co.lower()
                 if low in havenames or low in done or low in blocked:
                     continue
@@ -1161,11 +1173,13 @@ def banked_topup(have, done, blocked, need):
         # headings and every attribute is a `-` bullet. That is every line, so every line is
         # skipped, and fully screened companies sat unseen in a file the board had just opened and
         # called thin.
-        # 🎯 THE PREDICATE IS THE SHAPE, NOT THE COUNT. Zero parsed lines WITH skipped content is a
-        # shape failure; zero parsed lines and nothing skipped is an empty file, which is not this
-        # warning's business. A file that parsed fine and simply held nothing new stays silent too,
-        # because `parsed_lines` is non-zero there. No second parser, one honest sentence.
-        if parsed_lines == 0 and skipped_by_shape:
+        # 🎯 THE PREDICATE IS THE SHAPE, NOT THE COUNT. Zero real company tokens found WITH skipped
+        # content is a shape failure; zero found and nothing skipped is an empty file, which is not
+        # this warning's business. A file that parsed fine and simply held nothing NEW stays silent
+        # too, because a dedup/veto continue still counted toward `found_in_this_file` above.
+        # Counting TOKENS FOUND rather than LINES PRESENT closes a gap where a prose file's plain
+        # intro line satisfied a lines-present counter without containing a single real company.
+        if found_in_this_file == 0 and skipped_by_shape:
             print(f"  ⚠️  {os.path.basename(path)}: all {skipped_by_shape} non-blank line(s) matched "
                   f"the header/bullet skip pattern (#, >, |, -), so this file is in a shape "
                   f"banked_topup CANNOT READ, not a file with nothing eligible in it. Expected the "
@@ -1780,18 +1794,38 @@ _IC_SENIORITY = re.compile(r"\b(principal|staff)\b", re.I)
 # IC/manager: the fourth bucket. Kept in lockstep with parse_network.SENIOR_IC, the writer that
 # decides which table these rows land in.
 _SENIOR_IC = re.compile(r"\b(senior|staff|lead|manager|executive|group)\b", re.I)
+# kit issue #57 (partner feedback). A one-person shop has no seat to hire into, whatever the title
+# says: "Self Employed" is a KNOWN shape, not the UNKNOWN _company_shape_map() coverage gap the
+# module docstring below describes — discarding it let a self-employed contact and a two-person
+# family business both rank as functional seniors who "hire or refer". Anchored variants only
+# (word-boundary phrases, or the WHOLE employer field being the bare word "self"), never a loose
+# substring: a real company legitimately named "Independent Bank" must not be swept in.
+_SELF_EMPLOYED_EMPLOYER = re.compile(
+    r"\b(self[\s-]?employed|freelanc\w*|independent\s+(?:contractor|consultant)|"
+    r"sole\s+propriet\w*)\b|^\s*self\s*$", re.I)
 
 
-def _person_category(title):
-    """Category from the TITLE alone — the company-shape half of the likely-boss predicate is
-    applied by the caller via _company_shape_map(), because shape lives on the green board, not in
-    the title. With shape UNKNOWN (most of a network), both plausible-boss reads stay equal."""
+def _is_multi_credit_headline(title):
+    """kit#57 guard 2: 3+ slash-separated segments read as a CREDITS LIST ("Performer / Writer /
+    Director"), not a single title one seniority token governs."""
+    segs = [s.strip() for s in re.split(r"\s*/\s*", title or "") if s.strip()]
+    return len(segs) >= 3
+
+
+def _person_category(title, employer=""):
+    """Category from the TITLE and, since kit#57, the EMPLOYER's self-employment shape — the
+    company-shape half of the likely-boss predicate is otherwise applied by the caller via
+    _company_shape_map(), because shape lives on the green board, not in the title. With shape
+    UNKNOWN (most of a network), both plausible-boss reads stay equal. Self-employment is the one
+    shape that is NEVER unknown when the employer field says so plainly, so it is read here."""
     t = _PLURAL_PRODUCT.sub("product", title or "")
     # Mask to a SINGLE word: "product-owner" still leaves a \b before "owner" (the hyphen is a
     # non-word char), so the first cut of this mask changed nothing. Verified against a live pool:
     # a "Product Owner" ranked #1 as a likely boss under the hyphen mask.
     masked = _PO_PHRASE.sub("productowner", t)
     pm, sr = is_pm(t), bool(SENIOR.search(masked))
+    if sr and _is_multi_credit_headline(title):
+        sr = False  # a credits list, not a governing title — do not let it promote
     if pm and sr:
         # Ruling A: a Principal/Staff PM whose only "senior" token is that seniority marker is a
         # peer, not the person who would manage a product hire.
@@ -1799,9 +1833,12 @@ def _person_category(title):
             return "product-ic"
         return "product-leader"   # Head/VP/Dir/CPO of Product — plausibly manages this role
     if sr:
+        self_employed = _SELF_EMPLOYED_EMPLOYER.search(employer or "")
         if _OWNER_TITLE.search(masked):
-            return "founder-exec"  # founder/CEO/COO — the likely boss where no product org exists
-        return "senior-exec"       # functional senior (CTO, IT/mktg dir, partner) — hires or refers
+            # kit#57: a verified Owner/Manager of an unrelated one- or two-person shop is not the
+            # "likely boss where no product org exists" this tier exists for.
+            return "connector" if self_employed else "founder-exec"
+        return "connector" if self_employed else "senior-exec"
     if pm:
         return "product-ic"       # PM/Sr PM — a would-be teammate who can refer/intro
     if CONNECTOR.search(t):
@@ -2048,11 +2085,11 @@ def _category_evidence():
     except Exception:
         return {c: [0, 0] for c in PERSON_BASE}, 0, 0, 0
     cats, by_name = {}, {}
-    for name, title, _co, _fl, _ks in _people_rows():
+    for name, title, co, _fl, _ks in _people_rows():
         nm = re.sub(r"[^a-z0-9]", "", name.lower())
         if len(nm) >= 6:
-            cats[nm] = _person_category(title)
-            by_name[nm] = _person_category(title)
+            cats[nm] = _person_category(title, co)
+            by_name[nm] = _person_category(title, co)
     ident = _identity_map()
     per = {c: [0, 0] for c in PERSON_BASE}
     joined = attributable = 0
@@ -2882,14 +2919,31 @@ _NONUS_SUFFIX = re.compile(
     r"b\.v\.|a/s|aps|ltda|oyj|plc|kabushiki|co\.,?\s*ltd)(?![a-z])", re.I)
 
 
-def nonus_tell(company):
-    """The matched non-US legal-form suffix in a company name, or '' when there is none.
+_US_COUNTRY_NAMES = {"us", "usa", "u.s.", "u.s.a.", "united states", "united states of america"}
 
-    ⚠️ A SURFACE, never a veto. No store here records a company's COUNTRY, so this only spots a
-    legal-form suffix in the name. It will miss a foreign company whose stored name carries no
-    suffix, which is how the case that motivated it got through. Check the country yourself on any
-    founder before spending anything else on them: it is the cheapest disqualifier available.
+
+def nonus_tell(company):
+    """The best non-US location signal available for `company`, or '' when there is none.
+
+    BUG-001 FIX. A RESOLVED country (from resolve_employers.py's employer cache, populated by real
+    research) is checked FIRST and, when present, is authoritative — captured at resolution time,
+    since the export never carries a country and the only place one can be captured honestly is the
+    same out-of-band research pass that already resolves segment/industry. Falls back to the
+    legal-form-suffix guess ONLY when no resolution exists, exactly as before: additive, so an
+    unresolved company degrades to prior behavior and cannot regress.
+
+    ⚠️ Still a SURFACE, never a veto, in both branches.
     """
+    if company:
+        try:
+            row = contact_signals.load_employer_cache().get(
+                contact_signals._employer_key(company))
+        except Exception:
+            row = None
+        if row:
+            country = str(row.get("country") or "").strip()
+            if country and country.lower() not in _US_COUNTRY_NAMES:
+                return country
     m = _NONUS_SUFFIX.search(company or "")
     return m.group(1) if m else ""
 
@@ -3371,7 +3425,7 @@ def rank_people(n=10):
                 _class_title = _vrole["title"]
                 _recat = (f"🕰 re-categorized on verified title \"{_vrole['title']}\" "
                           f"(was \"{title}\", verified {_vrole.get('verified_on', '?')})")
-        cat = _person_category(_class_title)
+        cat = _person_category(_class_title, company)
         # ── SEGMENT READ, TRI-STATE, and only a POSITIVE off-segment match may demote ─────────
         # "unknown" KEEPS the band, because most real companies do not carry their industry in
         # their name. Demoting on "no match" would push a Head of Product at a major payments
@@ -3593,10 +3647,10 @@ def _recent_sends_by_category(days=EXPOSURE_WINDOW_DAYS):
         from datetime import timedelta as _td
         cutoff = (_date.today() - _td(days=days)).isoformat()
         cats = {}
-        for name, title, _co, _fl, _ks in _people_rows():
+        for name, title, co, _fl, _ks in _people_rows():
             nm = re.sub(r"[^a-z0-9]", "", name.lower())
             if len(nm) >= 6:
-                cats[nm] = _person_category(title)
+                cats[nm] = _person_category(title, co)
         ident = _identity_map()
         for r in _load_sends():
             if str(r.get("status", "")).lower() in NOT_DELIVERED:

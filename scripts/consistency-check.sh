@@ -263,7 +263,8 @@ echo "[14] two-tier target board (green-board.md)"
 # stocked toward 40, which supplies named targets for warm asks. 10 + 40 = the 50 the method asks
 # for. A deliberate divergence, recorded so nobody "fixes" it back to a flat 10.
 python3 - <<'PY314'
-import re, os
+import re, os, sys
+sys.path.insert(0, "scripts")
 p = "documents/green-board.md"
 if not os.path.exists(p):
     print("   ⚠️  green-board.md not found")
@@ -291,14 +292,31 @@ else:
         cells = [c.strip() for c in l.split("|")]
         return len(cells) > 1 and cells[1].strip().isdigit()
     active = [l for l in live if _numbered(l)]
-    banked = [l for l in live if not _numbered(l)
-              and [c.strip() for c in l.split("|")][1].lower() not in ("company", "#", "")]
+    radar = [l for l in live if not _numbered(l)
+             and [c.strip() for c in l.split("|")][1].lower() not in ("company", "#", "")]
     n = len(active)
     if n > 10:
         print(f"   \U0001f534 ACTIVE list has {n} rows, cap is 10 (\"no less, no more\") — close out {n-10}")
     else:
         print(f"   ✅ ACTIVE list {n}/10 (boss-hunt tier)")
-    b = len(banked)
+    # ⛔ kit#31. BANKED = the green-board RADAR tier (manually curated) UNION the automated
+    # SURVIVOR write-back (documents/banked-candidates-*.md, `reconcile_findings.py`'s own
+    # store). These are two independent deposit paths into the same warm-ask fuel pool — before
+    # this fix ONLY the radar tier was counted, so reconciling five SURVIVORs left this gauge
+    # reporting 0/40 moved while reconcile_findings.py reported "5 SURVIVOR(s) written". Deduped
+    # by canon() key so a company banked both ways is not counted twice.
+    try:
+        # `Exception` alone is not enough here: a stubbed reconcile_findings.py (test isolation
+        # swaps it for a trivial script that calls sys.exit(0) at import time) raises SystemExit,
+        # which is a BaseException and would otherwise kill this whole diagnostic step silently.
+        from reconcile_findings import banked_keys
+        from screen_sweep import canon
+        radar_keys = {canon([c.strip() for c in l.split("|")][1]) for l in radar}
+        b = len(radar_keys | banked_keys())
+    except (Exception, SystemExit) as e:
+        b = len(radar)
+        print(f"   ⚠️  could not read banked-candidates-*.md ({type(e).__name__}); "
+              f"counting the green-board radar tier only")
     if b < 40:
         print(f"   ⚠️  BANKED pool {b}/40 — warm asks name 3 companies each and a company "
               f"burns after ONE naming, so this tier is the warm lane's fuel")
@@ -353,7 +371,7 @@ else:
     # non-events, telling you that you are done when you are not. Excluded statuses are named
     # explicitly so an unfamiliar future status counts (over-counting is visible; silently
     # dropping a real send is not).
-    NOT_DELIVERED = {"bounced", "drafted", "staged", "failed", "blocked"}
+    NOT_DELIVERED = {"bounced", "drafted", "staged", "failed", "blocked", "discarded"}
     _today_rows = [r for r in rows if r.get("date") == today]
     n = sum(1 for r in _today_rows if str(r.get("status", "")).lower() not in NOT_DELIVERED)
     _skipped = len(_today_rows) - n
@@ -514,6 +532,25 @@ PYFIND
 )
   FINDINGS_CODE=$?
   printf '%s\n' "$_fout" | sed 's/^/   /'
+  # Advisory. A row whose verdict `findings_ledger.normalize_verdict()` cannot place is not a
+  # reconciliation problem (it never blocks step [17] above), but it is invisible to
+  # survivor_rulings() and to reconcile()'s own DROP/SURVIVOR buckets, so the gap deserves a
+  # line here rather than waiting for someone to notice a company missing from the board.
+  python3 - <<'PYVERDICT' 2>/dev/null | sed 's/^/   /'
+import sys
+sys.path.insert(0, "scripts")
+try:
+    from findings_ledger import unrecognized_verdicts
+    unrec = unrecognized_verdicts()
+except Exception as e:
+    print(f"⚠️  could not check verdict vocabulary ({type(e).__name__})")
+    sys.exit(0)
+if unrec:
+    print(f"⚠️  {len(unrec)} ledger row(s) carry an unrecognized verdict, invisible to every "
+          f"reader (SURVIVOR/DROP/UNVERIFIED/DEFERRED only): "
+          + ", ".join(f"{co!r}" for co, _v in unrec[:5])
+          + (f" (+{len(unrec) - 5} more)" if len(unrec) > 5 else ""))
+PYVERDICT
 else
   echo "   ⚠️  reconcile_findings.py not present — skipped"
 fi

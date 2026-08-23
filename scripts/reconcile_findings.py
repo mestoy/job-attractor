@@ -62,8 +62,30 @@ except Exception:  # pragma: no cover - a broken import must not strand captured
     def _import_sibling(modname):
         raise ImportError(f"screen_sweep is unavailable, so {modname} cannot be loaded safely")
 
+try:
+    normalize_verdict = _import_sibling("findings_ledger").normalize_verdict
+except Exception:  # pragma: no cover - degrade to the raw field rather than strand findings
+    def normalize_verdict(raw):
+        return str(raw or "")
+
 # The hard filters, numbered as your discovery brief numbers them. Used only to give the
 # blocked-list section a human heading; an unknown number still records, under "other".
+#
+# ⛔ THE GAP THIS CLOSES. Codes 1-11 are a STARTING SET, not a closed vocabulary — the base list
+# has no code for a layoffs/leadership-instability veto or an industry veto (financial services,
+# say), and on at least one install one of those was the single most common real drop reason: 34
+# of 79 prior DROPs sat in "other" because nothing matched, which made a per-filter analysis
+# impossible and, worse, invited a mis-stamp (five real drops filed under filter 7 — "Not
+# LGBTQIA+ friendly" — because that was the nearest wrong number an assistant guessed at).
+#
+# Add YOUR missing codes at `kit_config.EXTRA_FILTERS` rather than editing this dict directly —
+# it is UNIONED in below, so upgrading the kit never wipes codes you declared, and filter 11's
+# label is driven by `kit_config.COMP_FLOOR` so it names YOUR floor, not a stranger's.
+try:
+    from kit_config import COMP_FLOOR
+except Exception:
+    COMP_FLOOR = 170_000  # falls back to the base list's own historical number
+
 FILTERS = {
     1: "Remote fail (hybrid, RTO, metro-locked, foreign-only, or excess travel)",
     2: "Defense or military mission",
@@ -75,8 +97,13 @@ FILTERS = {
     8: "PE-owned",
     9: "Right-leaning company or leadership",
     10: "Foreign-anchored product org",
-    11: "Comp cannot clear the $170K floor",
+    11: f"Comp cannot clear the ${COMP_FLOOR:,} floor",
 }
+try:
+    from kit_config import EXTRA_FILTERS
+    FILTERS.update(EXTRA_FILTERS or {})
+except Exception:
+    pass
 
 
 def _rows(path):
@@ -134,6 +161,18 @@ def _already_banked_keys():
                 if co:
                     keys.add(canon(co))
     return keys
+
+
+def banked_keys():
+    """Public name for `_already_banked_keys()`, for a reader outside this module.
+
+    ⛔ THE DEFECT THIS CLOSES. `consistency-check.sh`'s BANKED pool gauge used to count rows in
+    `documents/green-board.md` — a different file, in a pipe-table shape this writer never
+    produces — so banking five SURVIVORs here left the gauge reporting 0 moved. The gauge now
+    calls this SAME function this writer's own idempotency check calls, so the two can no longer
+    disagree about what "banked" means.
+    """
+    return _already_banked_keys()
 
 
 def _write_blocked(drops, dry):
@@ -234,8 +273,26 @@ def reconcile(only_run=None, dry=False):
     blocked_keys = set(blocked_keys_from_list())
     banked_keys = _already_banked_keys()
     all_drops, all_survivors, skipped, other = [], [], [], 0
-    seen = set()
+    superseded = []  # companies whose verdict was CORRECTED since an earlier row; never silent
 
+    # ── THE LATEST VERDICT WINS, NOT THE FIRST-ENCOUNTERED ONE (kit#62) ────────────────────────
+    # This used to be `if k in seen: continue` before the verdict was even read, so the FIRST row
+    # for a company won regardless of when it was written — and "first" here meant "from whichever
+    # findings file sorts earliest alphabetically", which has no relationship to time: this repo's
+    # findings files carry mixed prefixes ("banked-screen-", "bench-refill-", "culture-peek-",
+    # "session-", ...), so an older screen could easily sort after, and so shadow, a newer DROP.
+    # That is precisely the bug Matthew filed: a stale SURVIVOR outranked a newer DROP and it cost
+    # a real send — a warm ask drafted naming two companies already dropped days earlier.
+    #
+    # Fix: collapse every row from every pending file by an explicit `(ts, arrival)` stamp — the
+    # SAME key `findings_ledger.rulings()` sorts on ("ts decides; arrival breaks a tie in the
+    # order the rows were actually written") — and only let a row claim a company when its stamp
+    # is >= whatever already claimed it. `arrival` is a monotonic counter across every row in
+    # every pending file, in file-then-line order, used only to break an exact `ts` tie toward
+    # whichever row was actually written later. A missing `ts` degrades to `""`, sorting before
+    # every real timestamp, matching `findings_ledger.rulings()`'s own fallback.
+    latest, latest_stamp = {}, {}
+    arrival = 0
     for run, total, done in pending:
         rows, bad = _rows(os.path.join(FINDINGS_DIR, f"{run}.jsonl"))
         if bad:
@@ -243,28 +300,43 @@ def reconcile(only_run=None, dry=False):
         for r in rows:
             co = (r.get("company") or "").strip()
             k = canon(co)
-            if not co or not k or k in seen:
+            if not co or not k:
                 continue
-            seen.add(k)
-            v = r.get("verdict")
-            if v == "DROP":
-                if k in blocked_keys:
-                    skipped.append(f"{co} (already blocked)")
+            stamp = (str(r.get("ts") or ""), arrival)
+            arrival += 1
+            if k in latest:
+                if stamp < latest_stamp[k]:
+                    # Chronologically older, only encountered later by file iteration order.
                     continue
-                all_drops.append(r)
-                blocked_keys.add(k)
-            elif v == "SURVIVOR":
-                if k in blocked_keys:
-                    # A survivor that is already blocked is a real contradiction, never silent.
-                    skipped.append(f"{co} (SURVIVOR but already on the blocked list — check this)")
-                    continue
-                if k in banked_keys:
-                    skipped.append(f"{co} (already banked)")
-                    continue
-                all_survivors.append(r)
-                banked_keys.add(k)
-            else:
-                other += 1
+                if latest[k].get("verdict") != r.get("verdict"):
+                    superseded.append(f"{co}: {latest[k].get('verdict')} → {r.get('verdict')}")
+            latest[k] = r
+            latest_stamp[k] = stamp
+
+    for k, r in latest.items():
+        co = (r.get("company") or "").strip()
+        # Normalized, not the raw field: a legacy row recorded as "🔴 DROP — reason" or
+        # "SURVIVOR (qualified)" must reach the SAME bucket a clean row would, or a real screen
+        # verdict sits in `other` forever with no effect on the blocked list or the banked pool.
+        v = normalize_verdict(r.get("verdict"))
+        if v == "DROP":
+            if k in blocked_keys:
+                skipped.append(f"{co} (already blocked)")
+                continue
+            all_drops.append(r)
+            blocked_keys.add(k)
+        elif v == "SURVIVOR":
+            if k in blocked_keys:
+                # A survivor that is already blocked is a real contradiction, never silent.
+                skipped.append(f"{co} (SURVIVOR but already on the blocked list — check this)")
+                continue
+            if k in banked_keys:
+                skipped.append(f"{co} (already banked)")
+                continue
+            all_survivors.append(r)
+            banked_keys.add(k)
+        else:
+            other += 1
 
     n_drop = _write_blocked(all_drops, dry)
     n_surv = _write_banked(all_survivors, dry)
@@ -275,6 +347,12 @@ def reconcile(only_run=None, dry=False):
     if other:
         print(f"   ⏸️  {other} UNVERIFIED/DEFERRED row(s) left in place — an unfinished screen is "
               f"not a verdict")
+    if superseded:
+        print(f"   ↻ {len(superseded)} verdict(s) CORRECTED mid-run, latest wins:")
+        for s in superseded[:8]:
+            print(f"      • {s}")
+        if len(superseded) > 8:
+            print(f"      (+{len(superseded) - 8} more)")
     if skipped:
         print(f"   ⏭️  {len(skipped)} skipped as already recorded:")
         for s in skipped[:8]:

@@ -47,7 +47,7 @@ Usage:
 
 Exit: 0 = clean (or warns only, in --hook mode) · 1 = warns · 2 = hard fail / usage error
 """
-import sys, os, re, fnmatch
+import sys, os, re, fnmatch, subprocess, collections
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
@@ -63,7 +63,7 @@ except Exception:  # pragma: no cover - a broken import must not wedge a Write
     def banned_hit(body, word):
         return bool(re.search(r"(?<![A-Za-z])" + re.escape(word) + r"(?![A-Za-z])", body, re.I))
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = os.path.abspath(os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # ── EXEMPT PATHS ─────────────────────────────────────────────────────────────────────────────
 # A slop linter that fires on the documents which QUOTE slop as examples is a linter nobody
@@ -582,6 +582,107 @@ def check(text, mode="prose", is_markdown=True):
     return list(dict.fromkeys(fails)), list(dict.fromkeys(warns))
 
 
+# ── kit#66 / BUG-172: SCAN THE CHANGE, NOT THE WHOLE FILE ──────────────────────────────────────
+# `_hook_write` used to `open(path).read()` and lint the ENTIRE file on every Write/Edit, so
+# editing a single clean paragraph into a legacy file with pre-existing violations reported those
+# pre-existing violations as if THIS edit had introduced them. Reproduced live 2026-08-21/22: a
+# 4-line, verified-clean addition to `documents/PROFILE.md` printed "4 hard issue(s)" that were all
+# 76 pre-existing em dashes and old "genuinely"/"utilization" uses elsewhere in the file. That
+# trains an operator to ignore the hook (the exact failure `pii_gate`'s kit#61 fix was named for:
+# "scan the change, not the whole artifact"), and it BURIES the case the hook actually exists to
+# catch — a violation the edit really did add — inside a wall of noise it did not add.
+#
+# The fix does not touch WHAT gets flagged, only WHAT TEXT gets scanned. `check()` itself is
+# unchanged; a violation inside newly-added text still fires exactly as before.
+def _edit_added_text(tool_input):
+    """The exact text an Edit call inserted — `new_string` IS the change, no diffing needed."""
+    return str(tool_input.get("new_string") or "")
+
+
+def _multiedit_added_text(tool_input):
+    """MultiEdit applies several (old_string, new_string) pairs in one call; every `new_string`
+    is added text, so concatenate them. Not currently wired (settings.json matches Write|Edit
+    only), kept for a future matcher and for direct invocation."""
+    edits = tool_input.get("edits")
+    if not isinstance(edits, list):
+        return ""
+    return "\n".join(str(e.get("new_string") or "") for e in edits if isinstance(e, dict))
+
+
+def _write_added_text(path, new_content):
+    """A Write replaces the WHOLE file, so 'the change' is whatever lines are new relative to the
+    file's last COMMITTED version — an overwrite of a legacy file that only touches one paragraph
+    must lint that paragraph, exactly like Edit's `new_string` does. A file with no committed
+    version at all (brand new, or `git show` fails for any reason — not a git repo, HEAD has no
+    commits yet, network-free `git show` still costs nothing to attempt) has no legacy content BY
+    DEFINITION, so the whole write is correctly the change: fails OPEN toward scanning MORE, never
+    less, which is the safe direction for a hook that only ever WARNS.
+
+    ⚠️ RELPATH-THEN-CHECK-`..`, NOT A BARE `startswith` (security review, before ship). A raw
+    `path.startswith(REPO)` has no path-separator boundary: `REPO="/repo"` matches a path under an
+    unrelated sibling directory like `/repo2/file.md` too, computing a `rel` of
+    `"../repo2/file.md"` for a file that was never inside this tree at all. `git show` rejects that
+    as an out-of-repo pathspec, so today this fails open to whole-content-as-added (still the safe
+    direction) rather than silently diffing the wrong file — but relying on `git` to catch a bug
+    this function could avoid on its own is exactly the kind of thing that stops being true after
+    an unrelated future change. `is_exempt()` elsewhere in this file already solves the identical
+    problem the correct way (compute the relpath, then check whether it climbed out via `..`); this
+    reuses that same, already-proven pattern instead of a second, weaker one."""
+    rel = os.path.relpath(path, REPO)
+    if rel.startswith(".."):
+        rel = None
+    old_content = None
+    if rel:
+        try:
+            r = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=REPO,
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                old_content = r.stdout
+        except (OSError, subprocess.SubprocessError):
+            old_content = None
+    if old_content is None:
+        return new_content
+    return _added_lines(old_content, new_content)
+
+
+def _added_lines(old_text, new_text):
+    """Lines present in `new_text` that were not in `old_text`, in `new_text`'s own order.
+
+    ⚠️ MULTISET MEMBERSHIP, NOT POSITIONAL DIFFING (found by security review before ship). A first
+    version used `difflib.SequenceMatcher.get_opcodes()`, which diffs by POSITION: it reports a
+    line as 'inserted' whenever it no longer sits in its old spot, even if that exact line already
+    existed elsewhere in the file. A Write that reorders two untouched paragraphs — no edit to
+    either one, just a swap — made the moved-but-unchanged paragraph read as newly added, which
+    would resurrect the ORIGINAL bug's symptom on a pre-existing violation sitting inside it: noise
+    from content the write did not touch. A line is a real addition only if the file has FEWER
+    copies of it now available than before; `Counter` tracks that directly, with no position
+    sensitivity at all. A single-word change mid-line still works exactly as before, because the
+    edited line's new exact text is not present in the old file (it isn't a MOVE, its content
+    genuinely changed), so it is correctly still counted as added."""
+    old_lines, new_lines = old_text.splitlines(), new_text.splitlines()
+    remaining = collections.Counter(old_lines)
+    added = []
+    for line in new_lines:
+        if remaining.get(line, 0) > 0:
+            remaining[line] -= 1
+        else:
+            added.append(line)
+    return "\n".join(added)
+
+
+def _changed_text_for_hook(tool_name, tool_input, path):
+    """The text THIS tool call actually added, scoped per kit#66/BUG-172 — or None when the call's
+    shape does not tell us (an unrecognized tool_name), which falls back to the pre-fix whole-file
+    behavior rather than silently scanning nothing."""
+    if tool_name == "Edit":
+        return _edit_added_text(tool_input)
+    if tool_name == "MultiEdit":
+        return _multiedit_added_text(tool_input)
+    if tool_name == "Write":
+        return _write_added_text(path, str(tool_input.get("content") or ""))
+    return None
+
+
 def _hook_write():
     """PostToolUse on Write|Edit: lint the Markdown that just landed.
 
@@ -594,18 +695,22 @@ def _hook_write():
         payload = json.load(sys.stdin)
     except Exception:
         sys.exit(0)
-    path = (payload.get("tool_input") or {}).get("file_path")
+    tool_name = payload.get("tool_name") or ""
+    tool_input = payload.get("tool_input") or {}
+    path = tool_input.get("file_path")
     if not path or is_exempt(path) or not str(path).lower().endswith((".md", ".markdown", ".tex")):
         sys.exit(0)
     try:
         text = open(path, encoding="utf-8", errors="ignore").read()
     except Exception:
         sys.exit(0)
+    changed = _changed_text_for_hook(tool_name, tool_input, path)
+    scan_text = text if changed is None else changed
     # A .tex used to fall through this gate, so the hook said nothing on every résumé build.
     if str(path).lower().endswith(".tex"):
-        fails, warns = check(strip_latex(text), mode="resume", is_markdown=False)
+        fails, warns = check(strip_latex(scan_text), mode="resume", is_markdown=False)
     else:
-        fails, warns = check(text, mode="prose", is_markdown=True)
+        fails, warns = check(scan_text, mode="prose", is_markdown=True)
     if not fails:
         sys.exit(0)
     rel = os.path.relpath(path, REPO) if path.startswith(REPO) else path

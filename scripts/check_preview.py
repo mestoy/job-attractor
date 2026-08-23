@@ -1043,6 +1043,64 @@ def _is_cocreation_for_live_application(tool_input):
     return False
 
 
+def _is_portfolio_self_content(tool_input):
+    """Is this AskUserQuestion co-creating PORTFOLIO / self-description content (a hero arc, a
+    personal-site capsule) about YOUR OWN projects, addressed to no boss?
+
+    THE HOLE THIS CLOSES is the same shape as the APPLYING and INBOUND holes: every other exemption
+    on this gate assumes OUTREACH. Portfolio prose is first-person about your own work, destined for
+    your website/portfolio, with no boss, no company being screened, and no ask. The drafted-voice
+    detector correctly fires on "I built ... with Claude Code" for a cold outreach hook, but that
+    same phrase is right for a portfolio arc — and the BUILD gate then demands a Boss Match Scorecard
+    that has no inputs, forcing a markdown-table fallback for co-creation work that belongs in the
+    picker.
+
+    NON-FORGEABLE anchor, same discipline as the other exemptions. ALL must hold:
+      (a) an explicit `PORTFOLIO: <piece>` marker in the question framing,
+      (b) a portfolio-revision*.md doc under documents/ whose text contains that <piece> (the
+          load-bearing half: your portfolio pieces are a documented, closed set, unlike the infinite
+          space of target companies a cold draft could name), AND
+      (c) the blob carries NO outreach/ask/boss-address signal (a cold-boss praise beat addresses
+          the boss or carries an ask, so it cannot wear this label even if it named a documented
+          piece).
+
+    ⛔ AUTHORIZES CO-CREATING PORTFOLIO PROSE, nothing else. It carries no opinion on pursuing any
+    employer; a cold approach still needs its own screen and its own ruling.
+    """
+    blob = " ".join(str(t) for _, t in _strings_from_questions(tool_input or {}))
+    low = blob.lower().replace("’", "'").replace("‘", "'")
+    m = re.search(r"(?i:portfolio:)\s*([A-Za-z][\w'&\-]*(?:\s+[A-Za-z][\w'&\-]*){0,3})", blob)
+    if not m:
+        return False
+    # (c) cannot be laundered onto outreach: any boss-address / ask / cold-boss signal disqualifies.
+    OUTREACH_SIGNALS = (
+        "be on your radar", "can't stop talking about", "so i'm saying", "\U0001f44b",
+        "any chance you", "an intro", "referral", "i applied", "i just applied",
+        "scorecard", "build ruling", "cold-boss", "you're betting", "the bet you're making",
+        "vouch", "reach out to",
+    )
+    if any(s in low for s in OUTREACH_SIGNALS):
+        return False
+    piece = re.sub(r"[^a-z0-9]", "", m.group(1).lower())
+    if len(piece) < 5:
+        # A short token cannot become a skeleton key across the doc.
+        return False
+    # (b) the named piece must appear in a real portfolio-revision doc.
+    try:
+        repo = os.environ.get("CLAUDE_PROJECT_DIR") or \
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        docs = os.path.join(repo, "documents")
+        for f in os.listdir(docs):
+            if not (f.startswith("portfolio-revision") and f.endswith(".md")):
+                continue
+            with open(os.path.join(docs, f), "r", encoding="utf-8") as fh:
+                if piece in re.sub(r"[^a-z0-9]", "", fh.read().lower()):
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -1079,7 +1137,8 @@ def main():
                 and not _is_referred_via_known_introducer(tool_input)
                 and not _is_rung12_zero_ask_note(tool_input)
                 and not _is_reply_to_captured_inbound(tool_input)
-                and not _is_cocreation_for_live_application(tool_input)):
+                and not _is_cocreation_for_live_application(tool_input)
+                and not _is_portfolio_self_content(tool_input)):
             if _CLOSENESS_REFUSALS:
                 # The closeness consult refused a claimed exemption. Say WHY and name the fix for
                 # THIS contact — a fail-closed gate is only livable when the refusal carries the

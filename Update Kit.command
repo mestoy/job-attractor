@@ -129,26 +129,75 @@ if ! git pull --ff-only "$KIT_REMOTE"; then
   #
   # The discriminator is not "is HEAD behind" but "does HEAD carry commits upstream does not have".
   # If it does, nothing here is allowed to destroy them, whatever the reason for the failure.
+  #
+  # ⛔ REFINED (kit #56 + workspace #95, 2026-08-22). Raw `$_upstream..HEAD` over-counts a
+  # self-inflicted shape that is NOT partner work and was making the guard self-reinforcing:
+  # MERGE COMMITS FROM A PAST MANUAL SYNC. Before this fix, taking an update meant `git merge
+  # kit/main` by hand (the only way past a STOP). Every one of THOSE merge commits is itself
+  # something `kit/main` does not have, so it counted as "local work" next time and the guard
+  # could never clear itself — a partner who never edited a single kit file still got stopped
+  # forever (kit #56, Matthew: 43 of 68 commits were literally "Merge remote-tracking branch
+  # 'kit/main'"). `--no-merges` removes exactly these. A merge commit's parent count is a
+  # structural property of the commit object, not something a commit MESSAGE can fake, so this
+  # exclusion cannot be spoofed by crafting text.
+  #
+  # ⚠️ RED-TEAM FINDING, REJECTED APPROACH (do not re-add). An earlier draft of this fix also
+  # excluded commits by MESSAGE, matching the fixed string `kit_vendor_sync.py` stamps on its own
+  # sync commits (BUG-040 / kit #57's safe fallback), on the theory that using that tool once
+  # would otherwise re-trip this same guard next run. Proven exploitable in five lines: a commit
+  # with real, arbitrary content and that exact message text is excluded from the count exactly
+  # as if it were a genuine vendor-sync commit — `git rev-list --invert-grep --grep=...` reads
+  # text, not provenance, and text is not a security boundary. Reverted. The cost of reverting is
+  # small and one-directional (a partner who used Sync Kit.command gets a repeat, still-correct
+  # STOP pointing them at it again, never a wrong auto-reset); the cost of keeping it was a
+  # spoofable path to exactly the destroyed-commit failure mode this file exists to prevent.
+  #
+  # This does NOT fix workspace #95 (a clone stranded by an upstream history REWRITE, where the
+  # local-only commits are the OLD kit's own history, not the partner's). Git cannot structurally
+  # tell "your edit" from "kit history that existed before a rewrite" — both are ordinary,
+  # non-merge commits. That case still stops, but the message below now names the actual safe way
+  # through it (`Sync Kit.command`) instead of dead-ending at "email the maintainer" — the fix
+  # workspace #95 asked for.
+  _upstream_ok=0; [ -n "$_upstream" ] && _upstream_ok=1
   _local_only=0
-  if [ -n "$_upstream" ]; then
-    _local_only="$(git rev-list --count "$_upstream..HEAD" 2>/dev/null || echo 0)"
+  _local_only_raw=0
+  if [ "$_upstream_ok" -eq 1 ]; then
+    _local_only_raw="$(git rev-list --count "$_upstream..HEAD" 2>/dev/null || echo 0)"
+    _local_only="$(git rev-list --no-merges --count "$_upstream..HEAD" 2>/dev/null || echo 0)"
   fi
   if [ "${_local_only:-0}" -gt 0 ]; then
     _safety="kit-backup-$(date +%Y%m%d-%H%M%S)"
     git branch "$_safety" HEAD 2>/dev/null
     echo ""
-    echo "🛑 STOPPED. You have $_local_only commit(s) the published kit does not have, so a"
-    echo "   re-sync here would delete your own work. Nothing was changed."
+    echo "🛑 STOPPED. You have $_local_only commit(s) of your own the published kit does not have"
+    echo "   (${_local_only_raw} total including merge/sync housekeeping), so a re-sync here would"
+    echo "   delete your own work. Nothing was changed."
     echo ""
     echo "   Your work is also saved on a branch named:  $_safety"
-    echo "   See what is yours:   git -C \"$(pwd)\" log --oneline $_upstream..HEAD"
+    echo "   See what is yours:   git -C \"$(pwd)\" log --oneline --no-merges $_upstream..HEAD"
     echo ""
-    echo "   Send that list to the kit maintainer, who can tell you which parts are already"
-    echo "   upstream."
+    echo "   ▶ THE SAFE WAY THROUGH: double-click \"Sync Kit.command\" instead. It updates the"
+    echo "     kit's files WITHOUT touching your commit history at all, so it can never delete"
+    echo "     what you see above, safe whether this is your own edit or an old kit history"
+    echo "     your clone predates. Undo it any time with \"Undo Kit Sync.command\"."
+    echo ""
+    echo "   If that still looks wrong, send the list above to the kit maintainer."
     [ -n "$CFG_SAVED" ] && cp "$CFG_SAVED" "$CFG" 2>/dev/null
     echo ""; read -n1 -s -p "Press any key to close."; echo; exit 1
   fi
   if [ -n "$_upstream" ] && ! git merge-base --is-ancestor HEAD "$_upstream" 2>/dev/null; then
+    # ⚠️ RED-TEAM FINDING, DEFENSE IN DEPTH (2026-08-22). `_local_only` above trusts
+    # `--no-merges` to mean "nothing but housekeeping merges" -- true for every ordinary workflow,
+    # but not a hard guarantee: `git merge --no-ff --no-commit` followed by a hand-edit can put
+    # arbitrary content into a merge commit's tree with ZERO non-merge commits anywhere in
+    # history, which `--no-merges --count` reads as 0. That requires deliberate, expert git use
+    # no normal partner workflow produces, so it is not worth the complexity of re-diffing every
+    # excluded merge commit's tree against a fresh recompute of its parents here (a fix that could
+    # itself be wrong is worse than a documented gap). What costs nothing is making the ONE
+    # guarantee this whole file exists for hold even here: a safety branch is taken UNCONDITIONALLY
+    # before this reset, exactly like the STOP path above, so even a HEAD this check judged "safe"
+    # is one command away from full recovery if that judgment is ever wrong.
+    git branch "kit-backup-$(date +%Y%m%d-%H%M%S)" HEAD 2>/dev/null
     echo ""
     echo "ℹ  The kit's history was rewritten upstream, so a fast-forward is impossible."
     echo "   Re-syncing to the published version. Your documents/ folder is git-ignored and"
@@ -183,6 +232,26 @@ fi
 # Deliberately NOT duplicated here: install.sh owns that logic, so an older copy of THIS script
 # still performs the upgrade correctly after it pulls.
 bash install.sh .
+
+# ── 5b. REGRESSION NET (BUG-217). The kit ships no CI, and until now nothing ran the bundled ────
+# tests before telling you the update succeeded — so a regression could reach every partner who
+# updates and nothing would say so. This is the local-only guardrail the operator ruled for instead of
+# raising GitHub Actions: run the bundled suite right here, and refuse to say "you're on the
+# latest" if it's red. A red suite here means the PULL succeeded but the code it delivered did not
+# prove itself, which is not the same thing as being current.
+if [ -f "tests/run_all.sh" ]; then
+  echo ""
+  echo "▶  Running the bundled test suite to confirm the update is safe…"
+  if ! bash tests/run_all.sh; then
+    echo ""
+    echo "🔴 THE PULL SUCCEEDED, BUT THE BUNDLED TESTS ARE RED."
+    echo "   Do not treat this as a working update — the test output above names what broke."
+    echo "   Your documents/, logs and tracker were not touched either way."
+    echo "   Report this through documents/partner-feedback.md with the failing test names."
+    echo ""; read -n1 -s -p "Press any key to close."; echo; exit 1
+  fi
+  echo "  [ok] bundled tests are green"
+fi
 
 # ── 6. How fresh is the network data? ─────────────────────────────────────────────────────────
 # Informational tail: prompts loudly when there is no export yet (or a stale one), and names the

@@ -39,7 +39,7 @@ import sys, os, re, json
 # closeness.atomic_write (which resolves via CLAUDE_PROJECT_DIR) would otherwise read one tree and
 # write another whenever the env dir differs from the script's parent (adversarial panel).
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(HERE)
+REPO = os.path.abspath(os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 import closeness  # the ONE writer of contact-closeness.json (P1-3)
 CLOSENESS = os.path.join(REPO, "documents", "contact-closeness.json")

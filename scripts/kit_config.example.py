@@ -248,6 +248,32 @@ PE_CLEARED = [
 # "not stated" is kept and flagged. Set to YOUR floor. 0 = no comp filtering (keeps everything).
 COMP_FLOOR = int(_env("JOBKIT_COMP_FLOOR", "150000"))
 
+# ── EXTRA_FILTERS — hard-filter codes beyond `reconcile_findings.FILTERS`' base 1-11 ──────────
+#
+# ⚠️ SHIPS EMPTY ON PURPOSE, same reason as SEAT_TITLE below: the base 11 describe one operator's
+# hard filters, and shipping someone else's veto reasons as your closed vocabulary would let a
+# real drop reason go unrecorded just as surely as having no code at all.
+#
+# 🔴 WHY THIS EXISTS. `record_finding.py` requires `--filter N` on every DROP, but the base list
+# has no code for a layoffs/leadership-instability veto or an industry veto it doesn't happen to
+# name (financial services, say). On one install that gap swallowed the SINGLE MOST COMMON real
+# drop reason: 34 of 79 prior DROPs sat in filter 99 ("other") because nothing matched, so a
+# per-filter analysis of "what is killing the pipeline" was impossible. It also invites a
+# mis-stamp: five real drops were filed under filter 7 ("Not LGBTQIA+ friendly") because an
+# assistant guessed at the nearest number instead of reading this dict — true of none of them.
+#
+# Numbers must not collide with 1-11 or with each other; a colliding key overwrites silently the
+# same way any dict update does, so pick numbers ≥ 12 and keep them stable once a DROP has used
+# one (renumbering after the fact orphans that row's filter heading on the blocked list).
+#
+# Example for an operator whose top real drop reasons are layoffs and an industry veto the base
+# list does not name:
+#   EXTRA_FILTERS = {
+#       12: "Recent layoffs or leadership instability",
+#       13: "Banking, fintech or financial services as the primary business",
+#   }
+EXTRA_FILTERS = {}
+
 # ⭐ SEAT_TITLE — the job titles YOU are hunting. A regex, matched case-insensitively.
 #
 # ⚠️ SHIPS EMPTY ON PURPOSE, and empty is a real setting rather than a missing one. Leave it empty
@@ -269,6 +295,28 @@ COMP_FLOOR = int(_env("JOBKIT_COMP_FLOOR", "150000"))
 #   SEAT_TITLE = r"\b(product owner|business analyst|systems analyst|functional consultant|" \
 #                r"solution architect|program manager)\b"
 SEAT_TITLE = _env("JOBKIT_SEAT_TITLE", "")
+
+# ⭐ OUTCOME_VERBS — first-person completed-action verbs `check_outreach.py`'s ingredients 1 and 5
+# recognize as "you did/offered something", used to detect a result claim in an outreach draft.
+#
+# 🔴 WHY THIS EXISTS (kit issue #64). The shipped verb list — taken/led/built/run/drove/driven/
+# shipped — is product-management vocabulary. A business-analyst or process-improvement result
+# ("I migrated 7 lines of business", "I consolidated three systems", "I automated the intake
+# process") describes the exact same CLASS of claim in different words, and every one of those
+# missed: 9 of 12 realistic first-person result sentences failed the gate in the issue's own
+# measurement, and the identical claim passed only when rewritten around "led".
+#
+# ⚖️ EXTENDING THIS NEVER WEAKENS THE GATE. Ingredient 5 still requires first person ("I ..."),
+# still requires one of these verbs, still requires the sentence to describe something DONE — a
+# broader verb list only recognizes MORE genuine claims of that same shape, it does not accept a
+# claim that isn't one. Add your own lane's outcome verbs here; ships with a set broad enough to
+# cover product-management AND business-analysis/process-improvement phrasing out of the box, per
+# the issue's own suggested extension.
+OUTCOME_VERBS = [
+    "taken", "led", "built", "run", "ran", "drove", "driven", "shipped",
+    "migrated", "consolidated", "implemented", "rebuilt", "delivered", "launched", "automated",
+    "standardized", "standardised", "streamlined", "owned", "designed", "integrated",
+]
 
 # ⭐ Your SEGMENTS — the hot-zone lanes you test (Andy LaCivita: send ~5 per segment, then compare
 # reply rates; five labels inside one lane produce no comparison). Each KEY is a segment slug that
@@ -327,6 +375,39 @@ OFF_SEGMENT_PATTERNS = [
     # r"real estate", r"realty", r"restaurant", r"catering", r"salon",
     # r"landscap", r"plumbing", r"roofing", r"staffing", r"recruit(?:ing|ment)",
 ]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5c. THE BALANCER — target OUTREACH MIX by rung and by segment, read by balancer.py.
+#     The picker recommends whichever rung/segment is furthest under its target, so the
+#     mix self-corrects as sends accumulate. It never writes the send log, only reads it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Target share of INITIAL-CONTACT sends by rung — warm, cold-stranger, cold-boss. These three
+# should sum to ~1.0; a fourth rung, unequipped cold-boss (a cold-boss send with no named boss
+# and no praise hook), is never a lever to balance toward, so it has no target here and shows
+# up in balancer.py's output as a flagged violation instead. Ships with a generic starting mix;
+# tune the split to your own strategy.
+TARGET_RUNG_MIX = {
+    "warm": 0.50,
+    "cold-stranger": 0.30,
+    "cold-boss": 0.20,
+}
+
+# Target share of TAGGED sends by segment. Keys should be (a subset of) your SEGMENT_SLUGS
+# above, with weights that sum to ~1.0 — this is where a lead-lane priority goes, if one of
+# your segments should get more outreach volume than the others. A segment omitted from this
+# dict, or a send whose segment does not match any key, counts as untagged/off-segment in
+# balancer.py's read. Ships split evenly across the three generic example segments.
+TARGET_SEGMENT_MIX = {
+    "segment-a": 0.34,
+    "segment-b": 0.33,
+    "segment-c": 0.33,
+}
+
+# How many recent DELIVERED initial-contact sends define "current behavior" for the balancer.
+# All-time totals can be dominated by an old burst that no longer reflects what you're doing
+# now, so this windows to the recent past instead. 0 = use the whole log.
+DEFAULT_BALANCER_WINDOW = int(_env("JOBKIT_BALANCER_WINDOW", "25"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. COMPANY ALIASES — rebrands and trading names, so dedup does not treat one company
@@ -519,6 +600,51 @@ PERSON_WEIGHTS = {"product-leader": 40, "senior-exec": 33, "product-ic": 25,
                   "connector": 15, "other": 5}
 PERSON_EMAIL_BONUS = 5      # +score when a contact is reachable NOW (email on file)
 PERSON_REENTRY_BONUS = 8    # +score when their company is already in your pipeline (warm re-entry)
+
+# Deterministic scoring of open-JD apply candidates (rank_applications.py). Base weights must sum to
+# 1.0 — skill+package dominate ("best fit regardless of odds"); odds is a light booster; culture is
+# folded into the base so a mediocre-culture role is dented even before the instability gate.
+RANK_WEIGHTS = {
+    "skill": 0.40,     # skill_match: how tightly the JD's stated requirements map to your profile
+    "package": 0.35,   # package_appeal: how rare/compelling your edge is for THIS role
+    "odds": 0.10,      # posting recency + applicant-pool competition — a booster, not an override
+    "culture": 0.15,   # Glassdoor/Indeed, review-count weighted — a soft contributor, not a gate
+}
+RANK_APPLY_BAR = 80.0          # the go/no-go line
+RANK_BORDERLINE_FLOOR = 65.0   # below this, "borderline" reads as clearly under the bar
+
+# Size bonus (additive, 0-100 base). Small headcount is a plus, never a gate.
+RANK_SIZE_SMALL_MAX = 50       # headcount < this = small
+RANK_SIZE_MID_MAX = 150        # small..this = neutral; above = large
+RANK_SIZE_BONUS_SMALL = 6.0
+RANK_SIZE_ADJ_MID = 0.0
+RANK_SIZE_MINUS_LARGE = -3.0
+
+# Culture normalization. Confidence rises with review volume; below full confidence pulls the score
+# toward neutral so a strong rating on a handful of reviews cannot masquerade as a strong signal.
+RANK_CULTURE_NEUTRAL_5 = 3.0
+RANK_CULTURE_FULL_CONF_REVIEWS = 100   # at/above this combined review count, take the rating at face value
+RANK_CULTURE_LOW_CONF_REVIEWS = 30     # below this combined count, flag low-confidence
+
+# Instability penalty (subtracted from the base). Load-bearing: must be able to push a top-fit role
+# under the bar. A hard flag OR a low job-security sub-score forces the drop verdict regardless of fit.
+RANK_INSTABILITY_BASE_PENALTY = 30.0   # applied once any real instability is present
+RANK_INSTABILITY_PER_FLAG = 8.0        # each additional hard flag stacks
+RANK_INSTABILITY_MAX_PENALTY = 55.0
+RANK_JOB_SECURITY_FLOOR = 3.0          # a job-security sub-score below this = instability
+
+# Hard instability flags (any one forces the drop). Free-text signals are matched case-insensitively
+# as whole words/phrases, with a negation guard so "no layoffs" does not fire.
+RANK_INSTABILITY_FLAGS = {
+    "layoffs", "layoff", "reorg", "reorgs", "whiplash", "turnover", "leadership churn",
+    "pay erosion", "pay freeze", "chaotic", "do not join", "down round", "funding trouble",
+    "instability",
+}
+RANK_INSTABILITY_NEGATORS = {"no", "not", "without", "zero", "avoided", "averted", "never", "ended"}
+
+# Stage-risk (NOT penalized — flagged "unproven"): a small org with too few reviews to judge yet.
+RANK_STAGE_RISK_MAX_HEADCOUNT = 60
+RANK_STAGE_RISK_MAX_REVIEWS = 15
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 12. CRITERIA MATRIX DOC — the doc your employer-criteria matrix lives in, cited in

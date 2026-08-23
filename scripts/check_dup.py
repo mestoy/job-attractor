@@ -16,7 +16,7 @@ which would cause false "duplicate" hits and make us miss real new companies).
 """
 import sys, os, re, csv, glob, json
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = os.path.abspath(os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     from kit_config import COMPANY_ALIASES
@@ -49,12 +49,30 @@ STORES = {
     # unless the directory is globbed → re-pitch risk.
     "documents/ready-to-send/**/*":        "BUILT but UNSENT draft (ready-to-send)",
     "documents/applications/**/*":         "in APPLICATIONS (prior application material)",
-    # DEDUP HOLES CLOSED. Two stores that discovery WRITES were never stores that dedup READS,
-    # so a company screened yesterday came back NEW today and agents re-walked it from scratch.
-    # Same blind-spot class as a banked-but-unsent row. Both are soft-tier, never send-gate: a
-    # banked company is re-screenable, it is not re-DISCOVERABLE.
-    "documents/banked-candidates-*.md":    "BANKED by a prior sweep (hard gates passed, culture still owed)",
+    # DEDUP HOLE CLOSED. A findings run that discovery WRITES was never a store dedup READS, so
+    # a company screened yesterday came back NEW today and agents re-walked it from scratch.
+    # Soft-tier, never send-gate: a screened company is re-screenable, it is not re-DISCOVERABLE.
     "documents/findings/*.jsonl":          "SCREENED in a prior agent discovery run",
+}
+
+# ⛔ THE RECORD-KIND DISTINCTION (kit issue #8 / BUG-134). `documents/banked-candidates-*.md`
+# USED to sit in STORES above and produce the exact same ALREADY-SEEN verdict as a blocked list
+# or a sent log. That is backwards: the banked files say, verbatim, in their own header, "A name
+# in this file means worth screening, never worth sending." A row there has passed the
+# MECHANICAL gates only and is EXPLICITLY queued for the screen this tool gates — so a hit here
+# is not evidence the work was done, it is the reason the work is next. Measured against the
+# SCREEN GATE's own instruction ("proceed only on NEW; ALREADY-SEEN/POSSIBLE = STOP"): on one
+# install, 800 of 814 banked rows returned ALREADY-SEEN, so the gate refused nearly the entire
+# queue it was pointed at, and every session had to override it by routine — a gate overridden
+# by routine is not a gate.
+#
+# ⚖️ THIS DOES NOT WEAKEN REAL DEDUP. A company that is BOTH banked AND genuinely already-seen
+# (blocked, on the green board, in outreach_log, in the send log, …) still reads ALREADY-SEEN
+# off that OTHER store — this dict is consulted separately, in `main()`, and only ever SOFTENS
+# a verdict that would otherwise have been NEW anyway. A row banked and nothing else now reads
+# NEW-TO-SCREEN instead of a bare NEW, carrying the queue context; it was never going to block.
+QUEUED_STORES = {
+    "documents/banked-candidates-*.md": "BANKED by a prior sweep (hard gates passed, culture still owed)",
 }
 
 # Rebrands / trading names — one set per real-world entity, so dedup doesn't treat one
@@ -248,13 +266,31 @@ def loose_tokens(name: str):
     return {t for t in toks[:1] if t and t != n}
 
 
+# `## <date> · <Company> · <Person> ...` — outreach_log.md's own entry-header shape, the field
+# order this reader already cites in the warm-ask-naming comment below ("a real prior contact
+# always names the company in the block HEADER"). Scoped narrowly to THIS ONE STORE on purpose —
+# see the header comment on `is_warm_ask_naming` for why a general header rule is not safe
+# everywhere.
+_OUTREACH_HEADER = re.compile(r"^##\s*[\d.\-/]+\s*·\s*([^·]+?)\s*·")
+
+
 def search_file(path: str, needles: set, loose: set = ()):
     full = os.path.join(REPO, path)
     if not os.path.exists(full):
         return []
     strong, weak = [], []
+    # kit issue #8 / BUG-175. The most recent `## <date> · <Company> · <Person>` header seen so
+    # far this file, tracked while scanning forward — this is what lets a quoted-body line be
+    # judged against the entry it actually belongs to, instead of a fixed vocabulary of past
+    # templates' wording. File-scoped (reset per `search_file` call) and ONLY consulted for
+    # `outreach_log.md` — see `is_warm_ask_naming` below.
+    _header_company_norm = None
     with open(full, encoding="utf-8", errors="ignore") as f:
         for i, line in enumerate(f, 1):
+            if path == "outreach_log.md":
+                _hm = _OUTREACH_HEADER.match(line)
+                if _hm:
+                    _header_company_norm = norm(_hm.group(1)) or norm_lite(_hm.group(1))
             # Check BOTH normalizations here too. norm() strips legal/common tokens (inc, data,
             # systems, co...), so an all-legal-token needle like "data systems inc" could never
             # survive this PRE-FILTER, it never even reached _strong(), and the company came back
@@ -281,11 +317,28 @@ def search_file(path: str, needles: set, loose: set = ()):
             # ("## <date> · SomeCo · <boss>"), which still matches strong. A warm ask's header
             # names the CONTACT instead, so the company appears only in the `Targets named:`
             # metadata and inside the quoted body — both demoted to 🟡 WEAK here.
+            #
+            # ⛔ GENERALIZED (kit issue #8 / BUG-175). This used to fire ONLY when the quoted line
+            # contained one of two LITERAL phrases lifted from one connector-ask template. A reply
+            # delivering the same names in ANY other wording missed both phrases and scored a
+            # strong hit. The mechanism the comment above already claims is now what actually
+            # runs: `_header_company_norm` is the most recent `## date · Company · Person` header
+            # seen scanning forward, so ANY quoted line is demoted when the enclosing entry's own
+            # header names a DIFFERENT company — whatever words the quote happens to use.
+            #   ⚖️ SCOPED TO outreach_log.md ONLY, on purpose. A system-wide version of this rule
+            #   was proposed and REJECTED by review: applied to blocked-employers-list.md (no
+            #   `## ` headers at all) it would have silently disabled the entire blocked list;
+            #   applied to job_search_tracker.csv (no headers, no markdown) it defeats the CSV
+            #   company-column match entirely. Neither file can ever set `_header_company_norm`
+            #   non-None (computed only when `path == "outreach_log.md"`), so this generalization
+            #   structurally cannot reach them. `job_search_tracker.csv` was never vulnerable to
+            #   this bug in the first place: `_strong()` matches its dedicated company COLUMN,
+            #   never free-text notes.
             is_warm_ask_naming = (
                 "targets named" in _low_line
                 or (line.lstrip().startswith(">")
-                    and ("picked three" in _low_line
-                         or "relationship at one of them" in _low_line))
+                    and _header_company_norm is not None
+                    and _header_company_norm not in needles)
             )
             low = " " + norm(line) + " "
             low_lite = " " + norm_lite(line) + " "
@@ -470,24 +523,34 @@ def main():
     stores = {p: s for p, s in STORES.items() if p in SEND_GATE_STORES} if send_gate else STORES
     print(f"check_dup: company={company!r} boss={boss!r}" + ("  [send-gate: blocked/contacted stores only]" if send_gate else ""))
     print(f"  normalized needles: {sorted(needles)}")
-    strong_found, weak_found = {}, {}
-    for pattern, status in stores.items():
-        # a pattern with '*' expands to matching files (dir-based stores); else it's one file
-        if "*" in pattern:
-            paths = sorted(os.path.relpath(p, REPO)
-                           for p in glob.glob(os.path.join(REPO, pattern), recursive=True)
-                           if os.path.isfile(p))
-        else:
-            paths = [pattern]
-        for path in paths:
-            res = search_file(path, needles, loose)
-            if not res:
-                continue
-            strong, weak = res
-            if strong:
-                strong_found[path] = (status, strong)
-            elif weak:
-                weak_found[path] = (status, weak)
+
+    def _scan(store_dict):
+        found_strong, found_weak = {}, {}
+        for pattern, status in store_dict.items():
+            # a pattern with '*' expands to matching files (dir-based stores); else it's one file
+            if "*" in pattern:
+                paths = sorted(os.path.relpath(p, REPO)
+                               for p in glob.glob(os.path.join(REPO, pattern), recursive=True)
+                               if os.path.isfile(p))
+            else:
+                paths = [pattern]
+            for path in paths:
+                res = search_file(path, needles, loose)
+                if not res:
+                    continue
+                strong, weak = res
+                if strong:
+                    found_strong[path] = (status, strong)
+                elif weak:
+                    found_weak[path] = (status, weak)
+        return found_strong, found_weak
+
+    strong_found, weak_found = _scan(stores)
+    # ⛔ QUEUED (banked) hits are scanned SEPARATELY and never feed strong_found/weak_found — see
+    # QUEUED_STORES above. `--send-gate` never searched the banked store before this fix either
+    # (it was never in SEND_GATE_STORES), so that scope is preserved exactly.
+    queued_strong, queued_weak = _scan(QUEUED_STORES) if not send_gate else ({}, {})
+    queued_found = queued_strong or queued_weak
 
     def dump(found):
         for path, (status, hits) in found.items():
@@ -549,6 +612,15 @@ def main():
                 print(f"      which may be a DIFFERENT company that merely shares a first word.")
                 print(f"      Read the lines below before treating this as a block on your target.")
 
+    # ⛔ A QUEUED (banked) HIT ALWAYS PRINTS, same principle as the weak-under-strong dump above:
+    # a louder verdict must never fully hide a quieter fact. This prints it unconditionally as
+    # supplementary context, so it is visible whichever verdict actually decides the exit code.
+    def dump_queued_if_any():
+        if queued_found:
+            print("\n  ALSO — 🟢 also queued for screening (this does not weaken the verdict")
+            print("  above; it is context, not a second vote):")
+            dump(queued_strong or queued_weak)
+
     if strong_found:
         print("\n  VERDICT: 🔴 ALREADY-SEEN — do NOT re-screen/re-pitch without checking these:")
         dump(strong_found)
@@ -557,13 +629,24 @@ def main():
             print("  A 🔴 can come from a name COLLISION, so read these before concluding the")
             print("  🔴 above is about your actual target:")
             dump(weak_found)
+        dump_queued_if_any()
         sys.exit(1)
     if weak_found:
         print("\n  VERDICT: 🟡 POSSIBLE — prose mention only (no core-store entry/company-column match).")
         print("  Either a common-word collision OR a PRIOR assessment/example in a narrative doc —")
         print("  VERIFY the prior record before proceeding (it may be a DROP or just an example):")
         dump(weak_found)
+        dump_queued_if_any()
         sys.exit(3)
+    if queued_found:
+        # ⛔ kit issue #8 / BUG-134. The banked files say it themselves: "A name in this file
+        # means worth screening, never worth sending." Being queued for the screen this gate
+        # exists to run is not evidence the screen already happened — it is the OPPOSITE fact.
+        # Exits 0 (safe to proceed), same as a bare NEW, because that is exactly what this row
+        # is: nothing has actually screened it yet.
+        print("\n  VERDICT: 🟢 NEW-TO-SCREEN — queued but not yet screened. Safe to proceed:")
+        dump(queued_strong or queued_weak)
+        sys.exit(0)
     print("\n  VERDICT: 🟢 NEW — no prior record. Safe to proceed with screening.")
     sys.exit(0)
 

@@ -355,11 +355,17 @@ def stale_drafted(today=None, repo=None):
 
     Today's drafts are legitimately unflipped, so the grace period is the whole of today.
 
-    A drafted row is SUPERSEDED when a later row for the same message (same recipient, same subject,
-    same date) carries a delivered status. mail-draft.sh writes the drafted row, then the manual
-    flip appends a second row rather than rewriting the first, because the log is append-only.
-    Without this check the staging row is reported as an open item forever, even after the send is
-    confirmed elsewhere.
+    A drafted row is SUPERSEDED when a LATER row for the same message (same recipient, same
+    subject, same date) carries any status other than still-open (UNSENT_STATUSES). mail-draft.sh
+    writes the drafted row, then a manual flip appends a SECOND row rather than rewriting the
+    first, because the log is append-only. Without this check the staging row is reported as an
+    open item forever, even after the send is confirmed elsewhere.
+
+    ⚠️ "SUPERSEDED" MEANS ANY RESOLVED STATUS, NOT ONLY "sent". This used to require the later row
+    to be DELIVERED (not in NOT_DELIVERED), so a `discarded` row — a real decision, just not a
+    send — could never supersede the drafted row it retired, and there was no honest way to close
+    a draft you decided against sending; it nagged every session forever. Every status outside
+    UNSENT_STATUSES means a human (or the send path itself) has already resolved this message.
     """
     d = today or date.today().isoformat()
     rows = []
@@ -374,14 +380,14 @@ def stale_drafted(today=None, repo=None):
     def key(r):
         return (str(r.get("to", "")), str(r.get("subject", "")), str(r.get("date", "")))
 
-    delivered = {key(r) for r in rows
-                 if str(r.get("status", "")).lower() not in NOT_DELIVERED}
+    resolved = {key(r) for r in rows
+               if str(r.get("status", "")).lower() not in UNSENT_STATUSES}
 
     out = []
     for r in rows:
         if str(r.get("status", "")).lower() not in UNSENT_STATUSES or (r.get("date") or "") >= d:
             continue
-        if key(r) in delivered:
+        if key(r) in resolved:
             continue
         out.append(f"{r.get('date')} · {r.get('company') or '?'} · {str(r.get('to', ''))[:38]}")
     return out
@@ -545,6 +551,27 @@ def open_inbound(today=None, repo=None):
         if latest_out.get(who, "") >= newest_in[0]:
             continue                                          # L3: answered elsewhere in the file
         out.append(line)
+
+    # Everything above reads ONLY correspondence-log.md, which is written by hand — so a message
+    # that arrived and was never logged reads as ANSWERED, the dangerous direction for a row that
+    # decides whether the day opens on an owed reply. `check_inbound.py` reads `messages.csv`
+    # itself (the complete inbox record) and reports anyone the RAW ARCHIVE shows wrote in with no
+    # later reply, independent of whether a human ever typed the thread in here. Age-gated to
+    # ~2 days (`check_inbound.DEFAULT_AGE_DAYS`), deliberately shorter than and separate from this
+    # function's own 14-day `INBOUND_OPEN_DAYS` window, which governs the different, already-logged
+    # signal above. Fails open to [] on any error — a degraded archive read must not crash the
+    # whole briefing, only lose its own supplemental signal.
+    already = {_norm_name(_correspondent(l)) for l in out} - {""}
+    try:
+        import check_inbound
+        for row in check_inbound.unanswered_aged(repo=repo, today=d):
+            who = _norm_name(row["name"])
+            if not who or who in already or who in closed:
+                continue
+            out.append(f"📥 INBOUND ← {row['name']} — unlogged in correspondence-log.md, last "
+                       f"wrote {row['last_inbound']} ({row['days_open']}d ago, from messages.csv)")
+    except Exception:
+        pass
     return out
 
 
@@ -792,6 +819,22 @@ def _already_contacted(name, company):
     return False
 
 
+def _company_blocked(company):
+    """True if this company is registry-blocked, so the derived default never re-offers a ruling.
+
+    The registry (`employers.is_blocked`) is the single screening authority. Asking it here is
+    what stops a declined company from being handed back as the pair-brief default the next time
+    it is computed: a company you have already ruled out is not a fresh target just because it
+    still ranks well on every OTHER criterion. Fails open (returns False) only if the registry is
+    unreadable, matching every other degraded path in this module.
+    """
+    try:
+        import employers
+        return bool(company) and employers.is_blocked(company)
+    except Exception:
+        return False
+
+
 # ⛔ A WARM TIE WHO CANNOT HIRE IS NOT AN INITIAL-CONTACT TARGET. The people pool is mostly 1st-degree
 # connections, most of them base-5 `other` warm ties, so the raw top row is often a dormant contact
 # with no line to a target role. Andy's 90% is finding and reaching the RIGHT people (plausible bosses
@@ -831,6 +874,11 @@ def next_target(repo=None):
                 continue
             if _already_contacted(c.get("name", ""), c.get("company", "")):
                 continue
+            # A boss at a declined company is not a target either: if the employer is ruled out,
+            # its hiring manager cannot be the next initial contact. Same registry authority as
+            # the company fallback below.
+            if _company_blocked(c.get("company", "")):
+                continue
             # The confirm state travels WITH the suggestion (2026-08-02). rank_criteria computes a
             # close_flag for inferred, doubted, unrecorded and reunion-gated rows and this line
             # used to drop it, so a machine-levelled know-well read as the human's own judgment at
@@ -846,8 +894,13 @@ def next_target(repo=None):
     try:
         import rank_criteria
         ranked, _sk = rank_criteria.rank(10)
-        if ranked:
-            c = ranked[0]
+        # Dedup the default against rulings: rank() returns the top companies by fit, but a
+        # company already declined must never be re-offered as the next initial contact. Ask the
+        # registry per company and skip any blocked one, iterating to the first clean row instead
+        # of trusting position 0.
+        for c in ranked:
+            if _company_blocked(c.get("company", "")):
+                continue
             return (f"{c['company']} · {c.get('lane', '')[:34]} · cold-boss rung", "rank")
     except Exception:
         pass

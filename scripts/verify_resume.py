@@ -13,7 +13,7 @@ Usage:
 """
 import sys, os, re, glob, subprocess
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = os.path.abspath(os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Hold résumé prose to the SAME honesty bar as email bodies. Reuse check_outreach's canonical
 # word-lists (single source of truth) with a safe fallback.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -80,6 +80,40 @@ _IDENTS = sorted({re.sub(r"[^a-z0-9]", "", x.lower()) for x in
                  key=len, reverse=True)          # longest first, so a short one cannot eat a prefix
 _IDENT_RE = re.compile("|".join(re.escape(i) for i in _IDENTS)) if _IDENTS else None
 
+# A line that still carries contact-header content: the contact markers plus the identifying
+# tokens (phone fragment, site stem) that pdftotext -layout can wrap onto the line AFTER the
+# contact line. Built from the same kit_config identity as CONTACT_LINE/_IDENT_RE above, so an
+# operator only ever edits their identity in one place.
+_phone_tail = OWNER_PHONE.split("-", 1)[-1] if OWNER_PHONE and "-" in OWNER_PHONE else OWNER_PHONE
+_HEADER_TOKENS = sorted({re.escape(t) for t in
+                         (_phone_tail, OWNER_SITE.split(".")[0].lower() if OWNER_SITE else "",
+                          "linkedin", "github") if t},
+                        key=len, reverse=True)
+HEADER_ID = re.compile(r"@|" + "|".join(_HEADER_TOKENS), re.I) if _HEADER_TOKENS else re.compile(r"@")
+
+
+def _blank_contact_header(text):
+    """Blank the contact header from the FIRST contact line FORWARD, but bound by CONTENT, not by a
+    blank line. Keeps the lines ABOVE the marker (name / tagline) and stops at the first line that
+    no longer carries a header identifier (e.g. "Summary").
+
+    Why not a single-line-only blank: `pdftotext -layout` can wrap the header's website/GitHub
+    link text onto the line AFTER the one carrying the email/phone/linkedin markers, and a tight
+    one-page template can emit NO blank line between the contact line and the body at all. Blanking
+    only the matched line leaves that wrapped fragment behind on the PDF side; blanking the whole
+    blank-line-delimited block over-blanks a template with no separator there. Bounding by
+    header-identifier CONTENT stops exactly at the header/body seam either way.
+    """
+    lines = text.split("\n")
+    first = next((i for i, ln in enumerate(lines) if CONTACT_LINE.search(ln)), None)
+    if first is None:
+        return text
+    j = first
+    while j < len(lines) and lines[j].strip() != "" and (j == first or HEADER_ID.search(lines[j])):
+        lines[j] = ""
+        j += 1
+    return "\n".join(lines)
+
 
 def render_signature(text):
     """Collapse rendered text to the characters a reader sees, so a .tex and its pdftotext can be
@@ -90,7 +124,7 @@ def render_signature(text):
     content change. What survives is letters, digits, and the characters that carry a claim
     ($, %, .), which is where a stale build actually shows up.
     """
-    text = "\n".join("" if CONTACT_LINE.search(ln) else ln for ln in text.split("\n"))
+    text = _blank_contact_header(text)
     text = PAGE_MARK.sub("", text)
     text = GLYPH_NAMES.sub("", text)
     sig = re.sub(r"[^a-z0-9$%]", "", text.lower())

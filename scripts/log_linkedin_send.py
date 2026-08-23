@@ -51,9 +51,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
-    from kit_config import OWNER_FIRST
+    from kit_config import OWNER_FIRST, SEGMENT_SLUGS
 except Exception:  # standalone fallback — placeholder, so confirm_sent still runs
     OWNER_FIRST = "You"
+    SEGMENT_SLUGS = []
 
 # ⚠️ HONOR `CLAUDE_PROJECT_DIR` (fixed 2026-08-05). This used to derive REPO from `__file__`
 # alone, so a test that redirected the JSONL half with `--path` still wrote the NARRATIVE half into
@@ -79,7 +80,13 @@ LEGACY_RUNG = {"followup": "follow-up"}
 # disagreeing about what a send IS is a real defect — a daily-send check that excludes bounces while
 # a reply-rate table counts them puts rows in the denominator that never arrived.
 # If you edit one copy, edit both; a test pins them together.
-NOT_DELIVERED = {"bounced", "drafted", "staged", "failed", "blocked"}
+#
+# `discarded` is a RULED draft: you saw it, decided against sending, and the row is closed. It
+# exists because a plain `drafted` conflated two states — a message still owed a decision and one
+# already refused — so the stale-draft nag kept demanding a decision you had already made. It sits
+# HERE, not outside this set, because an undelivered draft you have discarded still never reached
+# anyone and must not be counted as a real send in a reply-rate denominator either.
+NOT_DELIVERED = {"bounced", "drafted", "staged", "failed", "blocked", "discarded"}
 
 # ⛔ THE "DRAFT EXISTS, NOBODY PRESSED SEND YET" STATUSES, and there are TWO spellings.
 # `mail-draft.sh` declares `STAGED_STATUS = "staged"` and writes that. Older rows, and the owner's
@@ -119,6 +126,48 @@ ARMS_FOLLOWUP = set()
 # Rungs where the ask NAMES target companies, so an empty `targets` is almost certainly a mistake
 # that silently defeats the burn guard. Requires an explicit --no-targets to proceed.
 TARGETS_EXPECTED = {"warm", "referred"}
+
+# ── SEGMENT IS ENFORCED ON INITIAL CONTACTS ──────────────────────────────────────────────────────
+# A send with no segment tag is invisible to every per-segment reply rate and to the balancer's
+# segment read. An initial contact now must carry a canonical segment, auto-derived from the
+# findings ledger when the flag is omitted, and refused outright when neither is available.
+# Replies/follow-ups/thank-yous are exempt (they inherit the thread's segment). The canonical
+# slugs are YOUR hot-zone lanes from kit_config.SEGMENT_SLUGS (see docs/segments.md).
+CANON_SEGMENTS = set(SEGMENT_SLUGS)
+
+
+def _canon_company(name):
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def _derive_segment(company, repo=REPO):
+    """The latest canonical segment recorded for `company` across documents/findings/*.jsonl, or "".
+
+    File order is chronological-ish and the LAST match wins, mirroring reconcile_findings' rule that
+    a later row is a correction. Returns "" if the company is unknown or its lane is not canonical,
+    so the caller can refuse the send rather than tag it wrong."""
+    import glob
+    key = _canon_company(company)
+    if not key:
+        return ""
+    found = ""
+    for f in sorted(glob.glob(os.path.join(repo, "documents", "findings", "*.jsonl"))):
+        try:
+            for line in open(f, encoding="utf-8", errors="ignore"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                if _canon_company(r.get("company")) == key:
+                    lane = (r.get("lane") or r.get("segment") or "").strip().lower()
+                    if lane in CANON_SEGMENTS:
+                        found = lane
+        except Exception:
+            continue
+    return found
 
 
 def _followup_for(rung, override=None, suppress=False):
@@ -174,6 +223,7 @@ def _slug(value):
 
 CONTACT_STORE = os.path.join(REPO, "documents", "state", "contact.jsonl")
 _H2N = None
+_H2C = None
 
 
 def resolve_handle_name(to):
@@ -215,6 +265,48 @@ def resolve_handle_name(to):
         except Exception:
             pass                                    # degrade to "", never block the send
     return _H2N.get(m.group(1).lower().rstrip("/"), "")
+
+
+def resolve_handle_company(to):
+    """Turn a LinkedIn recipient into their CURRENT employer, or "" when it cannot be resolved.
+
+    BUG-166, the company half of the same bug `resolve_handle_name` fixes for the name field
+    (BUG-028). Measured on the live log: 169 of 382 delivered sends carried no `company`, and the
+    gap was rung-shaped — 65 of 89 `warm` sends and 36 of 58 `reply` sends missing it, against only
+    40 of 166 `cold-boss` sends, because a cold-boss send researches the target company by hand
+    while a warm/reply send is to someone ALREADY a 1st-degree connection, and the operator does
+    not always retype what LinkedIn already told the kit at connection time. 44 of the 64 replies
+    in the whole log (69%) sat inside that unjoinable, company-less group, which is what starves
+    every warm-path signal validation (rank_criteria's step 1 gate) of the rows it needs.
+
+    Reads the SAME `documents/state/contact.jsonl` store `resolve_handle_name` reads —
+    `payload.linkedin` and `payload.company` sit side by side for the same contacts — so this is
+    the identical join, not a second one that could drift from it. Returns "" on any failure (a
+    cold-boss target who was never a connection has no row here at all, which is EXPECTED, not a
+    failure) so a missing store or an unresolvable handle never blocks a send.
+    """
+    global _H2C
+    m = re.search(r"linkedin\.com/in/([^/?\s]+)", str(to or ""))
+    if not m:
+        return ""
+    if _H2C is None:
+        _H2C = {}
+        try:
+            with open(CONTACT_STORE, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        p = (json.loads(line) or {}).get("payload") or {}
+                    except ValueError:
+                        continue
+                    u = re.search(r"linkedin\.com/in/([^/?\s]+)", str(p.get("linkedin") or ""))
+                    if u and p.get("company"):
+                        _H2C[u.group(1).lower().rstrip("/")] = p["company"]
+        except Exception:
+            pass                                    # degrade to "", never block the send
+    return _H2C.get(m.group(1).lower().rstrip("/"), "")
 
 
 def same_recipient(a, b):
@@ -641,7 +733,8 @@ def main(argv=None):
     ap.add_argument("--no-targets", action="store_true", help="acknowledge a warm send that names no companies")
     ap.add_argument("--segment", default="")
     ap.add_argument("--kind", default="initial", choices=["initial", "reply"])
-    ap.add_argument("--status", default="sent", choices=["sent", "bounced", "drafted"])
+    ap.add_argument("--status", default="sent",
+                    choices=["sent", "bounced", "drafted", "discarded"])
     ap.add_argument("--note", default="", help="sent_note: what it was and why")
     ap.add_argument("--praise-tier", choices=["A", "B", "none"], default=None,
                     help="A=primary-sourced artifact, B=specifics about their background, "
@@ -739,6 +832,19 @@ def main(argv=None):
         print(f"🔴 unknown rung {a.rung!r}. One of: {', '.join(sorted(RUNGS))}", file=sys.stderr)
         return 2
 
+    # BUG-166: populate `company` AT WRITE TIME when the operator left it blank and the recipient
+    # is already a 1st-degree connection (the warm/reply case this bug is named for — a cold-boss
+    # target has no row in the contact store, so this is a harmless no-op there). Resolved BEFORE
+    # segment auto-derivation and the row itself are built, so every downstream reader of
+    # `a.company` — the boss-registry check, `_derive_segment`, the row dict, the correspondence-
+    # log advance — sees the SAME resolved value rather than each re-deriving it (or not) on its
+    # own. Mutating `a.company` in place matches this function's own existing pattern for
+    # `a.segment` a little further down.
+    if not a.company:
+        _resolved_company = resolve_handle_company(a.to)
+        if _resolved_company:
+            a.company = _resolved_company
+
     # THE BURN GUARD. A warm ask that names companies must record them, or rank_criteria will
     # re-offer the same companies to the next contact. Fail loudly rather than log a row that
     # looks complete and silently defeats the guard.
@@ -764,6 +870,32 @@ def main(argv=None):
                 return 4
         except ImportError:
             pass  # registry absent on a fresh install: degrade rather than block every send
+
+    # SEGMENT ENFORCEMENT on initial contacts. An initial contact must carry a canonical segment;
+    # the flag wins, else it is auto-derived from findings, else the send is refused. Replies
+    # inherit the thread's segment and are exempt. See CANON_SEGMENTS above.
+    if a.kind == "initial":
+        seg = (a.segment or "").strip().lower()
+        if not seg:
+            seg = _derive_segment(a.company)
+            if seg:
+                print(f"ℹ️  segment auto-derived from findings for {a.company!r}: {seg}")
+        if not seg:
+            print("⛔ BLOCKED: an initial contact needs a --segment, and none could be derived.",
+                  file=sys.stderr)
+            print(f"   {a.company!r} is not tagged in documents/findings, so pass one of:",
+                  file=sys.stderr)
+            print(f"   {', '.join(sorted(CANON_SEGMENTS))}", file=sys.stderr)
+            print("   An untagged send is an unmeasured send, invisible to every per-segment rate",
+                  file=sys.stderr)
+            print("   and to the balancer.", file=sys.stderr)
+            return 2
+        if seg not in CANON_SEGMENTS:
+            print(f"⛔ BLOCKED: --segment {seg!r} is not a canonical slug. One of: "
+                  f"{', '.join(sorted(CANON_SEGMENTS))}.", file=sys.stderr)
+            return 2
+        a.segment = seg
+
     rows = _load(a.path)
     today = datetime.date.today().isoformat()
     dupes = [r for r in rows

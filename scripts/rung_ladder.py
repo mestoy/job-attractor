@@ -132,6 +132,70 @@ def is_backfilled(row):
     return backfill_source(row) is not None
 
 
+ACCEPTANCE_RUNGS = frozenset({"cold-stranger"})
+
+
+def _connections_slugs():
+    """Every current 1st-degree connection's slug, from the newest export — or None (never an
+    empty set) when no export is available, so a caller can tell "unmeasurable" from "measured zero".
+    """
+    try:
+        from parse_network import find_export, parse_rows
+        from reconcile_linkedin import slug_of
+    except Exception:
+        return None
+    try:
+        path, text = find_export()
+    except Exception:
+        return None
+    if not path or not text:
+        return None
+    try:
+        rows = parse_rows(text)
+    except Exception:
+        return None
+    slugs = set()
+    for r in rows:
+        s = slug_of(r.get("URL"))
+        if s:
+            slugs.add(s)
+    return slugs
+
+
+def _row_slug(row):
+    try:
+        from reconcile_linkedin import slug_of
+    except Exception:
+        return None
+    return slug_of(row.get("to"))
+
+
+def acceptance_tally(rows, connections_slugs, include_undelivered=False):
+    """{rung: [checked, accepted]} for the ACCEPTANCE_RUNGS only.
+
+    An invitation note (rung 1-2) is scored on ACCEPTANCE, not on a written reply — the ask was to
+    connect. `connections_slugs=None` means no export was available to check against, and the caller
+    must render that as "not checked", never as a real 0%.
+    """
+    if connections_slugs is None:
+        return {}
+    agg = {}
+    for r in rows:
+        if not include_undelivered and str(r.get("status", "")).lower() in NOT_DELIVERED:
+            continue
+        k = normalize_rung(r.get("rung"))
+        if k not in ACCEPTANCE_RUNGS:
+            continue
+        s = _row_slug(r)
+        if not s:
+            continue
+        slot = agg.setdefault(k, [0, 0])
+        slot[0] += 1
+        if s in connections_slugs:
+            slot[1] += 1
+    return agg
+
+
 def tally(rows, include_undelivered=False):
     """{rung: [sent, replied]} plus the count excluded as undelivered."""
     agg, dropped = {}, 0
@@ -178,13 +242,14 @@ def _order(agg):
     return known + unknown
 
 
-def render(agg, dropped, quiet=False):
+def render(agg, dropped, quiet=False, acceptance=None, acceptance_available=True):
     sent = sum(v[0] for v in agg.values())
     replied = sum(v[1] for v in agg.values())
+    acceptance = acceptance or {}
     out = []
     if not quiet:
-        out.append(f"{'rung':24} {'sent':>5} {'replied':>8} {'rate':>7}")
-        out.append("─" * 47)
+        out.append(f"{'rung':24} {'sent':>5} {'replied':>8} {'rate':>7}  {'accepted':>14}")
+        out.append("─" * 64)
         for k in _order(agg):
             s, rp = agg.get(k, (0, 0))
             label = RUNG_LABEL.get(k, f"     {k}")
@@ -192,8 +257,19 @@ def render(agg, dropped, quiet=False):
             # value any writer emits, so it is known here and absent from `RUNGS`.
             flag = "" if k in RUNGS or k in ("?", "cold-boss-unequipped") \
                 else "  ⚠️ unknown rung"
-            out.append(f"{label:24} {s:5} {rp:8} {(100 * rp / s if s else 0):6.1f}%{flag}")
-        out.append("─" * 47)
+            if k in ACCEPTANCE_RUNGS:
+                replied_cell, rate_cell = f"{'-':>8}", f"{'-':>7}"
+            else:
+                replied_cell, rate_cell = f"{rp:8}", f"{(100 * rp / s if s else 0):6.1f}%"
+            if k in acceptance:
+                chk, acc = acceptance[k]
+                acc_cell = f"{acc}/{chk} ({100 * acc / chk if chk else 0:.1f}%)"
+            elif k in ACCEPTANCE_RUNGS:
+                acc_cell = "n/a" if acceptance_available else "not checked (no export)"
+            else:
+                acc_cell = ""
+            out.append(f"{label:24} {s:5} {replied_cell} {rate_cell}  {acc_cell:>14}{flag}")
+        out.append("─" * 64)
     out.append(f"{'TOTAL':24} {sent:5} {replied:8} {(100 * replied / sent if sent else 0):6.1f}%")
     if dropped:
         out.append(f"\n  {dropped} row(s) excluded as undelivered "
@@ -211,7 +287,10 @@ def main(argv=None):
 
     rows = load(a.path)
     agg, dropped = tally(rows, include_undelivered=a.all_rows)
-    print(render(agg, dropped, quiet=a.quiet))
+    connections_slugs = _connections_slugs()
+    acceptance = acceptance_tally(rows, connections_slugs, include_undelivered=a.all_rows)
+    print(render(agg, dropped, quiet=a.quiet, acceptance=acceptance,
+                 acceptance_available=connections_slugs is not None))
 
     if not a.quiet:
         if not agg.get("referred", [0, 0])[0]:

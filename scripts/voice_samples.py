@@ -25,7 +25,7 @@ import os
 import re
 import sys
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = os.path.abspath(os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SAMPLES_PATH = os.path.join(REPO, "documents", "writing-samples.md")
 STYLE_PATH = os.path.join(REPO, "documents", "writing-style-guide.md")
 

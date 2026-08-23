@@ -19,10 +19,18 @@ import sys, os, re, json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     from kit_config import (OWNER_NAME, OWNER_FIRST, OWNER_SITE, RETIRED,
-                            RETIRED_PATTERNS, ROLE_IMPLY_PATTERNS)
+                            RETIRED_PATTERNS, ROLE_IMPLY_PATTERNS, OUTCOME_VERBS)
 except Exception:  # standalone fallback — placeholders, so the checks are visibly inert
     OWNER_NAME, OWNER_FIRST, OWNER_SITE = "Your Name", "You", "yoursite.example"
     RETIRED, RETIRED_PATTERNS, ROLE_IMPLY_PATTERNS = [], [], []
+    OUTCOME_VERBS = ["taken", "led", "built", "run", "drove", "driven", "shipped"]
+
+# kit issue #64: the outcome-verb branch used to be hard-coded to product-management verbs
+# (taken/drove/driven/led/shipped/built), scoped in the SCRIPT rather than in kit_config, so a
+# business-analyst or process-improvement claim describing the same class of result in different
+# words ("migrated", "consolidated", "automated", ...) missed the gate. Built once here and reused
+# by both ingredients 1 and 5 below, so the two branches cannot drift out of sync with each other.
+_OUTCOME_VERB_RE = r"(?:" + "|".join(re.escape(v) for v in OUTCOME_VERBS) + r")"
 
 BANNED = [  # AI tells + filler words (writing-style-guide.md "Zero AI tells")
     "actually", "honestly", "genuinely", "simply", "really", "exactly", "exact",
@@ -527,7 +535,7 @@ INGREDIENTS = [
     # (number, label, regex, hard-fail-for-cold, hard-fail-for-warm)
     (1, "who you are",
      r"\b(i'?m|i am)\s+(a|an)\b|\bbuilder\s+pm\b|\bproduct\s+manager\b|\bi'?ve\s+(spent|been)\b"
-     r"|\bi\s+(have\s+)?(taken|led|built|run|drove|driven)\b|\bi\s+ship\b",
+     r"|\bi\s+(have\s+)?" + _OUTCOME_VERB_RE + r"\b|\bi\s+ship\b",
      False, False),
     (2, "why you chose them",
      r"\b(is|are)\s+(a\s+)?(problem|work|company|question|the\s+kind|something|exactly)\b"
@@ -553,12 +561,12 @@ INGREDIENTS = [
     (4, "you did your research (specific, THEIR side)", None, False, False),  # computed below
     (5, "what you can offer them",
      r"\$[\d,]+|\b\d+%|\b\d+x\b|\b0-to-1\b|\bzero\s+to\s+one\b|\b\d+\s*(million|billion|m\b|b\b|k\b)"
-     r"|\bbuilder\s+pm\s+like\s+me\b|\bi\s+(have\s+)?(taken|drove|driven|led|shipped|built)\b"
+     r"|\bbuilder\s+pm\s+like\s+me\b|\bi\s+(have\s+)?" + _OUTCOME_VERB_RE + r"\b"
      # His give-back idiom is offering to SHARE what he knows — "trade/swap/compare notes",
      # "happy/glad to share/help" (proven across two real sends). Andy's ingredient 5
      # is "what you can offer them"; an offer of hard-won expertise is one, and the detector missed
      # it because it only recognized a demonstrated-metric offer. Added 2026-07-29.
-     r"|\b(swap|trade|compare)\s+notes\b|\b(happy|glad)\s+to\s+(swap|trade|share|compare|help)\b"
+     + r"|\b(swap|trade|compare)\s+notes\b|\b(happy|glad)\s+to\s+(swap|trade|share|compare|help)\b"
      # 🤝 OFFERING PEOPLE IS AN OFFER, and for a recruiter it is the BEST one. Added 2026-08-04 on
      # a note to a staffing director with 15 years placing technologists.
      # The note offered "if I run into a strong engineer or PM who's looking, I'll send them your

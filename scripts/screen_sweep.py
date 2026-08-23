@@ -23,7 +23,7 @@ Usage: scripts/screen_sweep.py documents/sweep-YYYY-MM-DD.jsonl [--show-dropped]
 """
 import json, os, re, sys, collections
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = os.path.abspath(os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 

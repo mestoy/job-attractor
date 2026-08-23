@@ -193,6 +193,67 @@ def _blocked(company):
         return None
 
 
+# ⭐ HOW LONG YOUR OWN VERIFICATION STAYS TRUSTED before this card falls back to the
+# unconditional export-frozen warning again (kit issue #60). A live check is a stronger signal
+# than the export snapshot, but it is not permanent — a role recorded 8 months ago is no more
+# trustworthy than the export it was meant to supersede. Set generously relative to
+# check_network_freshness.py's own 7/14-day export thresholds, because a human opened a profile
+# and read it, which is a materially stronger claim than an unmaintained CSV's age.
+ROLE_VERIFICATION_FRESH_DAYS = 90
+
+
+def _verified_role(key):
+    """The newest human-checked role for this contact, or None. Reads `contact_signals.ROLE_CACHE`
+    (kit issue #60): `record_role.py` writes here and nothing was reading it, so a verification
+    could never satisfy the gate that demanded it."""
+    try:
+        sys.path.insert(0, HERE)
+        import contact_signals
+        return contact_signals.verified_role(key)
+    except Exception:
+        return None
+
+
+def _role_is_fresh(verified):
+    if not verified or not verified.get("verified_on"):
+        return False
+    try:
+        when = datetime.date.fromisoformat(verified["verified_on"])
+    except (ValueError, TypeError):
+        return False
+    return (datetime.date.today() - when).days <= ROLE_VERIFICATION_FRESH_DAYS
+
+
+_EXPORT_ROWS = None
+
+
+def _export_role(key):
+    """(company, title) for this contact from the newest LinkedIn export on disk, or ("", "").
+
+    Kit issue #55 #1: the card used to regex a free-text `note` field for the employer and
+    reported `unknown` on 83 of 83 real contacts checked, even though the export holds a Company
+    AND a Position column for every one of them. Join to the export instead of parsing prose.
+    """
+    global _EXPORT_ROWS
+    if _EXPORT_ROWS is None:
+        _EXPORT_ROWS = {}
+        try:
+            sys.path.insert(0, HERE)
+            import parse_network as pn
+            cl = _closeness()
+            _path, text = pn.find_export()
+            if text:
+                for r in pn.parse_rows(text):
+                    who = f"{r.get('First Name', '')} {r.get('Last Name', '')}".strip()
+                    if who:
+                        _EXPORT_ROWS[cl.normalize_name(who)] = (
+                            (r.get("Company") or "").strip(), (r.get("Position") or "").strip())
+        except Exception:
+            pass
+    cl = _closeness()
+    return _EXPORT_ROWS.get(cl.normalize_name(key), ("", ""))
+
+
 def card(name, limit=40):
     key, row = _row_for(name)
     if row is None:
@@ -243,11 +304,41 @@ def card(name, limit=40):
         print("║  ⚪ not in the ranked pool (already contacted, held, or blocked employer)")
 
     print("╠══ 2. TITLE AND EMPLOYER")
-    print(f"║  employer (from the export note): {company or 'unknown'}")
+    # Preference order for the employer this card acts on: your own live-profile check (kit
+    # issue #60) > the newest LinkedIn export's Company column (kit issue #55 #1, a real join,
+    # not a note regex) > the export note's free-text parse above, kept as a last resort for a
+    # contact who predates both stores.
+    verified = _verified_role(key)
+    export_company, export_title = _export_role(key)
+    if verified and verified.get("company"):
+        company = verified["company"]
+        source_label = "verified"
+    elif export_company:
+        company = export_company
+        source_label = "export (Company column)"
+    else:
+        source_label = "export note" if company else "unresolved"
+    print(f"║  employer ({source_label}): {company or 'unknown'}")
     b = _blocked(company)
     print(f"║  blocked-list: {'🔴 BLOCKED' if b else '✅ not blocked' if b is False else '⚪ unknown'}")
-    print("║  ⛔ TITLE IS FROM THE EXPORT AND IS FROZEN AT THE CONNECT DATE. Verify it on")
-    print("║     the live profile before writing anything. One contact's had moved two years.")
+    fresh = _role_is_fresh(verified)
+    if verified and verified.get("still_there") is False:
+        print(f"║  ⛔ ROLE ENDED — verified {verified['verified_on']} ({verified.get('source_type', 'unverified')}): "
+              f"{verified.get('note') or 'no longer in the stored role'}")
+    elif verified and fresh:
+        title = verified.get("title") or export_title or "?"
+        print(f"║  ✅ verified {verified['verified_on']} ({verified.get('source_type', 'unverified')}) "
+              f"— {title} @ {verified.get('company') or company or '?'}")
+    else:
+        # ⛔ THE WARNING IS CONDITIONAL, NOT UNCONDITIONAL (kit issue #60). It used to fire on
+        # every run regardless of whether a verification existed, so your own recorded check
+        # could never satisfy the gate that demanded it — an unfalsifiable instruction is worse
+        # than no instruction, because it trains the reader to skim past a real ⛔.
+        if verified:
+            print(f"║  ⚠️  last verified {verified['verified_on']}, over {ROLE_VERIFICATION_FRESH_DAYS}d ago — "
+                  "treat as export-frozen again")
+        print("║  ⛔ TITLE IS FROM THE EXPORT AND IS FROZEN AT THE CONNECT DATE. Verify it on")
+        print("║     the live profile before writing anything. One contact's had moved two years.")
 
     print("╠══ 3. RUNG AND WHAT IT SANCTIONS")
     tier = row.get("closeness") or "unset"

@@ -248,7 +248,19 @@ def record(args):
         os.fsync(fh.fileno())
 
     badge = {"SURVIVOR": "🟢", "DROP": "⛔", "UNVERIFIED": "⚪", "DEFERRED": "⏸️"}[verdict]
-    extra = f" (filter {row['filter']})" if "filter" in row else ""
+    # Echoing the filter LABEL, not just the number, is what catches a mis-stamped DROP at write
+    # time instead of at audit time — a real report: five companies stamped filter 7 ("Not
+    # LGBTQIA+ friendly") for reasons that were actually layoffs and leadership instability, found
+    # only hours later because the CLI's own success line never named what the number meant.
+    extra = ""
+    if "filter" in row:
+        try:
+            sys.path.insert(0, HERE)
+            from reconcile_findings import FILTERS
+            label = FILTERS.get(row["filter"], "not recognized — check reconcile_findings.FILTERS")
+        except Exception:
+            label = "label unavailable"
+        extra = f" (filter {row['filter']}: {label})"
     print(f"{badge} {verdict}{extra}  {company}  [{lane}] → "
           f"{os.path.relpath(path, REPO)}")
     return 0

@@ -42,9 +42,11 @@ import glob
 import json
 import os
 import re
+import subprocess
 import sys
+import datetime
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = os.path.abspath(os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Canary. Planted in this file's own source and asserted found on every scan of a tree containing
 # it, so "the matcher works" is proven per-run rather than assumed. See control 3 below.
@@ -347,33 +349,69 @@ BIGRAM = re.compile(r"\b([A-Z][a-z]+)\s+([A-Z][a-z]+)\b")
 WORD = re.compile(r"\b([A-Za-z][a-z]{3,})\b")
 
 
-def scan(root, full, tokens, companies, owner=None):
-    """Returns (blocks, warns, nfiles). `nfiles` is what CONTROL 4 measures, and it is counted
-    HERE rather than by a second walk, because the number that matters is what this scan actually
-    read, not what a later walk could have read.
+def _owner_literal_hit(text, owner):
+    """True if `text` (an ALWAYS/_PHONE match) IS, EXACTLY, the owner's own configured email or
+    phone — as opposed to some OTHER person's email/phone that merely SHARES a substring with it.
+
+    ⚠️ EXACT MATCH ONLY, ON PURPOSE — found by security review before ship. An earlier version used
+    substring containment (`val in text or text in val`), which downgraded a THIRD PARTY's PII to a
+    WARN whenever it happened to contain the owner's literal as a substring:
+    `owner['email'] = 'j@example.com'` made a completely different person's `myj@example.com` match too, since
+    `'j@example.com' in 'myj@example.com'` is True. That falsified this module's own stated invariant that
+    third-party PII can NEVER be downgraded. `text` here is always the REGEX'S OWN exact matched
+    span for a shape-anchored pattern (an email or a NANP phone), never a truncated or padded
+    window around it, so an exact string comparison is the correct check, not an approximation of
+    one — containment was never buying anything real, only creating a false-negative hole."""
+    for kind, val in (owner or {}).items():
+        if kind == "name" or not val:
+            continue
+        if text == val:
+            return True
+    return False
+
+
+def scan_items(items, full, tokens, companies, owner=None, downgrade_owner=False):
+    """The core matcher, over an explicit `[(rel, body), ...]` list rather than a directory walk —
+    shared by the whole-tree `--scan` path (via `scan()` below) and the diff-based `--push-guard`
+    path, so the two can never drift apart into two gates with two different ideas of what PII is.
 
     `owner` (P1-1) is the resolved owner-identity dict from _resolve_owner(); its email/phone/site
-    are blocked as direct literals. It is optional so the direct scan() callers in the test suite
-    keep working unchanged."""
+    are matched as direct literals. `downgrade_owner` (kit#61): when True — meaning the push
+    destination has been CONFIRMED private — a hit that is the owner's OWN name/email/phone/site is
+    reported as a WARN instead of a BLOCK. It is False by default so every existing `--scan` caller
+    (the public repo, the deployed kit) keeps blocking on identity exactly as it always has; only
+    `--push-guard` on a confirmed-private fork ever passes True. Third-party hits are NEVER
+    downgraded by this flag — that branch does not exist here, on purpose, so there is no code path
+    that could accidentally let a stranger's name through on a private destination.
+    """
     owner = owner or {}
+    owner_name = str(owner.get("name") or "")
     blocks, warns = [], []
-    nfiles = 0
-    for path, body in iter_files(root):
-        nfiles += 1
-        rel = os.path.relpath(path, root)
-        lower_full = {f.lower(): f for f in full}
+    lower_full = {f.lower(): f for f in full}
+    for rel, body in items:
         for m in BIGRAM.finditer(body):
             cand = f"{m.group(1)} {m.group(2)}"
             if cand.lower() in lower_full:
-                blocks.append((rel, cand, "contact full name"))
+                if downgrade_owner and owner_name and cand.lower() == owner_name.lower():
+                    warns.append((rel, cand, "owner's own name (private fork; would BLOCK if public)"))
+                else:
+                    blocks.append((rel, cand, "contact full name"))
         for pat, why in ALWAYS:
             mm = pat.search(body)
             if mm:
-                blocks.append((rel, mm.group(0)[:60], why))
+                hit = mm.group(0)[:60]
+                if downgrade_owner and why == "email address" and _owner_literal_hit(hit, owner):
+                    warns.append((rel, hit, "owner's own email (private fork; would BLOCK if public)"))
+                else:
+                    blocks.append((rel, hit, why))
         # P1-1 generic shapes: a real phone or street address is PII regardless of vocabulary.
         for m in _PHONE.finditer(body):
             if not _phone_is_placeholder(m.groups()):
-                blocks.append((rel, m.group(0)[:60], "phone number"))
+                hit = m.group(0)[:60]
+                if downgrade_owner and _owner_literal_hit(hit, owner):
+                    warns.append((rel, hit, "owner's own phone (private fork; would BLOCK if public)"))
+                else:
+                    blocks.append((rel, hit, "phone number"))
         for m in _STREET.finditer(body):
             if not _STREET_PLACEHOLDER.match(m.group(0)):
                 blocks.append((rel, m.group(0)[:60], "street address"))
@@ -382,7 +420,10 @@ def scan(root, full, tokens, companies, owner=None):
             if kind == "name":
                 continue  # the name is a First-Last bigram; `full` already carries it
             if val and val in body:
-                blocks.append((rel, val[:60], f"owner identity ({kind})"))
+                if downgrade_owner:
+                    warns.append((rel, val[:60], f"owner's own {kind} (private fork; would BLOCK if public)"))
+                else:
+                    blocks.append((rel, val[:60], f"owner identity ({kind})"))
         # COMPANIES WARN, THEY DO NOT BLOCK. Measured on the first real run: this tier flagged
         # Array, Close, Archive, Render, Balance, Numeric, Sequence, Greenhouse and Precisely,
         # because the tracker holds real companies whose names are ordinary English words, and the
@@ -405,14 +446,283 @@ def scan(root, full, tokens, companies, owner=None):
             w = m.group(1).lower()
             if w in tokens and w not in TOKEN_EXCEPTIONS:
                 warns.append((rel, m.group(1), "name token (review, not a block)"))
+    return blocks, warns
+
+
+def scan(root, full, tokens, companies, owner=None):
+    """Returns (blocks, warns, nfiles). `nfiles` is what CONTROL 4 measures, and it is counted
+    HERE rather than by a second walk, because the number that matters is what this scan actually
+    read, not what a later walk could have read.
+
+    Thin wrapper over `scan_items()` — see that function for the actual matching logic and for
+    `downgrade_owner`, which this whole-tree path never sets: every `--scan` caller (the public
+    repo, the deployed kit) must keep blocking on identity exactly as it always has."""
+    items = []
+    nfiles = 0
+    for path, body in iter_files(root):
+        nfiles += 1
+        items.append((os.path.relpath(path, root), body))
+    blocks, warns = scan_items(items, full, tokens, companies, owner=owner)
     return blocks, warns, nfiles
+
+
+# ── PUSH GUARD (kit#61) ─────────────────────────────────────────────────────────────────────────
+# `--scan <dir>` above answers "is anything in this tree PII" — right for the two paths that
+# publish a WHOLE assembled tree from scratch each time (the deployed kit, the public stage). It is
+# the wrong question for a partner's own backup push to their own fork, which re-adds the SAME
+# already-published tree every run: the operator's own résumé (their own name, expected content)
+# and the mirrored memory store sat in that tree forever, so the whole-tree scan blocked EVERY
+# push, permanently, regardless of what the push actually added (kit#61's own repro: three commits
+# of pure kit plumbing, zero personal content in the diff, withheld anyway).
+#
+# `--push-guard` answers the right question instead: "does THIS diff add a third party's PII", and
+# treats the operator's OWN identity as expected content once the destination is CONFIRMED private.
+# Two things make that safe:
+#   1. It scans committed content ONLY (`git show HEAD:<path>` for files named in a `git diff
+#      --name-status`), so an untracked or gitignored file — which can never be pushed — can never
+#      be scanned or block a push either. `scripts/kit_config.py` (the operator's own identity
+#      file, gitignored by design) is simply never in this list.
+#   2. The owner-identity downgrade requires an EXPLICIT, VERIFIED "isPrivate": true from `gh repo
+#      view`. Anything else — `gh` missing, not authenticated, offline, an ambiguous remote URL, a
+#      JSON parse failure, or a repo that says `isPrivate: false` — is treated as PUBLIC. Guessing
+#      wrong toward "public" only means an extra WARN-turned-BLOCK on the operator's own name; guessing
+#      wrong toward "private" would mean a real leak sailing through on a repo that turned out to be
+#      public. The cheap wrong guess is the only one this makes.
+# Third-party PII is NEVER downgraded by any of this — `scan_items(..., downgrade_owner=...)` only
+# ever softens a hit that is the OWNER's own name/email/phone/site; every other hit blocks exactly
+# as it does in `--scan`, private fork or not.
+
+_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # git's own empty-tree constant
+
+
+def _git(repo, *args, timeout=30):
+    try:
+        return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True,
+                               timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _diff_files(repo, base):
+    """([(rel, body)], [unreadable_rel, ...]) for every ADDED/MODIFIED/RENAMED file between `base`
+    and HEAD, with content read from the COMMITTED blob at HEAD via `git show` — never the working
+    tree, so an uncommitted local edit can never widen or narrow what a push guard sees; what is
+    being PUSHED is what HEAD says, full stop. Deleted files are skipped (nothing to scan; nothing
+    is pushed that adds them). Returns (None, None) on any git failure — the caller must treat that
+    as GATE BROKEN, never as 'nothing changed', or an unreadable diff would report clean."""
+    p = _git(repo, "diff", "--name-status", f"{base}..HEAD")
+    if p is None or p.returncode != 0:
+        return None, None
+    rels = []
+    for line in p.stdout.splitlines():
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        parts = line.split("\t")
+        status, rel = parts[0], parts[-1]
+        if status.startswith("D"):
+            continue
+        rels.append(rel)
+    items, unreadable = [], []
+    for rel in rels:
+        sp = _git(repo, "show", f"HEAD:{rel}")
+        if sp is None or sp.returncode != 0:
+            unreadable.append(rel)
+            continue
+        items.append((rel, sp.stdout))
+    return items, unreadable
+
+
+def _parse_owner_repo(url):
+    """'owner/repo' from a github.com remote URL (SSH or HTTPS), or None if it isn't one. A
+    non-GitHub or unparsable remote is treated as 'cannot confirm private' by the caller, which
+    is the fail-safe (public) direction."""
+    m = re.search(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", url or "")
+    return f"{m.group(1)}/{m.group(2)}" if m else None
+
+
+def _repo_is_private(repo, remote):
+    """True ONLY on a CONFIRMED-private destination. Every failure mode — no such remote, a
+    non-GitHub URL, `gh` absent or unauthenticated, a network error, a malformed JSON reply, or an
+    explicit `isPrivate: false` — returns False. See the module note above for why 'unknown'
+    resolves to the strict (public) side rather than the lenient one.
+
+    ⚠️ CHECKS THE PUSH URL, NOT JUST THE FETCH URL (security review, before ship). A remote can have
+    a separate push URL (`git remote set-url --push <remote> <other>`) that differs from its fetch
+    URL. `git push` follows the PUSH url; checking only the fetch URL could confirm-private a repo
+    that isn't actually where the push is headed, and downgrade the owner's own identity toward a
+    destination that was never verified. `--push` returns the fetch URL too when no push URL is
+    configured (the common case), so this is a strict widening, never a behavior change for a
+    single-URL remote.
+    """
+    g = _git(repo, "remote", "get-url", "--push", remote or "origin")
+    if g is None or g.returncode != 0:
+        return False
+    owner_repo = _parse_owner_repo(g.stdout.strip())
+    if not owner_repo:
+        return False
+    try:
+        p = subprocess.run(["gh", "repo", "view", owner_repo, "--json", "isPrivate"],
+                            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if p.returncode != 0:
+        return False
+    try:
+        data = json.loads(p.stdout)
+    except (ValueError, json.JSONDecodeError):
+        return False
+    return data.get("isPrivate") is True
+
+
+def _self_test_matcher():
+    """CONTROL-3, adapted for a diff scan (kit#61). The whole-tree gate's canary proves the matcher
+    fires by finding a literal string planted in ITS OWN source, which only works because a
+    self-scan always includes this file. A push diff usually does NOT include pii_gate.py, so that
+    trick has nothing to check. Prove the REGEX ENGINE ITSELF fires instead, against a synthetic
+    fixture the real vocabulary can never suppress (it names no real person and matches no
+    TOKEN/COMPANY exception): if this returns False, the matcher is not running, and 'no findings'
+    would mean nothing.
+
+    ⚠️ ASSEMBLED AT RUNTIME, NEVER WRITTEN AS ONE CONTIGUOUS LITERAL. A first version spelled the
+    fixture address out directly in this docstring's neighborhood as one string, and a WHOLE-TREE
+    `--scan` of a directory containing this very file then matched that literal against its own
+    email regex — the self-test fixture became a permanent, self-inflicted BLOCK on
+    `scripts/pii_gate.py` itself, changing `--scan`'s output on every tree that includes this file.
+    Splitting the local-part and domain so neither half is a real address on its own, and joining
+    them only inside this function's local variable, keeps the fixture invisible to a scan of the
+    SOURCE while still producing a real, matchable string when this function actually RUNS it
+    through the matcher.
+    """
+    local, domain = "piigate" + "-selftest", "zzyzx-canary" + "-fixture.zz"
+    fixture = f"contact: {local}@{domain}"
+    blocks, _ = scan_items([("__pii_gate_selftest__", fixture)], set(), set(), set())
+    return any(why == "email address" for _, _, why in blocks)
+
+
+def _log_override(repo, blocks):
+    """A `--override` is an explicit judgment call, never a silent bypass — logged, append-only,
+    with what was overridden, so the record survives even though the push itself does not carry it."""
+    path = os.path.join(repo, "documents", "state", "pii-gate-overrides.jsonl")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        row = {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+            "findings": [{"file": rel, "hit": hit, "why": why} for rel, hit, why in sorted(set(blocks))],
+        }
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+        return True
+    except OSError:
+        return False
+
+
+def push_guard(a):
+    """`--push-guard`: scan the DIFF being pushed, not the working tree. See the module note above
+    this section for the full design. Exit codes match `--scan`: 0 clean, 2 gate broken, 3 blocked."""
+    if not a.repo or not a.base:
+        print("🔴 --push-guard requires --repo and --base", file=sys.stderr)
+        return 2
+    repo = os.path.abspath(os.path.expanduser(a.repo))
+    if not os.path.isdir(repo):
+        print(f"🔴 not a directory: {repo}", file=sys.stderr)
+        return 2
+    remote = a.remote or "origin"
+
+    # ⚠️ build_vocabulary() and _resolve_owner() both read the module-level `REPO` (set once, from
+    # $CLAUDE_PROJECT_DIR or this file's own location on disk) — correct for `--scan`, which is
+    # always invoked in place inside the tree it scans, but `--push-guard` takes an EXPLICIT
+    # `--repo` that can legitimately differ from wherever pii_gate.py happens to live or from
+    # whatever $CLAUDE_PROJECT_DIR says (a multi-project shell, or this file invoked by absolute
+    # path from elsewhere). Scope the vocabulary to `--repo` for the duration of this call, restore
+    # after, so `--push-guard` never silently answers "is this PII" using a DIFFERENT repo's
+    # contacts and identity than the one it was told to guard.
+    global REPO
+    _prev_repo = REPO
+    REPO = repo
+    try:
+        full, tokens, companies, sources = build_vocabulary()
+        owner = _resolve_owner()
+    finally:
+        REPO = _prev_repo
+    missing = [s for s in ("connections", "tracker", "blocked") if not sources.get(s)]
+    if missing:
+        print(f"🔴 GATE BROKEN: no rows loaded from {', '.join(missing)}. "
+              f"The vocabulary cannot have been built. Refusing.", file=sys.stderr)
+        return 2
+    if len(full) < 100:
+        print(f"🔴 GATE BROKEN: only {len(full)} full names loaded, expected hundreds. Refusing.",
+              file=sys.stderr)
+        return 2
+
+    if not _self_test_matcher():
+        print("🔴 GATE BROKEN: the matcher self-test did not fire on its own fixture. The scanner "
+              "is not reading what it thinks it is. Refusing.", file=sys.stderr)
+        return 2
+
+    items, unreadable = _diff_files(repo, a.base)
+    if items is None:
+        print(f"🔴 GATE BROKEN: could not compute the diff {a.base}..HEAD in {repo}. Refusing.",
+              file=sys.stderr)
+        return 2
+    # ── CONTROL-4, adapted: an unreadable PUSHED file is GATE BROKEN, never silently skipped. A
+    # small/empty diff is normal here (unlike the whole-tree scan, where it signals nfiles<50 read
+    # nothing) — a no-op push is a legitimate, frequent, clean result, so there is no floor on
+    # len(items). What must never happen is treating "couldn't read it" as "nothing to see".
+    if unreadable:
+        shown = ", ".join(unreadable[:5]) + ("…" if len(unreadable) > 5 else "")
+        print(f"🔴 GATE BROKEN: could not read {len(unreadable)} file(s) being pushed ({shown}). "
+              f"A file this gate cannot read is a file it cannot clear. Refusing.", file=sys.stderr)
+        return 2
+
+    private = _repo_is_private(repo, remote)
+    blocks, warns = scan_items(items, full, tokens, companies, owner=owner,
+                                downgrade_owner=private)
+
+    if not a.quiet:
+        dest = "CONFIRMED PRIVATE" if private else "public or UNCONFIRMED (treated as public)"
+        print(f"pii_gate --push-guard: {len(items)} file(s) in {a.base}..HEAD, destination {dest}")
+    for rel, hit, why in sorted(set(warns))[:40]:
+        print(f"  🟡 WARN  {rel}: {hit}  ({why})")
+    if len(set(warns)) > 40:
+        print(f"  🟡 … and {len(set(warns)) - 40} more warnings not shown")
+    for rel, hit, why in sorted(set(blocks)):
+        print(f"  🔴 BLOCK {rel}: {hit}  ({why})", file=sys.stderr)
+
+    if blocks:
+        if a.override:
+            logged = _log_override(repo, blocks)
+            tag = "" if logged else " (⚠️ could not write the override log — proceeding anyway)"
+            print(f"\n⚠️  {len(set(blocks))} blocking finding(s) OVERRIDDEN by --override{tag}.",
+                  file=sys.stderr)
+            return 0
+        print(f"\n🔴 {len(set(blocks))} blocking finding(s) in this push. NOT safe to push.",
+              file=sys.stderr)
+        return 3
+    print(f"✅ pii_gate --push-guard clean ({len(set(warns))} warning(s), 0 blocking)")
+    return 0
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--scan", required=True)
+    ap.add_argument("--scan")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--push-guard", action="store_true",
+                     help="scan the diff being pushed (base..HEAD), not the working tree")
+    ap.add_argument("--repo", help="--push-guard: the repo to diff and push from")
+    ap.add_argument("--base", help="--push-guard: diff base, e.g. origin/main "
+                                    f"(use {_EMPTY_TREE} for 'everything in HEAD is new')")
+    ap.add_argument("--remote", default="origin", help="--push-guard: remote to check privacy on")
+    ap.add_argument("--override", action="store_true",
+                     help="--push-guard: proceed past BLOCKs anyway; logged, never silent")
     a = ap.parse_args()
+
+    if a.push_guard:
+        return push_guard(a)
+
+    if not a.scan:
+        print("🔴 --scan is required unless --push-guard is given", file=sys.stderr)
+        return 2
     root = os.path.abspath(os.path.expanduser(a.scan))
     if not os.path.isdir(root):
         print(f"🔴 not a directory: {root}", file=sys.stderr); return 2

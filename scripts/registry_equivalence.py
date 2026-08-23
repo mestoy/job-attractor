@@ -221,6 +221,46 @@ def untraceable_blocked():
     return sorted(registry_blocked() - namepos)
 
 
+def unmirrored_blocked():
+    """Prose blocks a fresh reseed WOULD hold that the live registry does NOT.
+
+    ⛔ THE DEFECT THIS CLOSES. `untraceable_blocked()` above checks one direction — registry keys
+    with no prose origin. This is the OTHER, and it is the one that silently ADMITS a declined
+    company: a ruling appends its row to `blocked-employers-list.md` but never mirrors into the
+    registry, so `is_blocked()` keeps answering False. A path that calls `employers.declare_blocked`
+    stays safe, but any path that appends prose directly with no such call can leave a block lapsed
+    — on the install this was found on, a handful of declined companies kept resurfacing in the
+    picker default because their prose block had never reached the registry.
+
+    ⚖️ MEASURED THROUGH THE SEEDER, NOT THE PROSE REGEX. `screen_sweep.blocked_keys_from_list` over
+    the raw file harvests salary fragments and reason words too, so a naive prose-minus-registry diff
+    is mostly noise. `seed_employers.scan()` IS the builder the registry is derived from, so its
+    blocked entities (plus their aliases) are exactly what a reseed would write — the diff against
+    the live registry is false-positive-free by construction and names real lapses only.
+
+    THE FIX WHEN THIS FIRES is `employers.declare_blocked(...)` for the missed rows, or a full
+    `seed_employers.py` reseed (the documented tiebreak, which also mirrors alias forms a per-name
+    declare would miss).
+    """
+    try:
+        se = _import_sibling("seed_employers")
+        canon = _import_sibling("screen_sweep").canon
+    except Exception as e:                           # pragma: no cover - degraded path
+        print(f"[!] could not load the seeder ({e})", file=sys.stderr)
+        return []
+    entities, _notes, _parked = se.scan()
+    reseed_blocked = set()
+    for k, row in entities.items():
+        if row.get("status") != "blocked":
+            continue
+        reseed_blocked.add(k)
+        for a in row.get("aliases") or ():
+            ak = canon(a)
+            if ak:
+                reseed_blocked.add(ak)
+    return sorted(reseed_blocked - registry_blocked())
+
+
 def invariants(path=None):
     """(ok, findings). The split's rules, which are about the REGISTRY being fit to be authority."""
     r = registry_blocked()
@@ -232,6 +272,11 @@ def invariants(path=None):
     if len(untr) > NAME_POSITION_MAX_UNTRACEABLE:
         findings.append(("🔴", f"{len(untr)} blocked key(s) trace to no name position in the source "
                                f"list: {', '.join(untr[:8])}"))
+    unmir = unmirrored_blocked()
+    if unmir:
+        findings.append(("🔴", f"{len(unmir)} prose-blocked compan(ies) a reseed would block are "
+                               f"MISSING from the registry, so they read as UNBLOCKED: "
+                               f"{', '.join(unmir[:8])} — run seed_employers.py or declare_blocked"))
     return (not findings), findings
 
 

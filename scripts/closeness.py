@@ -34,7 +34,7 @@ import os
 import re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(HERE)
+REPO = os.path.abspath(os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(HERE))
 STORE = os.path.join(REPO, "documents", "contact-closeness.json")
 LOCK = STORE + ".lock"
 

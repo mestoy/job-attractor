@@ -79,11 +79,46 @@ else
   n=$(git status --porcelain | wc -l | tr -d ' ')
   warn "$n uncommitted change(s) — run scripts/backup.sh to make durable"
 fi
-if git rev-parse @{u} >/dev/null 2>&1; then
-  read -r behind ahead < <(git rev-list --left-right --count @{u}...HEAD 2>/dev/null)
-  [ "${ahead:-0}" = "0" ] && pass "in sync with private remote" || warn "$ahead local commit(s) not pushed offsite"
+# ⛔ NEVER COMPARE AGAINST THE BRANCH'S CONFIGURED UPSTREAM (`@{u}`). On an install that TRACKS
+# the shared kit, `main`'s upstream IS the kit remote, and your own private commits are ALWAYS
+# ahead of it by definition — they must never be pushed there. This used to report "64 local
+# commit(s) not pushed offsite" while HEAD and the real private remote were identical and
+# everything was durable, because it was measuring distance from the kit, not from your backup.
+# A durability check that is structurally always red on a kit-tracking install is worse than no
+# check: it teaches you to skim past a real warning.
+#
+# Same kit-remote detection "Update Kit.command" uses (URL match, never a hardcoded name — a
+# fork keeps the repo name, so name-only matching picks the wrong remote on a forked install):
+# find the remote that IS the kit, then check durability against a DIFFERENT remote, never that
+# one. If every remote is the kit (no private remote configured at all), say so plainly instead
+# of reporting a false pass or a confusing ahead-count against the kit.
+KIT_CANONICAL="mestoy/job-attractor-kit"
+KIT_REMOTE=""
+for _r in $(git remote 2>/dev/null); do
+  _u="$(git remote get-url "$_r" 2>/dev/null)"
+  case "$_u" in
+    *"$KIT_CANONICAL"*) KIT_REMOTE="$_r"; break ;;
+    *job-attractor-kit*) [ -z "$KIT_REMOTE" ] && KIT_REMOTE="$_r" ;;
+  esac
+done
+PRIVATE_REMOTE=""
+for _r in $(git remote 2>/dev/null); do
+  if [ "$_r" = "origin" ] && [ "$_r" != "$KIT_REMOTE" ]; then PRIVATE_REMOTE="origin"; break; fi
+done
+if [ -z "$PRIVATE_REMOTE" ]; then
+  for _r in $(git remote 2>/dev/null); do
+    if [ "$_r" != "$KIT_REMOTE" ]; then PRIVATE_REMOTE="$_r"; break; fi
+  done
+fi
+_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+if [ -z "$PRIVATE_REMOTE" ]; then
+  warn "no private remote configured (only the kit remote${KIT_REMOTE:+ '$KIT_REMOTE'} is set) — commits are local-only, not offsite"
+elif ! git rev-parse "$PRIVATE_REMOTE/$_branch" >/dev/null 2>&1; then
+  warn "'$PRIVATE_REMOTE' has no '$_branch' branch yet — nothing pushed there so far"
 else
-  warn "no upstream tracking branch set"
+  read -r behind ahead < <(git rev-list --left-right --count "$PRIVATE_REMOTE/$_branch...HEAD" 2>/dev/null)
+  [ "${ahead:-0}" = "0" ] && pass "in sync with private remote '$PRIVATE_REMOTE'" \
+    || warn "$ahead local commit(s) not pushed to '$PRIVATE_REMOTE'"
 fi
 last=$(git log -1 --format='%cr' 2>/dev/null)
 if [ -n "$last" ]; then pass "last commit: $last"; else warn "no commits yet, run scripts/backup.sh"; fi

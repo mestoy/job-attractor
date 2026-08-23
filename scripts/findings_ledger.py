@@ -60,7 +60,41 @@ SUPPRESSING = ("DEFERRED",)
 
 TRIPWIRE_RE = re.compile(r"TRIPWIRE[:\s]+(\d{4}-\d{2}-\d{2})", re.I)
 
+# The closed vocabulary `record_finding.py` enforces at write time. Duplicated here rather than
+# imported: importing record_finding would pull in argparse and its whole CLI surface for one
+# tuple, and the two are pinned together by test_ledger_verdict_vocabulary.py.
+VERDICTS = ("SURVIVOR", "DROP", "UNVERIFIED", "DEFERRED")
+
+# Strip a leading emoji/marker so "🔴 DROP — reason" reads the same as "DROP". `\w` alone is not
+# enough: it would also eat the space before DROP and glue the emoji's byte remnants to nothing,
+# so this targets everything that is NOT a letter or digit at the very start of the string.
+_LEADING_NOISE = re.compile(r"^[^A-Za-z0-9]+")
+
 _ERRORS = []
+
+
+def normalize_verdict(raw):
+    """Recover a closed-vocabulary verdict token from free-form or legacy prose, or "".
+
+    ⛔ THE DEFECT THIS CLOSES. `verdict` had no closed vocabulary for a while before
+    `record_finding.py` started enforcing one, so rows like `"🔴 DROP — zero on-lane roles..."`
+    and `"SURVIVOR (qualified)"` sit in the ledger from before the gate existed, or from a hand
+    edit that bypassed it. Every reader that tests `verdict == "SURVIVOR"` (or `"DROP"`) treats
+    those rows as blank: not suppressed, not promoted, not counted — a verdict that took real
+    screening time and has no effect on anything.
+
+    This is NOT a license to accept arbitrary prose as a verdict. It recovers exactly one
+    known token from the FRONT of the string — a leading marker stripped, then the first word
+    up to whitespace or an opening paren, matched against the closed set. `"UNPROVEN — n too
+    small"` and `"🟡 WATCH — ..."` are not recognized verdicts and correctly normalize to "",
+    the same as a row with no verdict field at all: a real gap in the ledger, not a display bug,
+    and it stays visible as a gap rather than being guessed into a token nobody wrote.
+    """
+    s = _LEADING_NOISE.sub("", str(raw or "")).strip()
+    if not s:
+        return ""
+    first = re.split(r"[\s(]", s, 1)[0].upper()
+    return first if first in VERDICTS else ""
 
 
 def canon(name):
@@ -143,7 +177,7 @@ def suppressed(today=None):
         today = date.today().isoformat()
     out = {}
     for key, row in rulings().items():
-        if row.get("verdict") not in SUPPRESSING:
+        if normalize_verdict(row.get("verdict")) not in SUPPRESSING:
             continue
         tw = tripwire(row)
         if tw and tw <= today:
@@ -161,6 +195,20 @@ def load_errors():
     return list(_ERRORS)
 
 
+def unrecognized_verdicts():
+    """[(company, raw verdict)] for every latest-row verdict `normalize_verdict` cannot place.
+
+    The other half of the fix: a normalizing reader recovers what it can, but a row that
+    recovers to "" (never written, or genuinely off-vocabulary like "WATCH") is still a real
+    gap, and it must stay COUNTED rather than silently absorbed by the normalizer's own success
+    on the other rows. `consistency-check.sh` reports this count so the gap surfaces before an
+    operator notices a company missing from the board.
+    """
+    return sorted((r.get("company", "?"), r.get("verdict"))
+                  for r in rulings().values()
+                  if not normalize_verdict(r.get("verdict")))
+
+
 if __name__ == "__main__":
     from datetime import date
     supp = suppressed()
@@ -170,5 +218,12 @@ if __name__ == "__main__":
         print(f"  · {k:<32} {why}")
     if len(supp) > 20:
         print(f"  … +{len(supp) - 20} more")
+    unrec = unrecognized_verdicts()
+    if unrec:
+        print(f"  ⚠️  {len(unrec)} row(s) with an unrecognized verdict (invisible to every reader):")
+        for co, v in unrec[:10]:
+            print(f"      · {co}: {v!r}")
+        if len(unrec) > 10:
+            print(f"      … +{len(unrec) - 10} more")
     for e in load_errors()[:10]:
         print(f"  ⚠️  {e}")

@@ -46,16 +46,53 @@ fi
 # vocabulary (exit 2 = a fresh/empty install: configure your identity + contact stores first, so the
 # gate knows whose PII to look for). Fail CLOSED: the local commit + documents/ snapshot above still
 # protect you; only the PUSH is withheld until the tree is clean.
+#
+# ⛔ kit#61: THIS USED TO BE `--scan "$_ROOT"` — the WHOLE WORKING TREE, every run, forever. On a
+# real install that is not a push guard, it is a permanent lock: the operator's own résumé (their
+# own name, the expected content of a résumé) and the memory store mirrored into the tracked
+# `_memory-backup/` a few lines above BOTH sit in that tree on every single run, so every push was
+# withheld regardless of what the push actually added — including a push whose entire diff was pure
+# kit plumbing with zero personal content (the issue's own repro).
+#
+# `--push-guard` asks the right question instead: does THIS push's diff add a THIRD PARTY's PII.
+# Resolve the writable remote/branch FIRST (moved up from below), so the gate can diff against what
+# is ALREADY on that remote — nothing already published there needs to block a push again. A fresh
+# fork with nothing pushed yet has no such ref; diff against git's empty-tree constant instead, so
+# EVERYTHING in HEAD is treated as new on a first push, which is the correct and safe default.
+_BR="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+if git remote get-url origin >/dev/null 2>&1; then
+  _PUSH_REMOTE="origin"
+else
+  _PUSH_REMOTE="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null | cut -d/ -f1)"
+fi
+
 _PG="$(dirname "$0")/pii_gate.py"
 if [ -f "$_PG" ]; then
   _ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
-  if python3 "$_PG" --scan "$_ROOT" --quiet; then
-    echo "[ok] PII gate clean."
+  if [ -n "$_PUSH_REMOTE" ] && [ -n "$_BR" ] && \
+     git rev-parse --verify -q "${_PUSH_REMOTE}/${_BR}" >/dev/null 2>&1; then
+    _PG_BASE="${_PUSH_REMOTE}/${_BR}"
+  else
+    _PG_BASE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"   # git's empty-tree constant
+  fi
+  # An explicit, LOGGED override for the case where the operator has judged a flagged finding
+  # acceptable (kit#61 suggestion 6). Never silent: pii_gate.py appends the overridden findings to
+  # documents/state/pii-gate-overrides.jsonl before proceeding. Third-party PII still blocks
+  # underneath this — the override is the operator's call to make, on the record, not the gate's.
+  _PG_OVERRIDE=""
+  if [ "${PII_GATE_OVERRIDE:-}" = "1" ]; then
+    _PG_OVERRIDE="--override"
+  fi
+  if python3 "$_PG" --push-guard --repo "$_ROOT" --base "$_PG_BASE" \
+       --remote "${_PUSH_REMOTE:-origin}" --quiet $_PG_OVERRIDE; then
+    echo "[ok] PII gate clean (scanned the push diff)."
   else
     echo "[!] ⛔ PUSH WITHHELD by the PII gate. Nothing was pushed to your fork." >&2
-    echo "    Fresh install? Fill in your identity + contact stores, then re-run backup." >&2
-    echo "    PII found in a tracked file? Remove it, then re-run. Your local commit and the" >&2
-    echo "    documents/ snapshot above still protect your work." >&2
+    echo "    A commit being pushed adds a name/email/phone/address the gate doesn't recognize as" >&2
+    echo "    your own. Remove it, or if you've judged it acceptable, re-run with:" >&2
+    echo "        PII_GATE_OVERRIDE=1 bash scripts/backup.sh" >&2
+    echo "    (this is logged to documents/state/pii-gate-overrides.jsonl, never silent). Your" >&2
+    echo "    local commit and the documents/ snapshot above still protect your work." >&2
     exit 3
   fi
 else
@@ -66,15 +103,8 @@ fi
 # Push to a WRITABLE remote. A bare `git push` aims at the branch's UPSTREAM, and in the kit's
 # two-remote layout (origin = your writable fork, a shared read-only upstream you cloned from) `main`
 # tracks the READ-ONLY upstream after a sync — so a bare push fails EVERY time, and the old message
-# blamed "read-only clone or offline" when your own fork was one correct push away. Resolve the
-# remote explicitly: prefer `origin`, fall back to the branch's tracked upstream for single-remote
-# clones, and report WHICH remote failed and why instead of guessing a single cause.
-_BR="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
-if git remote get-url origin >/dev/null 2>&1; then
-  _PUSH_REMOTE="origin"
-else
-  _PUSH_REMOTE="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null | cut -d/ -f1)"
-fi
+# blamed "read-only clone or offline" when your own fork was one correct push away. `_PUSH_REMOTE`
+# and `_BR` were already resolved above, for the PII gate's diff base.
 if [ -z "$_PUSH_REMOTE" ] || [ -z "$_BR" ] || [ "$_BR" = "HEAD" ]; then
   echo "[i] no writable remote (or a detached HEAD) — your local documents/ snapshot above is your backup."
 elif _perr="$(git push -q "$_PUSH_REMOTE" "$_BR" 2>&1)"; then

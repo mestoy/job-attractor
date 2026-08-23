@@ -118,7 +118,7 @@ def _read_text(basename, explicit=None):
                 return _from_zip(explicit)
             return None, None
         from parse_network import find_export
-        path, _text = find_export()
+        path, _text = find_export(member=basename)
         if not path:
             return None, None
         if "::" in str(path):

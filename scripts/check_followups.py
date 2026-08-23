@@ -14,7 +14,7 @@ Exit:   0 = nothing overdue · 1 = overdue items printed
 import os, re, sys
 from datetime import date
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = os.path.abspath(os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Where sends are logged. KIT DEVIATION from the upstream script: the upstream assumes
 # outreach_log.md always exists and crashes without it, which is the state of every fresh
