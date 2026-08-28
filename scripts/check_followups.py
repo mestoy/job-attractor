@@ -34,7 +34,11 @@ LOGS = ["outreach_log.md", "documents/outreach-queue-archive.md", "documents/out
 _COMPLETED = re.compile(
     r"(followed up|follow-up sent|follow-up done|LinkedIn (msg|message|note) sent"
     r"|✅\s*replied|\breplied\b|reply received|responded|status:\s*(done|replied|closed)"
-    r"|nothing is owed|closed out|conversion complete|handed (me )?off)",
+    r"|nothing is owed|closed out|conversion complete|handed (me )?off"
+    # the closure wording actually used in correspondence-log thread headers. "resolved" is
+    # accepted ONLY with a ruling date — a bare "resolved" also matches hedges like "LIKELY
+    # RESOLVED (check SMS first)", which is a to-do, not a closure.
+    r"|no reply owed|not reply[- ]?owed|✅\s*closed|resolved\s+\d{4}-\d{2}-\d{2})",
     re.I,
 )
 

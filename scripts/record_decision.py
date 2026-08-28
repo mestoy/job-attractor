@@ -387,8 +387,14 @@ def main() -> None:
                     "question": qtext,
                     "header": header,
                     "answer": answer,
+                    # A company named only in the SELECTED OPTION'S LABEL (e.g. "Build it for
+                    # SomeCo") used to be invisible here, because this scanned the raw `answer`
+                    # ("#1"), never the resolved label `_for_class` already carries. `_for_class`
+                    # is never narrower than `answer` (resolve_option_answer returns it unchanged
+                    # when there is no leading option reference to resolve), so this only adds
+                    # text extract_company can match against, never removes any.
                     "ruling": classify_answer(answer, qtext, header),
-                    "company": extract_company(qtext, header, answer),
+                    "company": extract_company(qtext, header, _for_class),
                     "source": "posttooluse-hook",
                 }
             )

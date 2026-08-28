@@ -561,6 +561,26 @@ def open_inbound(today=None, repo=None):
     # function's own 14-day `INBOUND_OPEN_DAYS` window, which governs the different, already-logged
     # signal above. Fails open to [] on any error — a degraded archive read must not crash the
     # whole briefing, only lose its own supplemental signal.
+    # The archive is a STATIC export: it cannot see a reply logged after the snapshot was taken,
+    # and it cannot read a human closure ruling in a thread header. Both live in
+    # correspondence-log.md, parsed above — consult them before re-offering an archive row as
+    # owed, or the default names people the owner already answered weeks ago. Same closure
+    # semantics as the main loop's L2a/L3, applied to the supplemental rows.
+    log_closed = set()
+    for block in re.split(r"(?=^## )", src, flags=re.M):
+        head = block.splitlines()[0] if block.strip() else ""
+        if not head.startswith("## "):
+            continue
+        if check_followups_is_completed(head) or check_followups_is_completed(block):
+            for seg in re.split(r"·|—|–", re.sub(r"^\s*#+\s*", "", head)):
+                seg = _norm_name(re.sub(r"[^\w&.' -]", " ", seg.split("(")[0]))
+                if len(seg) >= 4 and not re.fullmatch(r"[\d ]+", seg):
+                    log_closed.add(seg)
+            for m in _EVENT.finditer(block):
+                w = _norm_name(_correspondent(m.group(0)))
+                if w:
+                    log_closed.add(w)
+
     already = {_norm_name(_correspondent(l)) for l in out} - {""}
     try:
         import check_inbound
@@ -568,6 +588,10 @@ def open_inbound(today=None, repo=None):
             who = _norm_name(row["name"])
             if not who or who in already or who in closed:
                 continue
+            if who in log_closed:
+                continue                          # a thread header carries an explicit closure
+            if latest_out.get(who, "") >= row.get("last_inbound", ""):
+                continue                          # answered after the archive snapshot, logged
             out.append(f"📥 INBOUND ← {row['name']} — unlogged in correspondence-log.md, last "
                        f"wrote {row['last_inbound']} ({row['days_open']}d ago, from messages.csv)")
     except Exception:

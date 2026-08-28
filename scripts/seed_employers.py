@@ -60,6 +60,7 @@ _ss = _import_sibling("screen_sweep")
 canon, blocked_keys_from_list = _ss.canon, _ss.blocked_keys_from_list
 _employers = _import_sibling("employers")
 REGISTRY, NOTES, QUEUE = _employers.REGISTRY, _employers.NOTES, _employers.QUEUE
+exoneration = _import_sibling("exoneration")
 
 SRC = os.path.join(REPO, "documents", "blocked-employers-list.md")
 
@@ -87,7 +88,12 @@ REASON = re.compile(r"\b(blocked|declined|owned|culture|layoff|always-on|grindse
 # twice, came back cleared.
 # ⚖️ `entry corrected` already covers the phrasing on its own, so the wider alternative bought
 # nothing and cost a real block. Keep this vocabulary NARROW.
-EXONERATED = re.compile(r"not blocked|not killed|not a gate fail|⏭️|deferred|entry corrected")
+# 🏗 THE LITERAL MOVED TO `scripts/exoneration.py`; THE HISTORY ABOVE STAYS HERE, because this is
+# the file whose parse the two regressions actually broke. `check_dup` (the send gate) can hold a
+# hand-copied twin of the same pattern with a comment asking it to stay identical, which pins
+# nothing. Both should read ONE object. The attribute name is kept so every caller and test that
+# says `seed_employers.EXONERATED` still resolves.
+EXONERATED = exoneration.EXONERATED
 SECTION = re.compile(r"^\*\*⛔ Filter (\d+): (.+?)\*\*\s*$")
 HEADING = re.compile(r"^#{1,6}\s+(.*)$")
 DATE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
