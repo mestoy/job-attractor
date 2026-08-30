@@ -57,17 +57,69 @@ effort, and the more the interviewer wants the future: senior conversations run 
 would you do here," with the stories as proof you have done it somewhere. For a senior candidate,
 build every Result bridge to point forward at the employer's situation.
 
-## Building the candidate's rack
+## The deliverable: the candidate's CA²R story library
+
+One standing file per CANDIDATE, not per company: `documents/ca2r-story-library.md`. It is the
+source of truth every later prep doc reads from. Per-company interview prep (stage 3's routing
+map, the day-of card) POINTS at library stories and records the aiming; it never restates a
+story, because two copies drift and the mouth in the interview speaks whichever one went stale.
+
+Shape of the file:
+
+1. **A header** naming the file the source of truth and restating the rules that bind every
+   entry: the candidate's documented record is the source, never invention; every figure is
+   verified before it enters a Result; the candidate ratifies before a story is marked locked.
+2. **A status board**, one table row per story: number, story name with the slot(s) it serves,
+   status (DRAFT, or LOCKED with the date the candidate ratified it).
+3. **One section per story, the beats explicitly labeled**, each beat written as speakable
+   prose in the candidate's voice:
+
+   ```markdown
+   ### N. Story name (the slot it serves) — LOCKED YYYY-MM-DD
+   **Context.** …
+   **Approach¹.** …
+   **Approach².** …
+   **Result.** …
+   **Bridge (swappable).** …
+   **Honesty:** …
+   ```
+
+The labeled-beat form IS the spoken deliverable. Write each beat as sentences the candidate
+would say out loud, so reading a section top to bottom is the telling. Do not maintain a
+separate blended-prose version of each story; a second copy is where drift lives. Two things
+that are deliberately NOT stored per story:
+
+- **The thirty second version** is Context in one sentence, then Approach¹, then the Result
+  figure. That is what Approach¹ exists for. Rehearse it; don't store it.
+- **A full spoken script** (the beats blended into one continuous telling) is built per
+  interview, for at most the one or two stories that interview leans hardest on, and it lives in
+  that interview's prep doc. The library section stays canonical.
+
+The **Bridge** is where per-company aiming lives: the canonical entry carries a default bridge,
+and when a story gets aimed at a specific employer, record the variant under the same story as
+"Bridge (the CompanyName version)" so the library accumulates aim without forking.
+
+The **Honesty** line records the binding facts: the exact defensible figures, the claims that
+must never be inflated past them, and the honest answer held in reserve for the probe the story
+invites. It is what a future session checks before the story leaves anyone's mouth.
+
+The file is written for the human to practice from. The structure is all any script needs: the
+fixed beat labels and the status board are grep-able as they stand. Do not add frontmatter, a
+schema table, or a parallel machine-readable copy.
+
+## Building the rack: walk the candidate through it
+
+The library is co built, never generated. Work it as a guided session, story by story:
 
 1. **Ground in their documented record first.** Before offering any options, pull the candidate's
    locked story arcs, prior written tellings, and logged interview answers if the workspace has
    them. Their best telling usually already exists; find it before drafting anything new.
-2. Co build one story at a time, one beat at a time, the candidate choosing or supplying the
-   words. Never present a finished story for approval.
-3. Verify every figure against the candidate's verified record before it enters a Result. An
-   unsourced number does not ship.
-4. Rehearse aloud. A story is ready when the candidate can tell it in under two minutes and can
-   also give a thirty second version on request.
-
-Output: six stories written down in the candidate's words, each tagged with the slots it can
-serve and the bridge it ends on.
+2. **One story at a time, one beat at a time**, the candidate choosing or supplying the words.
+   Offer raw material from their record and ask; never present a finished story for approval. A
+   recited story sounds recited, and it is not theirs.
+3. **Verify every figure** against the candidate's verified record before it enters a Result. An
+   unsourced number does not ship. Write what it binds into the Honesty line as you go.
+4. **The candidate ratifies.** Read the assembled story back to them; only their explicit yes
+   moves it from DRAFT to LOCKED on the status board, with the date.
+5. **Rehearse aloud.** A story is ready when the candidate can tell it in under two minutes and
+   can also give the thirty second version on request.

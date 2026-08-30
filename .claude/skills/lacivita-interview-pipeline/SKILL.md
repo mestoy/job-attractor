@@ -29,7 +29,7 @@ the common scenarios, and how to build the candidate's script for it.
 | # | Stage | File | Build output |
 |---|---|---|---|
 | 1 | The one minute introduction | `lacivita-interview-01-one-minute-intro.md` | a practiced 60 to 90 second opener |
-| 2 | The stock stories (CA²R) | `lacivita-interview-02-stock-stories.md` | 6 stories in the speed rack |
+| 2 | The stock stories (CA²R) | `lacivita-interview-02-stock-stories.md` | the CA²R story library, `documents/ca2r-story-library.md` |
 | 3 | The employer's questions | `lacivita-interview-03-employer-questions.md` | question types mapped to stories |
 | 4 | The questions you ask | `lacivita-interview-04-your-questions.md` | a Company, Role, Boss sequence |
 | 5 | Day of, and the day before | `lacivita-interview-05-day-of.md` | a one page day of card |
