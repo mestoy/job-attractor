@@ -156,6 +156,7 @@ Good things to save: "I won't negotiate on X." "This industry is a deal-breaker 
 | `/apply` | Tailors + verifies a résumé (and cover letter) for a posting |
 | `/radar-outreach` | Boss-hunt outreach for a specific named company (dead or live posting) |
 | `/interview` | Interview prep for a tracked application |
+| `/power-story` | Picks the one CA²R story that carries a specific interview, then scripts its entry points and telling |
 | `/outcome` | Records the result of an application |
 | `/upskill` | Compares tracked postings to your profile to find skill gaps + a learning plan |
 | `/expand` | Builds out your profile from documents and your online presence |

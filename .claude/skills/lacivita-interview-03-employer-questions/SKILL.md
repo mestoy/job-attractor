@@ -19,6 +19,7 @@ in stages 1 and 2. This stage builds that map for a specific interview.
 | Type | What they are checking | Route to |
 |---|---|---|
 | Tell me about yourself | coherence, self awareness | stage 1 opener |
+| The FIRST legitimate question, whatever it is | whether you can carry a real problem | the Power Story (stage 2), entered through its echo-and-route phrase |
 | Behavioral ("tell me about a time...") | evidence you have done it | a stage 2 story, aimed |
 | Weakness, failure, conflict | honesty under pressure | story 4, the mistake, told straight |
 | Hypothetical ("what would you do if...") | judgment | answer the future directly, then anchor with a story as proof |
@@ -26,7 +27,12 @@ in stages 1 and 2. This stage builds that map for a specific interview.
 | Why did you leave / gaps | risk screening | a short, true, blame free account, rehearsed once, never improvised |
 | Technical / craft depth | whether the résumé is real | honest depth, and a clean "here is where my edge ends" |
 
-Two mechanics that raise every answer:
+Three mechanics that raise every answer:
+
+- **The entry point.** Before routing anywhere else, ask whether this question has a door into the
+  Power Story: echo their words, insert the business problem, route in. Behavioral prompts that
+  are chapters of it (the mistake, the people, the grind) go in through that door; the rack takes
+  the rest.
 
 - **The value vocabulary.** Interviewers score answers against a small set of things employers
   actually buy: outcomes, judgment, speed, ownership, collaboration, growth. When choosing which
@@ -48,7 +54,8 @@ it in future tense and anchor with the story.
 
 1. Pull the seat's JD and the interviewer's public work. List the five question types most likely
    for THIS pairing (a recruiter screen, a founder, a peer panel each skew differently).
-2. For each likely type, note which stock story (or which stage 4 research point) it routes to,
+2. Mark the likely FIRST legitimate question and its entry-point phrase into the Power Story
+   (`/power-story` built three). Then, for each remaining type, note which stock story (or which stage 4 research point) it routes to,
    and the one beat to emphasize for this employer.
 3. Rehearse the two answers that are unique to this interview: the "why us" and the "why did you
    leave." Everything else is the rack doing its job.

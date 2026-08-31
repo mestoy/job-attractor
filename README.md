@@ -59,7 +59,7 @@ That is the whole setup. Then:
 Two halves, one folder:
 
 - **The job-search assistant** — `/setup`, `/matrix-hunt`, `/apply`, `/rank`, `/interview`,
-  `/outcome`, `/radar-outreach`, `/jd-fit`, `/expand`.
+  `/power-story`, `/outcome`, `/radar-outreach`, `/jd-fit`, `/expand`.
 - **The boss-hunt pipeline** — screens a company, verifies the would-be boss, and drafts a
   LaCivita-style outreach email in your voice, queued for you to review and send.
 

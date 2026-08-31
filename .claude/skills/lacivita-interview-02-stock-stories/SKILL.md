@@ -50,6 +50,33 @@ When choosing WHICH memory becomes the story for a slot:
 4. Relevant to THIS employer's world beats impressive in general.
 5. One story can serve two slots, but never tell it twice in one interview; the rack needs depth.
 
+## The Power Story: one of the six carries the interview
+
+Andy's later material (his Panic-Free Interviewing stream, 2026) adds a selection on top of the
+rack. From the six, pick for each interview the one story that is the **most analogous full
+project to what THIS employer needs you to do**. Not the biggest number; the same shape of work.
+That story is the Power Story, and it comes out **as early as possible, in the wake of the first
+legitimate question** (a real question about the work, never "tell me about yourself" or "walk me
+through your résumé", which route to stage 1).
+
+Three mechanics make it work:
+
+- **Every question has an entry point.** Echo their words, insert the business problem, route in:
+  "You asked about X. I had this challenge where X was the whole problem..." The listener sees up
+  front how the story answers their question.
+- **Behavioral prompts land INSIDE it.** The mistake, the people, the persistence are chapters of
+  the same project told from a different door, so one deep story answers several prompts without
+  sounding repeated. Prompts with no chapter in it route to the rest of the rack.
+- **A continuation beat after the Result.** One sentence carrying the story into the present or
+  into their world ("the same pattern is running today in ..."). A second-chair story stands
+  behind it for the probes it invites.
+
+It is picked per target and recorded under the story in the library as
+`**⚡ Power Story (CompanyName, YYYY-MM-DD).**` with the analogy in one line; the library does not
+fork. The command `/power-story <company>` runs the match test (same problem shape · same actor
+position · same constraint · a true continuation), presents the picker with the top match as
+option 1, and lands the telling in that interview's prep doc.
+
 ## Seniority note
 
 The more senior the seat, the more the stories must carry judgment and outcomes rather than

@@ -1,6 +1,6 @@
 # /interview - Prepare for an Interview on a Tracked Application
 
-You are preparing the user for a real, scheduled interview on one of their applications. The frameworks for this already exist - `07-interview-prep.md` (CAAR examples — Context/Approach/Action/Result, preferred over STAR — tough questions, questions to ask, roleplay protocol) and the Company Research Checklist in `04-job-evaluation.md` - and the `/outcome` archive records which stage the user is at and what earlier stages surfaced. This command wires them together into a stage-specific prep pack and an optional mock interview.
+You are preparing the user for a real, scheduled interview on one of their applications. The frameworks for this already exist - `07-interview-prep.md` (CA²R examples — Context · Approach¹ · Approach² · Result, preferred over STAR — tough questions, questions to ask, roleplay protocol) and the Company Research Checklist in `04-job-evaluation.md` - and the `/outcome` archive records which stage the user is at and what earlier stages surfaced. This command wires them together into a stage-specific prep pack and an optional mock interview.
 
 `/apply` optimizes what the company reads; `/interview` optimizes what the company hears. The bridge between them is consistency: the interviewer has read the submitted CV and cover letter, so everything prepared here must match what those documents claim.
 
@@ -52,6 +52,9 @@ Additions for interview purposes:
 
 Assemble a stage-appropriate prep document with these sections:
 
+### 0. The Power Story (run `/power-story <company>` first)
+Before the question list, pick the ONE story that carries this interview: the most analogous full project to the seat's job-to-be-done, told CA²R in the wake of the first legitimate question, with an entry point from every likely opener. `/power-story` runs the match test across the CA²R library, presents the picker, and lands the telling, the entry-point phrases, the continuation beat, and the second-chair story in this prep pack under `## ⚡ Power Story`. If the library has fewer than two locked stories, build the rack first (`lacivita-interview-02-stock-stories.md`) and come back. Sections 1 and 2 below route INTO the Power Story wherever a question type has a chapter in it, and to the rest of the rack only where it does not.
+
 ### 1. Likely questions
 Derive from four sources, in priority order:
 1. **Recorded feedback from earlier stages** (`outcome.md`) - anything flagged, doubted, or left unresolved will come back
@@ -59,10 +62,10 @@ Derive from four sources, in priority order:
 3. **The posting's stated requirements** - competency by competency
 4. **The stage type** - phone screens get motivation and timeline questions; technical rounds get the posting's stack; final rounds get values, salary, and "any reservations" questions
 
-### 2. CAAR answer mapping
-Use **CAAR (Context · Approach · Action · Result)**, not STAR — the **Approach** step (how you thought about the problem, before what you did) is required, and lets you own the judgment even on work a teammate built. Match the ready-made CAAR examples in `07-interview-prep.md` to the likely questions using their "Use for" tags. Then:
-- For likely questions **no existing CAAR example covers**, draft a new CAAR answer grounded strictly in facts from `01-candidate-profile.md` - profile facts arranged into C/A/A/R, not embellished. Include these drafts in the prep pack; offer to append them to `07-interview-prep.md` only if the user explicitly approves.
-- If `/setup` left incomplete CAAR stubs relevant to this role, surface them: the user should fill in the details before the interview.
+### 2. CA²R answer mapping
+Use **CA²R (Context · Approach¹ · Approach² · Result)**, not STAR — Approach¹ NAMES the steps in one pass and Approach² walks them, which is how a long answer stays easy to follow, and it lets you own the judgment even on work a teammate built. Match the ready-made CA²R examples in `07-interview-prep.md` to the likely questions using their "Use for" tags. Then:
+- For likely questions **no existing CA²R example covers**, draft a new CA²R answer grounded strictly in facts from `01-candidate-profile.md` - profile facts arranged into C/A¹/A²/R, not embellished. Include these drafts in the prep pack; offer to append them to `07-interview-prep.md` only if the user explicitly approves.
+- If `/setup` left incomplete CA²R stubs relevant to this role, surface them: the user should fill in the details before the interview.
 
 ### 3. Consistency brief
 A short list of the specific claims the submitted CV and cover letter make (achievements, numbers, skills emphasized) that the interviewer is most likely to probe. The rule stated plainly: **no claim in the room that isn't on the paper, and every claim on the paper must be defensible in depth.**
@@ -85,7 +88,7 @@ Save the pack to `documents/applications/<company>_<role>/interview_prep_<stage>
 
 ## Step 4: Offer a Mock Interview
 
-Ask if the user wants to practice. If yes, run the roleplay **in this conversation** following the Roleplay Guidelines in `07-interview-prep.md` exactly: warm-up first, then role-specific technical questions, 1-2 behavioral questions tied to the posting's competencies, and one tough question or curveball. After each answer, give brief feedback - what worked, what to sharpen, and which CAAR example from the pack would have served better.
+Ask if the user wants to practice. If yes, run the roleplay **in this conversation** following the Roleplay Guidelines in `07-interview-prep.md` exactly: warm-up first, then role-specific technical questions, 1-2 behavioral questions tied to the posting's competencies, and one tough question or curveball. After each answer, give brief feedback - what worked, what to sharpen, and which CA²R example from the pack would have served better.
 
 Calibrate feedback against `02-behavioral-profile.md`: coach toward the user's natural register, not a generic ideal - the same voice-consistency rule the `/apply` reviewer applies to cover letters.
 
@@ -97,7 +100,7 @@ End with:
 
 > Good luck. After the interview, run `/outcome <company>` to log the stage and any feedback - it sharpens the prep for the next round, and once the process resolves it feeds your fit-framework calibration via `/setup`.
 
-If Step 3 drafted new CAAR answers the user approved for keeps, remind them those were appended to `07-interview-prep.md` (or offer again if they deferred).
+If Step 3 drafted new CA²R answers the user approved for keeps, remind them those were appended to `07-interview-prep.md` (or offer again if they deferred).
 
 ---
 
@@ -107,4 +110,4 @@ If Step 3 drafted new CAAR answers the user approved for keeps, remind them thos
 2. **Honesty on gaps.** Weak matches get bridge answers (acknowledge → adjacent experience → learning path), never invented experience. Same rule as everywhere else in this repo.
 3. **Verified research only.** Company specifics go in the pack only after independent confirmation. Interviewer notes stick to public professional information.
 4. **Stage-appropriate prep.** A phone screen pack and a final-round pack are different documents; recorded feedback from earlier stages takes priority over generic question lists.
-5. **Write only to the application archive.** The prep pack lands in `documents/applications/<company>_<role>/`; framework and profile files are never edited, except appending user-approved CAAR examples to `07-interview-prep.md` on explicit request.
+5. **Write only to the application archive.** The prep pack lands in `documents/applications/<company>_<role>/`; framework and profile files are never edited, except appending user-approved CA²R examples to `07-interview-prep.md` on explicit request.

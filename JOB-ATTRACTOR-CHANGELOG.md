@@ -33,3 +33,8 @@ Capabilities added to the pipeline (generic; nothing personal baked in):
 
 ## [your next entry] — [date] · [what changed]
 - ...
+
+## 2026-08-31 · The Power Story (kit issue #75)
+- New `/power-story <company>`: from the operator's locked CA²R library, run the match test against the seat's job-to-be-done (same problem shape · same actor position · same constraint · a true continuation), present the picker with the top match as option 1, then co build the entry-point phrases, the 60 to 90 second telling, the continuation beat, the chapters, and the second-chair story into that interview's prep doc. Chosen from the rack, never drafted; the library stays the one canonical copy.
+- `/interview` Step 3.0 calls it before the question list; stage 2 documents the rule, stage 3 routes the first legitimate question through the entry point, stage 5's card carries the Power Story line.
+- Wording: `/interview` now says CA²R (Approach¹ names the steps, Approach² walks them) instead of CAAR, matching the stage 2 skill.

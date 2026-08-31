@@ -30,12 +30,14 @@ does not exist.
 One page, large type, visible at a glance during a video call. It carries, in this order:
 
 1. The opener's six beats as keywords, not sentences.
-2. The rack: six story titles with their slot tags. Titles only; the stories live in the
+2. The Power Story: its name, the entry-point phrase in keywords, the continuation beat in
+   keywords, and the second-chair story's name.
+3. The rack: six story titles with their slot tags. Titles only; the stories live in the
    candidate, not on the page.
-3. The routing map's top five likely question types with their story routes.
-4. The question sequence, Company then Role then Boss, each with its one line observation.
-5. The interviewer's name as pronounced, their title, and one human detail from research.
-6. The logistics: exact time with timezone, the join link, a phone number fallback.
+4. The routing map's top five likely question types with their story routes.
+5. The question sequence, Company then Role then Boss, each with its one line observation.
+6. The interviewer's name as pronounced, their title, and one human detail from research.
+7. The logistics: exact time with timezone, the join link, a phone number fallback.
 
 If it does not fit one page, it is not a card yet; cut until it fits.
 
