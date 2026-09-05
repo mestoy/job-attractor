@@ -18,6 +18,16 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 REPO="$(pwd)"
 
+# A clean clone (a fork, or the Actions runner) has no scripts/kit_config.py, because that file is
+# git-ignored and holds one person's values. Every test that imports it would error before its
+# first assertion, and the red check would look like the contributor's fault. Seed it from the
+# shipped example so the suite exercises the defaults. Added 2026-09-05 after a clean-clone run
+# showed 56 red of 832 for this reason alone.
+if [ ! -f "$REPO/scripts/kit_config.py" ] && [ -f "$REPO/scripts/kit_config.example.py" ]; then
+  cp "$REPO/scripts/kit_config.example.py" "$REPO/scripts/kit_config.py"
+  echo "ℹ️  scripts/kit_config.py was absent; seeded it from kit_config.example.py for this run."
+fi
+
 fingerprint() {
   python3 - "$REPO" <<'PY'
 import sys, os, hashlib

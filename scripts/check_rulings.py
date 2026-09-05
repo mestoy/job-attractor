@@ -58,7 +58,7 @@ REPO = os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(HERE)
 # KIT PATH NOTE: HARD-INVARIANTS ships under docs/; the criteria matrix is something YOU write, so
 # it lives under documents/ with the rest of your working stores.
 MATRIX = os.path.join(REPO, "documents", "employer-criteria-matrix.md")
-INVARIANTS = os.path.join(REPO, "docs", "HARD-INVARIANTS.md")
+INVARIANTS = os.path.join(REPO, "documents", "HARD-INVARIANTS.md")
 
 # ⚠️ KIT DEVIATION — THIS IS THE TABLE YOU EDIT.
 # The upstream pipeline hardcodes one person's own set of veto rows. Yours are your own, so the mapping ships
