@@ -55,10 +55,18 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(HERE)
 
-# KIT PATH NOTE: HARD-INVARIANTS ships under docs/; the criteria matrix is something YOU write, so
-# it lives under documents/ with the rest of your working stores.
+# KIT PATH NOTE. The criteria matrix is something YOU write, so it lives under documents/ with
+# your other working stores; the shipped partner-docs/ copy is a blank template and must NOT be
+# read as your matrix (a template has zero section-A rows, which would report as drift). Absent
+# means "not set up yet", a named pass below. HARD-INVARIANTS ships filled under partner-docs/ and
+# install.sh seeds documents/ from it; your documents/ copy wins when it exists, the shipped copy
+# is the fallback, which is what keeps this checker working on a fresh clone before install.sh
+# has run (2026-09-05).
 MATRIX = os.path.join(REPO, "documents", "employer-criteria-matrix.md")
-INVARIANTS = os.path.join(REPO, "documents", "HARD-INVARIANTS.md")
+INVARIANTS = next((p for p in (os.path.join(REPO, "documents", "HARD-INVARIANTS.md"),
+                               os.path.join(REPO, "partner-docs", "HARD-INVARIANTS.md"))
+                   if os.path.exists(p)),
+                  os.path.join(REPO, "documents", "HARD-INVARIANTS.md"))
 
 # ⚠️ KIT DEVIATION — THIS IS THE TABLE YOU EDIT.
 # The upstream pipeline hardcodes one person's own set of veto rows. Yours are your own, so the mapping ships
@@ -194,7 +202,7 @@ def canonical_vetoes():
 def scan():
     mt, it = _read(MATRIX), _read(INVARIANTS)
     if it is None:
-        return {"error": "unreadable: docs/HARD-INVARIANTS.md"}
+        return {"error": f"unreadable: {os.path.relpath(INVARIANTS, REPO)}"}
     # A matrix you have not written yet is a fresh install, not drift. Named, never silent: a check
     # that skips without saying so is indistinguishable from one that passed.
     if mt is None:
