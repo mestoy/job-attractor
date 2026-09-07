@@ -108,3 +108,12 @@ Then, for each surviving candidate:
 Close with a compact summary: starting depth → ending depth, rows added per segment,
 anything newly blocked, and which segments came up dry. This skill only banks — it does not
 auto-advance into outreach.
+
+## The scorecard queue loop (added 2026-09-06)
+
+Banking a survivor is not the end of the fill. Depth is measured in **scorecards**: a banked row that
+has no card is inventory nobody can rule on. After step 4, feeder seats card each survivor with the
+card recipe in `WORKFLOW-RULES.md` ("The scorecard queue loop"), one writer flips the row to CARDED and
+appends the ledger row, and the morning picker shows cards only, in creation order, each option
+carrying a Build / Radar / Park / Drop recommendation. Refill fires again when carded survivors dip
+under about 15. Radar rows (no live req) count toward depth with a WATCH trigger.

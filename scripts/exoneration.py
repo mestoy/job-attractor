@@ -33,4 +33,4 @@ which is a behavior ruling of its own — not something to smuggle in under a de
 """
 import re
 
-EXONERATED = re.compile(r"not blocked|not killed|not a gate fail|⏭️|deferred|entry corrected")
+EXONERATED = re.compile(r"not blocked|not killed|not a gate fail|⏭️|deferred|entry corrected|exonerated")

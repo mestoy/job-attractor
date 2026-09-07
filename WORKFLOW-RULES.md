@@ -106,6 +106,35 @@ you edit, you send.** This is the default for every LinkedIn message, not a fall
 That is an inventory goal for prepared, unsent matches. It is not a send target and it never gates
 surfacing. Depth is how much is ready; 3-3-3 is how much goes out.
 
+### The scorecard queue loop (2026-09-06)
+
+The depth target is measured in **scorecards**, not names. A queue row that has not been carded is
+inventory nobody can rule on; the morning picker shows cards only, never raw names. So the loop is:
+
+1. **Count cards, not rows.** Depth = approval-pending scorecards on disk (`documents/state/<slug>-card-<date>.md`
+   plus a published page under `documents/state/scorecards/`). Radar rows count: a card with no live req
+   carries a WATCH trigger instead of a posting. A card older than 14 days is re-verified (req, boss,
+   remote) before it reaches a picker.
+2. **Feed while below target.** When carded survivors dip under about 15, run `/fill-queue`
+   (discovery vein first: funding announcements that bundle a leadership hire, then the segment veins the
+   balancer marks under-target). Feeder seats take slices of the uncarded rows and run the card recipe;
+   ONE writer appends the ledger row, flips the queue row to CARDED, and keeps the count.
+3. **The card recipe runs the gates in HARD-INVARIANTS order and stops at the first hard fail** (blocked
+   list and hard-filter industries; layoffs; culture with n under 10 marked UNPROVEN; leadership tenure;
+   remote in THEIR words; ownership with lead investors named; boss verified current, and named public
+   sources checked BEFORE any founder fallback, with the card saying where it looked; live req verbatim or
+   RADAR; a dated Current Direction section; fit read; CPO/CTO/CEO panel with the standard addendum).
+   A drop writes the reason and the blocked-list row instead of a card.
+4. **Every card ships as a scorecard artifact** (one stylesheet, one page per company, an INDEX of links).
+   The card text goes in chat with its link BEFORE its picker; a ruling never happens on a name alone.
+5. **The morning picker is all passing cards at once**, in INDEX (creation) order because the reader
+   opens the pages as tabs in that order; four options per question; every option carries the
+   orchestrator's recommendation (Build / Radar / Park / Drop) with a one-line reason, and a prior ruling
+   shows as "ruled Build <date>", never as a bare tag.
+6. **Loop.** After the picker, the ruled cards leave the queue (build prep, radar watch, park, or drop),
+   the count drops, and step 2 fires again. Discovery that comes back dry is a finding to report with the
+   next vein named, not a reason to show raw names.
+
 ### Adjust it deliberately, not by drifting
 
 The number is a method, not a law of nature. Raise or lower it on purpose, in this file, and say why.
