@@ -150,6 +150,27 @@ deleted figures above came from.
 - **On a RADAR (no live role), research the hiring HISTORY to time the reach.** Find when the company last posted the target role / last hired for it, and tag: 🌱 GROWING (recent hires → reach now) · 🔄 BACKFILL-GAP (someone just left → reach now) · 😴 STATIC (no movement → long-game) · 🌾 GREENFIELD (never had one → pitch "your first hire"). Best source: the person-team tenure on LinkedIn (or a paid enrich — ask first); ATS APIs are current-only; free web search is usually too thin (say so, don't guess).
 - **Pre-fire conformance check (before opening the mail client) — do it LINE BY LINE.** After a boss-hunt email is fully built and BEFORE opening the mail client, inspect EACH line and map it to the LaCivita element it serves (greeting · why-this-company hook · **boss-specific praise of a real accomplishment** · brief matched offer · enthusiasm + direct ask · sign-off; + résumé attached), and check each line against the candidate's writing style (their voice; zero AI tells — no filler adverbs, no AI clichés, no em dashes, no spaces around slashes; tight). Present a per-line table (Line · text · element · ✓). If a line doesn't map to an element or breaks a style rule, fix + re-inspect; fire only when every line passes both.
 
+## The scorecard queue loop (added 2026-09-09)
+
+The spec the `fill-queue` skill has pointed to since 2026-09-06 without one existing —
+written here now, alongside `scripts/new_card.py`, the scaffold that implements it.
+
+1. `python3 scripts/new_card.py "<Company>"` scaffolds a card markdown in
+   `documents/state/<slug>-card-<date>.md`, carrying all 13 slots
+   `render_scorecard.py` reads, in HARD-INVARIANTS' gate order (dedup → blocked-list →
+   hard filters → live-role-verify → culture/leadership/news → scorecard), prefilled
+   from a matching `documents/findings/*.jsonl` verdict row and `documents/employers.jsonl`
+   where either exists. It refuses outright if the company is already `status: blocked`.
+2. Fill every `OWED` slot in the order it's written, each naming the
+   `workflow-checklist.md` step that produces it — never invent a value the scaffold
+   left as owed.
+3. `python3 scripts/render_scorecard.py <card.md>` turns the filled card into the HTML
+   scorecard the morning picker links to. It opens locally; a Claude Code session MAY
+   publish it as a claude.ai artifact if you want a shareable link, but nothing in the
+   pipeline depends on that publish step succeeding or existing.
+4. `--backfill` catches up any carded survivor that doesn't have HTML yet;
+   `--reindex` rebuilds `documents/state/scorecards/INDEX.md` from what's on disk.
+
 ## Session refinements — 2026-07-20 (generic; mirrored from the reference workspace)
 
 - **Front-load research in PARALLEL, present BATCHED decision-ready choices.** Deep-screen the candidate group and pre-research each survivor's boss (sourced accomplishment + praise angles) CONCURRENTLY and up front, so you decide across the batch in one pass rather than watching a sequential task queue. **EXCEPTION — a confirmed, send-ready match JUMPS the batch:** push that one straight through (phrasing pick → send); the rest keep cooking in parallel and arrive as their own batch.

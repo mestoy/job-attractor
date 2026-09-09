@@ -1,0 +1,185 @@
+<!--
+scorecard-template.html — kit #88. Canonical CSS, copied verbatim from the style block
+used by TEMPLATE-directus (the file the reference install already treats as its template).
+Do NOT retrofit this to match any other installed card's style variant — the survey
+(scorecard-contract-survey) found 7 drifted CSS variants across old hand-published cards;
+this file is the one going forward, old HTML stays as it is.
+
+Filled by scripts/render_scorecard.py via plain string replace. Single-value tokens are
+{{TOKEN}}; repeatable regions (gates, seats, thesis-fit rows, notes, sources, optional
+sections) are filled as pre-rendered HTML fragments assigned to their own {{...}} token,
+built by the script, not by this file.
+-->
+<title>{{COMPANY}} Fit Scorecard</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Serif:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap">
+<style>
+:root{
+  --paper:#F3F5F7; --ink:#1B2333; --ink-2:#4A5568; --ink-3:#7A8797;
+  --rule:#C9D1DA; --panel:#FFFFFF; --accent:#22507A; --accent-soft:#DCE7F1;
+  --good:#2E7D5B; --good-soft:#DFF0E7; --warn:#A8701A; --warn-soft:#F6EBD3; --bad:#B23A3A; --bad-soft:#F5DEDE;
+  --bar-track:#E3E8EE;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#121821; --ink:#E6EBF2; --ink-2:#B4BFCC; --ink-3:#8290A2;
+    --rule:#2C3644; --panel:#1A212C; --accent:#8FB7DD; --accent-soft:#1F3247;
+    --good:#7CC9A3; --good-soft:#1C3A2D; --warn:#E0B266; --warn-soft:#3D3019; --bad:#E08A8A; --bad-soft:#42201F;
+    --bar-track:#252E3B;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#121821; --ink:#E6EBF2; --ink-2:#B4BFCC; --ink-3:#8290A2;
+  --rule:#2C3644; --panel:#1A212C; --accent:#8FB7DD; --accent-soft:#1F3247;
+  --good:#7CC9A3; --good-soft:#1C3A2D; --warn:#E0B266; --warn-soft:#3D3019; --bad:#E08A8A; --bad-soft:#42201F;
+  --bar-track:#252E3B;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;font-size:15px;line-height:1.5}
+.wrap{max-width:980px;margin:0 auto;padding:32px 20px 56px}
+h1,h2,h3{font-family:"IBM Plex Serif",Georgia,serif;text-wrap:balance;margin:0}
+h1{font-size:30px;font-weight:600;line-height:1.15}
+h2{font-size:19px;font-weight:600;margin-bottom:10px}
+.eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+.sub{color:var(--ink-2);margin-top:6px;max-width:66ch}
+.mono{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums}
+header{display:grid;grid-template-columns:1fr auto;gap:24px;align-items:start;padding-bottom:20px;border-bottom:1px solid var(--rule)}
+.verdict{background:var(--panel);border:1px solid var(--rule);border-left:5px solid var(--accent);padding:14px 18px;min-width:230px}
+.verdict .big{font-family:"IBM Plex Mono",monospace;font-size:38px;font-weight:500;line-height:1;color:var(--accent)}
+.verdict .lbl{font-size:13px;color:var(--ink-2);margin-top:4px}
+section{margin-top:28px}
+.gates{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
+.gate{background:var(--panel);border:1px solid var(--rule);padding:12px 14px}
+.gate .name{font-weight:600;font-size:14px}
+.gate .why{color:var(--ink-2);font-size:13px;margin-top:4px}
+.pill{display:inline-block;font-size:12px;font-weight:600;letter-spacing:.04em;padding:2px 8px;border-radius:3px;margin-bottom:6px}
+.pill.good{background:var(--good-soft);color:var(--good)}
+.pill.warn{background:var(--warn-soft);color:var(--warn)}
+.pill.bad{background:var(--bad-soft);color:var(--bad)}
+.pill.acc{background:var(--accent-soft);color:var(--accent)}
+.seats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px}
+.seat{background:var(--panel);border:1px solid var(--rule);padding:10px 12px;font-size:13px}
+.seat b{display:block;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:2px}
+.seat .v{font-family:"IBM Plex Mono",monospace;font-size:20px;font-weight:500;color:var(--ink)}
+.track{height:12px;background:var(--bar-track);border-radius:0 3px 3px 0;position:relative;overflow:hidden;margin-top:10px}
+.fill{position:absolute;left:0;top:0;bottom:0;background:var(--accent);border-radius:0 3px 3px 0}
+.tablewrap{overflow-x:auto;border:1px solid var(--rule);background:var(--panel)}
+table{border-collapse:collapse;width:100%;min-width:640px;font-size:14px}
+th{text-align:left;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);font-weight:600;padding:10px 12px;border-bottom:1px solid var(--rule)}
+td{padding:9px 12px;border-bottom:1px solid var(--rule);vertical-align:top}
+tr:last-child td{border-bottom:0}
+td.k{width:34%;font-weight:500}
+td.s{width:100px;white-space:nowrap}
+.chip{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.05em;padding:2px 7px;border-radius:3px}
+.chip.strong{background:var(--good-soft);color:var(--good)}
+.chip.partial{background:var(--warn-soft);color:var(--warn)}
+.chip.gap{background:var(--bad-soft);color:var(--bad)}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.note{background:var(--panel);border:1px solid var(--rule);padding:14px 16px}
+.note h3{font-size:15px;margin-bottom:6px}
+.note p{margin:0 0 8px;color:var(--ink-2);font-size:14px}
+.note p:last-child{margin-bottom:0}
+.path{border-left:5px solid var(--good);background:var(--panel);border-top:1px solid var(--rule);border-right:1px solid var(--rule);border-bottom:1px solid var(--rule);padding:14px 18px}
+.path ol{margin:8px 0 0 18px;padding:0}
+.path li{margin-bottom:4px}
+footer{margin-top:32px;padding-top:14px;border-top:1px solid var(--rule);color:var(--ink-3);font-size:12px;line-height:1.6}
+@media (max-width:700px){header{grid-template-columns:1fr}.seats,.cols{grid-template-columns:1fr}}
+.histwrap{overflow-x:auto;border:1px solid var(--rule);background:var(--panel);margin-top:10px}
+.histwrap table{border-collapse:collapse;width:100%;min-width:640px;font-size:13px}
+.histwrap th{text-align:left;font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3);font-weight:600;padding:8px 10px;border-bottom:1px solid var(--rule)}
+.histwrap td{padding:8px 10px;border-bottom:1px solid var(--rule);vertical-align:top}
+.histwrap tr:last-child td{border-bottom:0}
+.sectorline{margin-top:10px;padding:10px 12px;background:var(--accent-soft);border-left:3px solid var(--accent);font-size:13px;color:var(--ink-2)}
+a{color:var(--accent);text-decoration:underline;text-decoration-color:var(--accent-soft)}
+.linklist{margin:0;padding-left:18px}
+.linklist li{margin-bottom:6px;font-size:13px;color:var(--ink-2)}
+.linklist .tag{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.04em;padding:1px 6px;border-radius:3px;background:var(--accent-soft);color:var(--accent);margin-right:6px}
+.sectorline.pending{background:var(--warn-soft);border-left-color:var(--warn)}
+.theme-toggle{display:flex;gap:4px;margin-top:10px}
+.theme-toggle button{font:inherit;font-size:11px;font-weight:600;letter-spacing:.03em;padding:3px 9px;border:1px solid var(--rule);background:var(--panel);color:var(--ink-2);border-radius:3px;cursor:pointer}
+.theme-toggle button[aria-pressed="true"]{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}
+</style>
+
+<div class="wrap">
+<header>
+  <div>
+    <div class="eyebrow">Fit scorecard · read on {{READ_DATE}}</div>
+    <h1>{{COMPANY}}{{HEADLINE_SUFFIX}}</h1>
+    <p class="sub">{{SUMMARY}}</p>
+    <div class="theme-toggle" role="group" aria-label="Theme">
+      <button type="button" data-set-theme="light">Light</button>
+      <button type="button" data-set-theme="dark">Dark</button>
+      <button type="button" data-set-theme="system">System</button>
+    </div>
+  </div>
+  <div class="verdict">
+    <div class="big">{{VERDICT_BIG}}</div>
+    <div class="lbl">{{VERDICT_LABEL}}</div>
+  </div>
+</header>
+
+<section>
+  <h2>Gates first</h2>
+  <div class="gates">
+{{SECTION_GATES}}
+  </div>
+</section>
+
+{{SECTION_PANEL}}
+{{SECTION_SECTOR}}
+{{SECTION_HISTORY}}
+{{SECTION_FIT}}
+{{SECTION_NOTES}}
+
+<section>
+  <h2>Sources, with links</h2>
+  <ul class="linklist">
+{{SOURCES_ROWS}}
+  </ul>
+</section>
+
+<footer>{{FOOTER}}</footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var KEY = "scorecard-theme";
+  var root = document.documentElement;
+
+  function apply(mode) {
+    if (mode === "light" || mode === "dark") {
+      root.setAttribute("data-theme", mode);
+    } else {
+      root.removeAttribute("data-theme");
+      mode = "system";
+    }
+    var buttons = document.querySelectorAll(".theme-toggle button");
+    for (var i = 0; i < buttons.length; i++) {
+      var b = buttons[i];
+      b.setAttribute("aria-pressed", b.getAttribute("data-set-theme") === mode ? "true" : "false");
+    }
+  }
+
+  var stored = "system";
+  try {
+    stored = localStorage.getItem(KEY) || "system";
+  } catch (e) {
+    // localStorage unavailable (private window, blocked site data) — fall back to System,
+    // the page still renders correctly with no stored value.
+  }
+  apply(stored);
+
+  var buttons = document.querySelectorAll(".theme-toggle button");
+  for (var i = 0; i < buttons.length; i++) {
+    buttons[i].addEventListener("click", function () {
+      var mode = this.getAttribute("data-set-theme");
+      apply(mode);
+      try {
+        localStorage.setItem(KEY, mode);
+      } catch (e) {
+        // best-effort only; the choice still applies for this page view
+      }
+    });
+  }
+})();
+</script>

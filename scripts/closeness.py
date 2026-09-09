@@ -432,6 +432,59 @@ def is_held(row):
     return None
 
 
+# ── PICKER-DRIVEN HOLDS (kit port, private-repo BUG-233 shape) ─────────────────────────────────
+# A SKIP/Hold ruling at a decision picker on a NAMED contact can leave no trace in this store,
+# so a ranker built on top of it would keep re-surfacing someone just told to drop. `pause`/`lift`
+# are pure mutate-and-return helpers so a caller (e.g. a PostToolUse hook on AskUserQuestion, not
+# wired by this kit — see README's "Hooks that stay main-only" table) writes one consistent note
+# shape rather than inventing its own prose each time. Both are pure: no I/O, no locking — the
+# caller owns store_lock() + atomic_write(), same discipline as every other writer of this file.
+#
+# ⛔ ONLY a hold THIS MECHANISM wrote may be lifted automatically. A manually-set
+# `declined-by-michael`-shaped or `do-not-contact` note carries no PICKER_MARK and `lift()`
+# refuses to touch it — auto-lifting a manual decline would be the exact "guard that promotes the
+# people it exists to suppress" failure `is_held`'s own docstring above already warns against.
+PICKER_MARK = "at the NEXT-STEP picker"
+_PAUSE_NOTE = "⏸️ {verb} {date} {mark}: {reason}. Re-surface only if a real exchange appears."
+_LIFT_NOTE = "▶️ LIFTED {date} {mark}: {reason}."
+
+
+def pause(row, reason, *, verb="HELD", today=None, mark=PICKER_MARK):
+    """Return a COPY of `row` with a picker-driven hold applied. `verb` is "SKIPPED" for an exact
+    SKIP ruling, "HELD" for a Hold/Skip picker label that didn't classify as SKIP outright.
+    Idempotent: re-pausing an already-picker-paused row for the same reason is a no-op copy,
+    never a duplicate note."""
+    import datetime
+    row = dict(row or {})
+    date = (today or datetime.date.today()).isoformat()
+    note = _PAUSE_NOTE.format(verb=verb, date=date, mark=mark, reason=reason)
+    if row.get("outreach_status") == "PAUSED-by-michael" and row.get("paused_note") == note:
+        return row  # identical hold already recorded, nothing to write
+    row["outreach_status"] = "PAUSED-by-michael"
+    row["paused_note"] = note
+    return row
+
+
+def lift(row, reason, *, today=None, mark=PICKER_MARK):
+    """Return a COPY of `row` with a picker-driven hold REMOVED, or `row` unchanged if it was
+    never held by THIS mechanism (no PICKER_MARK in its paused_note) — see the module note above
+    for why that boundary is load-bearing, never relaxed to lift any held row.
+
+    ⚠️ THE UN-HELD STATE IS THE ABSENCE OF `outreach_status`, NEVER A STRING — there is no
+    "un-held" value to write; the field must be DELETED. The audit trail moves to `lift_note` so
+    it survives without resurrecting a status string `is_held` would trip on."""
+    import datetime
+    row = dict(row or {})
+    prior_note = str(row.get("paused_note") or "")
+    if row.get("outreach_status") != "PAUSED-by-michael" or mark not in prior_note:
+        return row  # not held, or held by a hand-written/manual note this mechanism must not touch
+    date = (today or datetime.date.today()).isoformat()
+    row.pop("outreach_status", None)
+    row.pop("paused_note", None)
+    row["lift_note"] = _LIFT_NOTE.format(date=date, mark=mark, reason=reason)
+    return row
+
+
 def held_contacts(store):
     """Every held row, for the ranker's `skipped` report and for the regression test."""
     if not store:

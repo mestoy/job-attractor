@@ -82,6 +82,29 @@ careful, and each one exits non-zero and prints what to fix.
 | `check_screen_gate.py` | Deciding on a company while a screening layer still has no evidence |
 | `doctor.py` | Discovering three weeks in that the hooks were never wired |
 
+### Scorecards
+
+`scripts/render_scorecard.py` turns a screened company's card markdown
+(`documents/state/<slug>-card-<date>.md`) into an HTML fit scorecard, so the screening
+step produces an artifact you can actually open, not just a prose file.
+
+```
+python3 scripts/render_scorecard.py documents/state/<slug>-card-<date>.md
+python3 scripts/render_scorecard.py --backfill documents/state       # render every card with no HTML yet
+python3 scripts/render_scorecard.py --reindex documents/state/scorecards
+```
+
+A card's markdown headers vary in wording session to session, but every card is read
+against the same ~13 semantic slots (blocked/hard-filter gate, news & layoffs, culture,
+leadership & retention, remote reality, ownership, boss, live req, current direction, fit
+read, panel, score history, sources) — matched by keyword, not exact header text. A
+BUILD/RADAR card missing one of those warns; a DROP/PARK card stopping early after its
+first failing gate does not, since that is expected. The template lives at
+`templates/scorecard/scorecard-template.html`; `--reindex` rebuilds
+`documents/state/scorecards/INDEX.md` from whatever HTML is on disk. `kit_config.py`'s
+`SCORECARD_SURFACED_VERDICTS` (default: empty, everything linked) lets you hide PARK/DROP
+rows from the index without deleting them, if you only want BUILD/RADAR surfaced.
+
 ### Hooks that stay main-only
 
 The reference workspace this kit is drawn from wires several of the scripts above into Claude
@@ -94,6 +117,7 @@ heavier always-on cost, or a design call the kit deliberately leaves to you:
 | `PreToolUse` (AskUserQuestion) | A picker-preview linter plus a pairing-model gate | Depends on the pairing-model skill being adopted as your own durable ruling first, not shipped as a default |
 | `PreToolUse` (Write/Edit/MultiEdit) | A ledger-consistency guard | Assumes a decision-ledger store this kit does not create for you until you choose to keep one |
 | `PostToolUse` (AskUserQuestion) | Decision + impression logging for every picker | An always-on log of every choice you make; useful for tuning a long-running pipeline, a real cost on every turn until you want that data |
+| `PostToolUse` (AskUserQuestion) | `record_decision.py`'s picker-driven pause/lift: a SKIP/Hold ruling on a named contact pauses their `contact-closeness.json` row (via `closeness.pause()`/`closeness.lift()`, both shipped), a later BUILD lifts it | Same always-on-cost tradeoff as the row above, plus it assumes you keep a filled `contact-closeness.json` already; the mechanism ships unwired so a re-ruling on any picker never silently mutates your contact store until you choose to wire it |
 | `PostToolUse` (Write/Edit) | A style-linter run on every file write | Broad enough to slow ordinary editing; better invoked deliberately via the checklist docs |
 | `Stop` | Consistency check plus style/pairing gates, every turn | Correctness/timing tuned to one person's cadence; run `bash scripts/consistency-check.sh` by hand instead |
 | `UserPromptSubmit` | A chat-ruling recorder | Persists every ruling you state in chat to disk automatically; a privacy and noise call only you should opt into |

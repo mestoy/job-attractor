@@ -745,6 +745,12 @@ RESUME_CORE_LENSES = {}
 RESUME_EXPERT_LENSES = []
 
 
+# ── SCORECARDS — scripts/render_scorecard.py's INDEX filter (kit #88) ─────────────────────────────
+# Empty list (default) = every card's HTML is linked in the INDEX, regardless of verdict.
+# Set to e.g. ["BUILD", "RADAR"] to keep PARK/DROP cards on disk (never deleted) but unlinked in
+# the INDEX — a personal filtering choice, not a kit default, so this ships off.
+SCORECARD_SURFACED_VERDICTS = []   # e.g. ["BUILD", "RADAR"]; plain list, no env override
+
 # ── RUNTIME CAPS for the unattended crons + the multi-agent workflow (BUG-215, 2026-08-16) ────────
 # The ONE shared ceiling scripts/runtime_budget.py enforces mechanically at every fan-out entry
 # point (auto-sweep.sh, job-attractor-prep.sh, the workflow runner). These are DELIBERATELY

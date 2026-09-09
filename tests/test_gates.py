@@ -2945,6 +2945,38 @@ class TestClosenessTwin(_ClosenessSandbox):
         self.assertIsNone(self.cl.is_held({"closeness": "worked-together",
                                            "source": "stated-by-owner"}))
 
+    # ── kit port: picker-driven pause()/lift() ─────────────────────────────────────────────────
+    def test_pause_writes_a_hold_that_is_held_recognizes(self):
+        row = {"closeness": "worked-together", "source": "stated-by-owner"}
+        self.assertIsNone(self.cl.is_held(row))
+        held = self.cl.pause(row, "picker ruled SKIP")
+        self.assertTrue(self.cl.is_held(held))
+        self.assertEqual("PAUSED-by-michael", held["outreach_status"])
+        self.assertIn("picker ruled SKIP", held["paused_note"])
+        self.assertIsNone(self.cl.is_held(row), "pause() must not mutate its input")
+
+    def test_pause_is_idempotent_for_the_same_reason(self):
+        row = {"closeness": "worked-together"}
+        once = self.cl.pause(row, "same reason")
+        twice = self.cl.pause(once, "same reason")
+        self.assertEqual(once, twice)
+
+    def test_lift_removes_a_hold_this_mechanism_wrote(self):
+        row = self.cl.pause({"closeness": "worked-together"}, "picker ruled SKIP")
+        lifted = self.cl.lift(row, "ruling 'BUILD' on this contact")
+        self.assertIsNone(self.cl.is_held(lifted))
+        self.assertNotIn("outreach_status", lifted)
+        self.assertNotIn("paused_note", lifted)
+        self.assertIn("ruling 'BUILD'", lifted["lift_note"])
+
+    def test_lift_refuses_a_manual_hold_it_did_not_write(self):
+        """A hand-written decline carries no PICKER_MARK — lift() must not touch it, matching
+        is_held's own contract that a manual hold never gets silently auto-cleared."""
+        row = {"outreach_status": "PAUSED-by-michael", "paused_note": "declined by hand, no rung"}
+        lifted = self.cl.lift(row, "ruling 'BUILD' on this contact")
+        self.assertEqual(row, lifted)
+        self.assertTrue(self.cl.is_held(lifted))
+
     def test_load_absent_file_returns_None_not_empty_dict(self):
         """None = no store here; {} = store says nobody. Conflating them breaks the gate's
         mid-onboarding legacy path in one direction or the other."""

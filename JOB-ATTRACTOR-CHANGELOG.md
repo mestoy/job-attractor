@@ -34,6 +34,21 @@ Capabilities added to the pipeline (generic; nothing personal baked in):
 ## [your next entry] — [date] · [what changed]
 - ...
 
+## 2026-09-09 · Scorecard rendering (kit issue #88)
+- New `scripts/render_scorecard.py`: turns a screened company's card markdown into an
+  HTML fit scorecard, so the screening step produces an artifact rather than a prose
+  file that has to be hand-published each time. `--backfill` catches up every existing
+  card that has no HTML yet; `--reindex` rebuilds `documents/state/scorecards/INDEX.md`
+  from what's on disk.
+- New checked-in template at `templates/scorecard/scorecard-template.html`, one
+  stylesheet for every rendered card.
+- The card markdown is read against ~13 semantic slots matched by keyword, not exact
+  header text, since header wording drifts session to session. A BUILD/RADAR card
+  missing a slot warns; a DROP/PARK card stopping early after its first failing gate does
+  not, since that's the expected shape of a company that was already screened out.
+- New `SCORECARD_SURFACED_VERDICTS` in `kit_config.py` (default: empty, every verdict
+  shown) lets you hide PARK/DROP rows from the index without deleting them.
+
 ## 2026-08-31 · The Power Story (kit issue #75)
 - New `/power-story <company>`: from the operator's locked CA²R library, run the match test against the seat's job-to-be-done (same problem shape · same actor position · same constraint · a true continuation), present the picker with the top match as option 1, then co build the entry-point phrases, the 60 to 90 second telling, the continuation beat, the chapters, and the second-chair story into that interview's prep doc. Chosen from the rack, never drafted; the library stays the one canonical copy.
 - `/interview` Step 3.0 calls it before the question list; stage 2 documents the rule, stage 3 routes the first legitimate question through the entry point, stage 5's card carries the Power Story line.

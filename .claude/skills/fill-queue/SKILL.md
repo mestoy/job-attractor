@@ -117,3 +117,10 @@ card recipe in `WORKFLOW-RULES.md` ("The scorecard queue loop"), one writer flip
 appends the ledger row, and the morning picker shows cards only, in creation order, each option
 carrying a Build / Radar / Park / Drop recommendation. Refill fires again when carded survivors dip
 under about 15. Radar rows (no live req) count toward depth with a WATCH trigger.
+
+Start each card with `python3 scripts/new_card.py "<Company>"` (kit issue #88 follow-up) —
+it scaffolds all 13 slots in gate order, prefilled from a finding row / employers.jsonl where
+one exists, and refuses outright on an already-blocked company. Fill every OWED slot, then
+`scripts/render_scorecard.py <card.md>` turns it into the HTML scorecard the morning picker
+links to — run it per card, or `--backfill` to catch up any carded survivor that doesn't
+have one yet.
