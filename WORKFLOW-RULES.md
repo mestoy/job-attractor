@@ -114,7 +114,9 @@ inventory nobody can rule on; the morning picker shows cards only, never raw nam
 1. **Count cards, not rows.** Depth = approval-pending scorecards on disk (`documents/state/<slug>-card-<date>.md`
    plus a published page under `documents/state/scorecards/`). Radar rows count: a card with no live req
    carries a WATCH trigger instead of a posting. A card older than 14 days is re-verified (req, boss,
-   remote) before it reaches a picker.
+   remote) before it reaches a picker. Before a name is carded, `filter_blocked.py` runs the blocked-list
+   check AND prints a `CONTACTED:` line for any prior send `check_dup.prior_contact()` finds — that fact
+   goes on the card, never discovered later at the send gate.
 2. **Feed while below target.** When carded survivors dip under about 15, run `/fill-queue`
    (discovery vein first: funding announcements that bundle a leadership hire, then the segment veins the
    balancer marks under-target). Feeder seats take slices of the uncarded rows and run the card recipe;

@@ -191,10 +191,15 @@ def load_prior():
 
 
 def blocked_reason(company, blocked_txt):
-    """Return the recorded block reason, or None. Anchored to a list-item start so a company
-    whose name is a substring of prose does not read as blocked."""
+    """Return the recorded block reason, or None. Anchored to a list-item start (bare bullet,
+    bold bullet, or a table row's first cell) so a company whose name is a substring of prose
+    does not read as blocked."""
     lc = re.escape(company.lower().strip())
-    m = re.search(r"(?m)^[-*]\s*" + lc + r"\b[^\n]*", blocked_txt)
+    pat = (r"(?m)^(?:"
+           r"[-*]\s*(?:\*\*|__)?" + lc + r"\b[^\n]*"
+           r"|\s*\|\s*" + lc + r"\s*\|[^\n]*"
+           r")")
+    m = re.search(pat, blocked_txt)
     return m.group(0)[:150] if m else None
 
 

@@ -26,10 +26,13 @@ import json
 import os
 import re
 import sys
+import time
+import uuid
 from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import contact_signals as cs   # noqa: E402
+import boss_registry as br     # noqa: E402  (shares AGGREGATOR_DOMAINS, never a copy)
 
 REPO = cs.REPO
 CACHE = cs.EMPLOYER_CACHE
@@ -114,6 +117,20 @@ def _source_is_cited(src):
     return False
 
 
+def _make_batch_id():
+    """One id per ingest RUN, shared by every row that run writes — a short timestamp-plus-hash
+    string so two runs never collide even when they land in the same second."""
+    return f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
+
+
+def _row_content_key(row):
+    """The fields that make a row a DIFFERENT finding, as opposed to a resend of the same one.
+    `batch` and `date` are deliberately excluded — they change on every run even when a resolver
+    hands back byte-identical content, and including them would make idempotency impossible."""
+    return (row.get("segment"), row.get("industry"), row.get("source"),
+            row.get("confidence"), row.get("country"), row.get("note"))
+
+
 def pool_employers():
     """Distinct employers across the rankable people pool, most-common first."""
     import collections
@@ -165,7 +182,14 @@ def cmd_ingest(args):
     if not isinstance(rows, list):
         print("⛔ expected {\"employers\": [...]} or a bare list", file=sys.stderr)
         return 2
-    good, bad = [], []
+    # The store's natural key is the employer ALONE: `contact_signals.load_employer_cache` indexes
+    # every row by `_employer_key(employer)` and lets the newest row win — segment is not part of
+    # the key, so a corrected segment for an already-known employer is an UPDATE, not a duplicate.
+    # `pool` is the closed set an employer must belong to to be ingested at all, absent --add-employer.
+    known = cs.load_employer_cache(CACHE)      # {employer_key: latest row already on disk}
+    pool_keys = {cs._employer_key(e) for e in pool_employers()}
+    batch = _make_batch_id()
+    good, bad, dupe = [], [], []
     for r in rows:
         if not isinstance(r, dict):
             bad.append((r, "not an object")); continue
@@ -175,6 +199,10 @@ def cmd_ingest(args):
         src = (r.get("source") or "").strip()
         if not emp:
             bad.append((r, "no employer")); continue
+        key = cs._employer_key(emp)
+        if key not in pool_keys and not getattr(args, "add_employer", False):
+            bad.append((emp, "employer not in the pool (unknown to the rankable people pool) — "
+                            "pass --add-employer to ingest it anyway")); continue
         if seg not in VALID and seg != cs._NOT_FOUND:
             bad.append((emp, f"segment {seg!r} not in the closed vocabulary")); continue
         # A not-found verdict carries no industry BY DEFINITION — that is the whole content of the
@@ -191,16 +219,31 @@ def cmd_ingest(args):
         # BUG-001: country is OPTIONAL and free text on purpose — only ever feeds a printed
         # surface (nonus_tell), never a score or a filter. Left "" when a resolver did not look it
         # up; that degrades to prior suffix-guess behavior, never a false claim.
-        good.append({"employer": emp, "segment": seg, "industry": ind, "source": src,
-                     "confidence": r.get("confidence") or "stated",
+        # #34: an aggregator source demotes confidence the same way boss_registry demotes a boss
+        # NAME from one — never upgrades, only ever weakens a claim the resolver made too surely.
+        conf = (r.get("confidence") or "stated").strip() or "stated"
+        if conf.lower() != "low" and br.is_aggregator(src):
+            conf = "low"
+        candidate = {"employer": emp, "segment": seg, "industry": ind, "source": src,
+                     "confidence": conf,
                      "country": (r.get("country") or "").strip(),
-                     "note": r.get("note") or "", "date": str(date.today())})
+                     "note": r.get("note") or "", "date": str(date.today()), "batch": batch}
+        # #36: idempotency on the natural key. `known` starts as the cache already on disk and is
+        # extended as we go, so a second row for the same employer LATER IN THIS SAME FILE also
+        # dedups against the first — re-ingesting a file is a no-op regardless of how many times
+        # the same employer appears in it, not just across separate runs.
+        existing = known.get(key)
+        if existing is not None and _row_content_key(existing) == _row_content_key(candidate):
+            dupe.append(emp); continue
+        known[key] = candidate
+        good.append(candidate)
     os.makedirs(os.path.dirname(CACHE), exist_ok=True)
     if good and not args.dry_run:
         with open(CACHE, "a", encoding="utf-8") as fh:
             for g in good:
                 fh.write(json.dumps(g, ensure_ascii=False) + "\n")
-    print(f"{'would add' if args.dry_run else 'added'}: {len(good)}   rejected: {len(bad)}")
+    print(f"{'would add' if args.dry_run else 'added'}: {len(good)}   "
+          f"already present: {len(dupe)}   rejected: {len(bad)}")
     for e, why in bad[:20]:
         print(f"   ⛔ {str(e)[:44]:<46} {why}")
     if good:
@@ -236,6 +279,8 @@ def main():
     i = sub.add_parser("ingest", help="merge a resolver's JSON into the cache")
     i.add_argument("path")
     i.add_argument("--dry-run", action="store_true")
+    i.add_argument("--add-employer", action="store_true",
+                   help="allow ingesting an employer absent from the rankable pool")
     i.set_defaults(fn=cmd_ingest)
     s = sub.add_parser("status", help="cache coverage against the pool")
     s.set_defaults(fn=cmd_status)

@@ -30,6 +30,7 @@ Exit: 0 receipt written · 2 usage · 3 the résumé could not be read
 from __future__ import annotations
 
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -171,22 +172,46 @@ def artifact_hash(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def receipt_path(sha):
+def slugify(company):
+    """Lowercase, non-alnum runs collapsed to one hyphen, edges trimmed. "" for a falsy company."""
+    if not company:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "-", company.strip().lower()).strip("-")
+
+
+def receipt_path(sha, company=""):
+    """⛔ COMPANY-KEYED (kit item 13 / private-repo ee1aec0b, 2026-09-09). Two companies' reviews
+    of the same text-layer sha are two receipts, not one — a shared bare file let the second
+    `--record` silently erase the first company's findings, live, between two real reviews the
+    same day. `company=""` (the default) keeps the legacy bare `<sha>.json` path byte-for-byte, so
+    a caller that never passes `--company` sees zero behavior change.
+    """
+    slug = slugify(company)
+    if slug:
+        return os.path.join(PANEL_DIR, f"{sha}-{slug}.json")
     return os.path.join(PANEL_DIR, f"{sha}.json")
 
 
-def existing(sha):
-    p = receipt_path(sha)
-    if not os.path.exists(p):
-        return None
-    try:
-        with open(p, encoding="utf-8") as fh:
-            return json.load(fh)
-    except Exception:
-        return None
+def receipt_glob(sha):
+    """All receipt files for this sha, any company (the legacy bare file included), sorted."""
+    return sorted(glob.glob(os.path.join(PANEL_DIR, f"{sha}*.json")))
 
 
-def write_receipt(sha, findings, meta):
+def existing(sha, company=""):
+    """The receipt for (sha, company) — exact company match preferred, legacy bare file as a
+    fallback so a pre-fix bare receipt stays a valid, company-less read even after a caller starts
+    passing --company."""
+    for p in (receipt_path(sha, company), receipt_path(sha, "")):
+        if os.path.exists(p):
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    return json.load(fh)
+            except Exception:
+                return None
+    return None
+
+
+def write_receipt(sha, findings, meta, company=""):
     """⛔ Records WHAT WAS REVIEWED and WHAT WAS FOUND, never a verdict.
 
     It deliberately does not say "approved". Approval is the human passing `--resume-panel-check
@@ -201,7 +226,7 @@ def write_receipt(sha, findings, meta):
         "findings": findings,
         **meta,
     }
-    with open(receipt_path(sha), "w", encoding="utf-8") as fh:
+    with open(receipt_path(sha, company), "w", encoding="utf-8") as fh:
         json.dump(row, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
     return row
@@ -255,11 +280,27 @@ def main(argv=None):
     sha = artifact_hash(text)
 
     if a.show:
-        row = existing(sha)
-        if not row:
+        if a.company:
+            row = existing(sha, a.company)
+            if not row:
+                print(f"no receipt for this résumé ({sha[:12]}) and company {a.company!r}")
+                return 0
+            print(json.dumps(row, ensure_ascii=False, indent=2))
+            return 0
+        # No --company: list every receipt for this sha, one per company, so a hash shared across
+        # companies never hides a finding by picking one file arbitrarily.
+        files = receipt_glob(sha)
+        if not files:
             print(f"no receipt for this résumé ({sha[:12]})")
             return 0
-        print(json.dumps(row, ensure_ascii=False, indent=2))
+        for p in files:
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    row = json.load(fh)
+            except Exception:
+                continue
+            print(f"── {os.path.basename(p)} · company: {row.get('company') or '(none)'} ──")
+            print(json.dumps(row, ensure_ascii=False, indent=2))
         return 0
 
     if a.record is not None:
@@ -274,7 +315,7 @@ def main(argv=None):
         missing = [k for k in LENSES if k not in findings]
         row = write_receipt(sha, findings, {"company": a.company, "role": a.role,
                                             "artifact": os.path.basename(a.resume),
-                                            "lenses_missing": missing})
+                                            "lenses_missing": missing}, company=a.company)
         n = sum(len(v) for v in findings.values() if isinstance(v, list))
         print(f"✅ receipt written · {sha[:12]} · {n} finding(s) across {len(findings)} lens(es)")
         if missing:
@@ -284,7 +325,7 @@ def main(argv=None):
         print("   now: mail-draft.sh … --resume-panel-check pass")
         return 0
 
-    prior = existing(sha)
+    prior = existing(sha, a.company)
     if prior:
         print(f"⚠️  a receipt already exists for this exact résumé ({sha[:12]}), written "
               f"{prior.get('reviewed_at')}. Re-running is fine; it will be overwritten.\n")

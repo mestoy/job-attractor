@@ -294,6 +294,20 @@ def has_application(tex_path, slugs=None):
 
 def check(tex_path):
     full = tex_path if os.path.isabs(tex_path) else os.path.join(REPO, tex_path)
+    # ⛔ A .pdf ARGUMENT IS THE BUILT FILE, NOT THE SOURCE (the 09-09 false positive). This used
+    # to read `full` as LaTeX with no extension check, so `pdf = full[:-4] + ".pdf"` re-derived
+    # the SAME .pdf path and the checker fed a PDF's own bytes back to itself as "source" — the
+    # STALE BUILD gate then compared the PDF to itself and failed loud (~6% match, PDF stream
+    # tokens in the excerpt), alongside "no summary found" and "0 bullets". Resolve a .pdf
+    # argument to its same-directory sibling .tex up front and check that against the given PDF;
+    # an orphan .pdf (no sibling .tex) is refused outright rather than misread as source.
+    given_pdf = None
+    if full.endswith(".pdf"):
+        sib = full[:-4] + ".tex"
+        if not os.path.exists(sib):
+            print("verify_resume needs the .tex source; got a PDF with no sibling .tex")
+            sys.exit(1)
+        given_pdf, full = full, sib
     src = open(full, encoding="utf-8", errors="ignore").read()
     moderncv = "moderncv" in (re.search(r'\\documentclass[^\n]*', src) or [""])[0] \
         if isinstance(re.search(r'\\documentclass[^\n]*', src), re.Match) else "moderncv" in src[:400]
@@ -456,7 +470,7 @@ def check(tex_path):
     pdf_scanned = False
 
     # 5. PDF checks
-    pdf = full[:-4] + ".pdf"
+    pdf = given_pdf or (full[:-4] + ".pdf")
     if os.path.exists(pdf):
         # 5a. mtime evidence for the STALE BUILD verdict below. 60s of grace, because a git
         # checkout or a file copy stamps the pair within a second or two and that is not an edit.

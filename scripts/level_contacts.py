@@ -73,7 +73,8 @@ BATCH_SIZE_DEFAULT = 12
 # ("none of these" / unticked), and `known-level-tbd` is the parking state for "I know them, ask
 # me the level later".
 STATED_TIERS = ("worked-together", "know-not-close", "personal-friend", "classmate",
-                "shared-community", "best-friend-lapsed", "never-spoke", "known-level-tbd")
+                "shared-community", "best-friend-lapsed", "never-spoke", "known-level-tbd",
+                "linkedin-acquaintance")
 
 # Self-documenting seed. The store explains its own vocabulary, its inference rules and its picker
 # semantics, so a reader opening the raw JSON — or an assistant resuming a sweep months later —
@@ -94,6 +95,9 @@ _SEED = {
         "shared-community":   "Shared community/school/group identity. Warm OPENER (rung 10), not a rung 5-7 ask.",
         "best-friend-lapsed": "Close friend gone quiet. Reunion with NO ask first; outreach later, separately.",
         "never-spoke":        "Connection with no history. NOT a warm rung. Rung 1/2, zero-ask hello.",
+        "linkedin-acquaintance": "Connected on LinkedIn and exchanged pleasantries, but no real "
+                              "relationship. Rung 1/2, zero-ask hello — same as never-spoke on the "
+                              "ladder but labelled honestly.",
         "known-level-tbd":    "You confirmed you know them; the LEVEL is not yet asked. Ask before building.",
         "know-well":          "INFERENCE-ONLY tier, levelled from message evidence (6+ msgs both ways). "
                               "Scores thin until you confirm the person — volume is not intimacy.",

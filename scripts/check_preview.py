@@ -171,6 +171,38 @@ def _mac_ok(row, key):
     return hmac.compare_digest(want, str(row.get("mac", "")))
 
 
+def _unscoped_build_row(company):
+    """First signed BUILD_EXACT row that does NOT authorize `company` (blank or a different one).
+
+    kit #54 fix 3: tells "a ruling exists but isn't scoped here" apart from "no ruling at all".
+    """
+    try:
+        from record_decision import BUILD_EXACT, _norm
+    except Exception:
+        return None
+    co = (company or "").strip().lower()
+    key = _ledger_key()
+    if not key or not os.path.exists(LEDGER):
+        return None
+    try:
+        lines = open(LEDGER, "r", encoding="utf-8").readlines()
+    except Exception:
+        return None
+    _bounded = lambda a, b: re.search(r"(?<![a-z0-9])" + re.escape(a) + r"(?![a-z0-9])", b)
+    for line in lines:
+        try:
+            row = json.loads(line.strip() or "{}")
+        except Exception:
+            continue
+        if (row.get("source") not in ("posttooluse-hook", "userpromptsubmit-hook")
+                or _norm(row.get("answer", "")) not in BUILD_EXACT or not _mac_ok(row, key)):
+            continue
+        rc = (row.get("company") or "").strip().lower()
+        if not (rc and co and (_bounded(rc, co) or _bounded(co, rc))):
+            return row  # doesn't authorize `company` — this is the unscoped/mismatched row
+    return None
+
+
 def _has_build_ruling(tool_input=None):
     """Is there a valid BUILD ruling that plausibly covers THIS question?
 

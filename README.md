@@ -82,6 +82,26 @@ careful, and each one exits non-zero and prints what to fix.
 | `check_screen_gate.py` | Deciding on a company while a screening layer still has no evidence |
 | `doctor.py` | Discovering three weeks in that the hooks were never wired |
 
+### Hooks that stay main-only
+
+The reference workspace this kit is drawn from wires several of the scripts above into Claude
+Code hooks (`.claude/settings.json`), so they run automatically instead of by hand. The kit ships
+the scripts but does **not** wire the hooks — each one below assumes person-specific state, a
+heavier always-on cost, or a design call the kit deliberately leaves to you:
+
+| Hook event | What it would run | Why it stays unwired here |
+|---|---|---|
+| `PreToolUse` (AskUserQuestion) | A picker-preview linter plus a pairing-model gate | Depends on the pairing-model skill being adopted as your own durable ruling first, not shipped as a default |
+| `PreToolUse` (Write/Edit/MultiEdit) | A ledger-consistency guard | Assumes a decision-ledger store this kit does not create for you until you choose to keep one |
+| `PostToolUse` (AskUserQuestion) | Decision + impression logging for every picker | An always-on log of every choice you make; useful for tuning a long-running pipeline, a real cost on every turn until you want that data |
+| `PostToolUse` (Write/Edit) | A style-linter run on every file write | Broad enough to slow ordinary editing; better invoked deliberately via the checklist docs |
+| `Stop` | Consistency check plus style/pairing gates, every turn | Correctness/timing tuned to one person's cadence; run `bash scripts/consistency-check.sh` by hand instead |
+| `UserPromptSubmit` | A chat-ruling recorder | Persists every ruling you state in chat to disk automatically; a privacy and noise call only you should opt into |
+| `SessionStart` (startup/resume/compact) | A session-open briefing script | References state files (a balancer, a pairing ledger) this kit does not seed by default |
+
+If you want any of these, the scripts they'd call are already in `scripts/`; wire them into
+`.claude/settings.json` yourself once you've decided you want that behavior on every turn.
+
 ### Honesty is load-bearing
 
 `RETIRED` and `RETIRED_PATTERNS` in `scripts/kit_config.py` ship **empty**, and `/setup` only fills

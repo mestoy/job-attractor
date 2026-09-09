@@ -20,7 +20,7 @@ For EVERY prospect, outreach, and application: work the checklist top to bottom 
 - `WORKFLOW-RULES.md` — the full operating system
 
 ## Standard flow (detail in the pipeline skills)
-Discover (`/matrix-hunt` + `/scrape`, together) → auto-screen every candidate in order (blocked-list + hard-filter industries → industry news → culture via Glassdoor + quotes → leadership/retention → remote reality; drop failures, surface only survivors) → apply (`/apply`, tailor + verify + submit) → outreach (find the would-be hiring manager, **verify they're currently in the role**, short personal note in your voice, send, log) → interview (`/interview`, CAAR) → record (`/outcome`).
+Discover (`/matrix-hunt` + `/scrape`, together) → auto-screen every candidate in order (blocked-list + hard-filter industries → industry news → culture via Glassdoor + quotes → leadership/retention → remote reality; drop failures, surface only survivors) → apply (`/apply`, tailor + verify + submit) → outreach (find the would-be hiring manager, **verify they're currently in the role**, short personal note in your voice, send, log) → interview (`/interview`, CA2R) → record (`/outcome`).
 
 ## Repo map
 `cv/` (CV variants) · `templates/` (CV/cover-letter templates) · `.claude/skills/` (the pipeline + workflow skills) · `.claude/commands/` (slash-command workflows) · `documents/` (`PROFILE.md` + logs + the checklist docs) · `app/` (the standalone Review Console) · `.agents/skills/` (job-board search CLIs, optional).

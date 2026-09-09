@@ -295,10 +295,9 @@ else:
     radar = [l for l in live if not _numbered(l)
              and [c.strip() for c in l.split("|")][1].lower() not in ("company", "#", "")]
     n = len(active)
-    if n > 10:
-        print(f"   \U0001f534 ACTIVE list has {n} rows, cap is 10 (\"no less, no more\") — close out {n-10}")
-    else:
-        print(f"   ✅ ACTIVE list {n}/10 (boss-hunt tier)")
+    # NO CAP (retired 2026-08-19, matching main). The LaCivita 10-cap was a pre-AI forcing
+    # function; no ceiling replaced it, so this tier is REPORTED, never flagged for being "over."
+    print(f"   ✅ ACTIVE list {n} (boss-hunt tier, no cap)")
     # ⛔ kit#31. BANKED = the green-board RADAR tier (manually curated) UNION the automated
     # SURVIVOR write-back (documents/banked-candidates-*.md, `reconcile_findings.py`'s own
     # store). These are two independent deposit paths into the same warm-ask fuel pool — before

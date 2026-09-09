@@ -18,6 +18,10 @@ node_modules/
 bun.lockb
 .DS_Store
 
+# --- local dev environment — never shipped, carries a home path and local contact names ---
+.devcontainer/
+.claude/settings.local.json
+
 # Files the PARTNER edits. Tracking any of these recreates the defect that took kit_config.py out of
 # tracking: git refuses to overwrite a locally-modified tracked file, so `git pull --ff-only` aborts
 # on every future update and the updater misreports it as a network problem. Added 2026-08-03 after

@@ -245,7 +245,7 @@ class TestResolvedCountryOverridesTheSuffixGuess(unittest.TestCase):
                 path = os.path.join(tmp, "batch.json")
                 with open(path, "w", encoding="utf-8") as fh:
                     json.dump(payload, fh)
-                args = argparse.Namespace(path=path, dry_run=False)
+                args = argparse.Namespace(path=path, dry_run=False, add_employer=True)
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
                     resolve_employers.cmd_ingest(args)
@@ -285,7 +285,7 @@ class TestResolvedCountryOverridesTheSuffixGuess(unittest.TestCase):
                 path = os.path.join(tmp, "batch.json")
                 with open(path, "w", encoding="utf-8") as fh:
                     json.dump(payload, fh)
-                args = argparse.Namespace(path=path, dry_run=False)
+                args = argparse.Namespace(path=path, dry_run=False, add_employer=True)
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
                     resolve_employers.cmd_ingest(args)
@@ -1538,6 +1538,15 @@ class TestMailDraftRungProfiles(unittest.TestCase):
             fh.write(f"\n## 2026-01-10 · {company} (Ann Lee) · boss-hunt\n"
                      f"**Rung:** cold-boss | FOLLOWUP-DUE: none\nStatus: sent\n")
 
+    def _contacted_person(self, company, to):
+        """Same as _contacted, but the block names the RECIPIENT ADDRESS, the way a real SENT
+        block does (mail-draft.sh's own STAGED write puts $TO in the header and the SENDLOG
+        marker). --next-target's same-person check greps for this address."""
+        with open(self.olog, "a", encoding="utf-8") as fh:
+            fh.write(f"\n## 2026-01-10 · {company} · {to} — SENT\n"
+                     f"**Status:** SENT 2026-01-10 to {to}.\n"
+                     f"**Rung:** cold-boss | FOLLOWUP-DUE: none\nStatus: sent\n")
+
     def _seed_panel_receipt(self):
         """Write the reviewer-panel receipt for the CURRENT body, inside the sandbox.
 
@@ -1690,9 +1699,73 @@ class TestMailDraftRungProfiles(unittest.TestCase):
                       "--segment", _first_segment_slug())
         self.assertEqual(4, r.returncode)
 
+    def test_cold_company_without_a_ruling_names_the_rule(self):
+        """kit #54 fix 1: the failure message states the rule, not just the verdict, so an
+        operator does not have to re-derive it (or re-rule) from memory."""
+        r = self._run("--company", "AlphaCo", "--segment", _first_segment_slug(), *self.COLD)
+        self.assertEqual(6, r.returncode)
+        self.assertIn("BUILD_EXACT", r.stderr)
+        self.assertIn("QUESTION", r.stderr)
+
+    def test_cold_company_with_an_unscoped_ruling_names_it_specifically(self):
+        """kit #54 fix 3: a signed BUILD row exists but is scoped to a DIFFERENT company, so the
+        message must say a ruling exists and name what it's scoped to, not the plain
+        'no ruling exists' line."""
+        self._ruling("Globex")
+        r = self._run("--company", "AlphaCo", "--segment", _first_segment_slug(), *self.COLD)
+        self.assertEqual(6, r.returncode)
+        self.assertIn("unscoped to", r.stderr)
+        self.assertIn("Build outreach?", r.stderr)
+
     def test_unknown_rung_blocks(self):
         r = self._run("--rung", "boss-friend")
         self.assertEqual(4, r.returncode)
+
+    # ── --next-target: Andy's PERSON-PIVOT fallback (kit issue #72) ──────────
+    def test_company_red_still_blocks_without_next_target(self):
+        """No --next-target: the ordinary company-level dedup still refuses a company already
+        contacted, exactly as before this flag existed."""
+        self._contacted("AlphaCo")
+        self._ruling("AlphaCo")
+        r = self._run("--company", "AlphaCo", "--segment", _first_segment_slug(), *self.COLD)
+        self.assertEqual(4, r.returncode)
+        self.assertIn("already", r.stderr.lower())
+
+    def test_next_target_refuses_the_same_person(self):
+        """--next-target is for a DIFFERENT person at the company, never a re-pitch of the one
+        already contacted. The prior record here names the SAME --to address the send is using
+        (the default 'j@x.com' from _run), so it must still block."""
+        self._contacted_person("AlphaCo", "j@x.com")
+        self._ruling("AlphaCo")
+        r = self._run("--company", "AlphaCo", "--next-target",
+                      "--segment", _first_segment_slug(), *self.COLD)
+        self.assertEqual(4, r.returncode)
+        self.assertIn("already been contacted", r.stderr)
+
+    def test_next_target_blocks_a_different_person_inside_the_7_day_wait(self):
+        """kit #72 follow-up (his 09-09 ruling): the wait was advisory-only. A prior DELIVERED
+        send dated 2 days ago must block the pivot in code, naming the date and days-since."""
+        import datetime
+        recent = (datetime.date.today() - datetime.timedelta(days=2)).isoformat()
+        with open(self.olog, "a", encoding="utf-8") as fh:
+            fh.write(f"\n## {recent} · AlphaCo · prior@x.com — SENT\n"
+                     f"**Status:** SENT {recent} to prior@x.com.\n"
+                     f"**Rung:** cold-boss | FOLLOWUP-DUE: none\nStatus: sent\n")
+        self._ruling("AlphaCo")
+        r = self._run("--company", "AlphaCo", "--next-target", "--to", "next@x.com",
+                      "--segment", _first_segment_slug(), *self.COLD)
+        self.assertEqual(4, r.returncode)
+        self.assertIn(recent, r.stderr)
+        self.assertIn("2 days ago", r.stderr)
+
+    def test_next_target_allows_a_different_person_past_the_wait(self):
+        """A DIFFERENT person at a company already contacted, past ~a week: Andy's own fallback
+        sequence, which the plain company-level dedup would otherwise block."""
+        self._contacted_person("AlphaCo", "prior@x.com")
+        self._ruling("AlphaCo")
+        r = self._run("--company", "AlphaCo", "--next-target", "--to", "next@x.com",
+                      "--segment", _first_segment_slug(), *self.COLD)
+        self.assertEqual(0, r.returncode, f"--next-target blocked a genuine person pivot: {r.stderr[-400:]}")
 
     def test_conflicting_warm_and_cold_rung_blocks(self):
         """This used to resolve SILENTLY to COLD: the alias only fills an empty rung, and the
@@ -5848,6 +5921,52 @@ class TestResumePanelGate(unittest.TestCase):
         with open(f, encoding="utf-8") as fh:
             self.assertEqual(sorted(json.load(fh)["lenses_missing"]), ["cpo", "cto"])
 
+    # ── kit item 13 / private-repo ee1aec0b: receipts keyed on hash PLUS company ─────────────
+    # The receipt store was keyed on the text-layer sha ALONE, so a second company's --record of
+    # a byte-identical (text-layer-identical) résumé silently overwrote the first company's
+    # findings — traced live between two companies reviewing the same résumé the same day.
+
+    def test_two_companies_reviewing_the_same_resume_both_keep_their_receipt(self):
+        r1 = self._review("--company", "ZZNorthwind", "--record",
+                          '{"ceo":["zznorthwind finding"],"cto":[],"cpo":[]}')
+        self.assertEqual(0, r1.returncode, r1.stderr)
+        r2 = self._review("--company", "ZZCheddar", "--record",
+                          '{"ceo":["zzcheddar finding"],"cto":[],"cpo":[]}')
+        self.assertEqual(0, r2.returncode, r2.stderr)
+
+        import glob
+        d = os.path.join(self.root, "documents", "state", "resume-panels")
+        files = sorted(os.path.basename(p) for p in glob.glob(os.path.join(d, "*.json")))
+        nw = [f for f in files if "zznorthwind" in f.lower()]
+        cd = [f for f in files if "zzcheddar" in f.lower()]
+        self.assertEqual(1, len(nw), files)
+        self.assertEqual(1, len(cd), files)
+        self.assertNotEqual(nw[0], cd[0])
+        with open(os.path.join(d, nw[0]), encoding="utf-8") as fh:
+            self.assertIn("zznorthwind finding", json.load(fh)["findings"]["ceo"])
+        with open(os.path.join(d, cd[0]), encoding="utf-8") as fh:
+            self.assertIn("zzcheddar finding", json.load(fh)["findings"]["ceo"])
+
+    def test_show_with_company_returns_only_that_companys_findings(self):
+        self._review("--company", "ZZNorthwind", "--record",
+                     '{"ceo":["nw only"],"cto":[],"cpo":[]}')
+        self._review("--company", "ZZCheddar", "--record",
+                     '{"ceo":["cheddar only"],"cto":[],"cpo":[]}')
+        show = self._review("--company", "ZZNorthwind", "--show")
+        self.assertEqual(0, show.returncode, show.stderr)
+        self.assertIn("nw only", show.stdout)
+        self.assertNotIn("cheddar only", show.stdout)
+
+    def test_no_company_still_writes_the_legacy_bare_sha_file_unchanged(self):
+        r = self._review("--record", '{"ceo":["no company finding"],"cto":[],"cpo":[]}')
+        self.assertEqual(0, r.returncode, r.stderr)
+        d = os.path.join(self.root, "documents", "state", "resume-panels")
+        bare = [f for f in os.listdir(d) if len(f) == len("0" * 64 + ".json")]
+        self.assertTrue(bare, os.listdir(d))
+        show = self._review("--show")
+        self.assertEqual(0, show.returncode, show.stderr)
+        self.assertIn("no company finding", show.stdout)
+
     def test_the_kit_ships_no_expert_names_of_its_own(self):
         """⛔ [[the-kit-must-not-assume-whose-search-it-is-running]]. The fourth lens is a mechanism
         the recipient fills in. A kit that shipped two product coaches would be telling a partner
@@ -5858,6 +5977,122 @@ class TestResumePanelGate(unittest.TestCase):
         kc = importlib.import_module("kit_config")
         self.assertEqual([], list(getattr(kc, "RESUME_EXPERT_LENSES", [])))
 
+
+class TestMailDraftCompanyKeyedReceipt(unittest.TestCase):
+    """mail-draft.sh's OWN `_RP_SHA`/receipt reader (not just review_resume.py) must honor the
+    company-keyed receipt: it accepts the matching company's file, and it must NEVER fall back to
+    a receipt that exists only for a DIFFERENT company — that fallback would reopen the exact hole
+    kit item 13 / private-repo ee1aec0b closed.
+
+    ⛔ WHY A SEPARATE CLASS. `TestMailDraftRungProfiles` seeds a receipt for every send with a fake
+    (unreadable) PDF, so its gate never actually binds to a hash. This class installs the same
+    echoing `pdftotext` stub `TestResumePanelGate` uses, so the résumé is genuinely readable and
+    the company-keyed lookup is genuinely exercised.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import shutil
+        cls.root = tempfile.mkdtemp()
+        shutil.copytree(SCRIPTS, os.path.join(cls.root, "scripts"))
+        os.makedirs(os.path.join(cls.root, "documents"), exist_ok=True)
+        cls.bin = os.path.join(cls.root, "bin")
+        os.makedirs(cls.bin, exist_ok=True)
+        for name, body in (("osascript", "#!/bin/sh\ncat >/dev/null 2>&1\nexit 0\n"),
+                           ("pdftotext", '#!/bin/sh\nfor a in "$@"; do case "$a" in -*) ;; *) '
+                                         '[ -f "$a" ] && cat "$a" && exit 0;; esac; done\nexit 1\n')):
+            fp = os.path.join(cls.bin, name)
+            with open(fp, "w") as fh:
+                fh.write(body)
+            os.chmod(fp, 0o755)
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def setUp(self):
+        import shutil
+        shutil.rmtree(os.path.join(self.root, "documents", "state"), ignore_errors=True)
+        self.key = b"0" * 64
+        self.keyfile = os.path.join(self.root, "ledgerkey")
+        with open(self.keyfile, "wb") as fh:
+            fh.write(self.key)
+        self.ledger = os.path.join(self.root, "documents", "decision-ledger.jsonl")
+        open(self.ledger, "w").close()
+        self.olog = os.path.join(self.root, "outreach_log.md")
+        with open(self.olog, "w", encoding="utf-8") as fh:
+            fh.write("# Outreach Log\n")
+        for f in ("send-log.jsonl", "correspondence-log.md", "blocked-employers-list.md"):
+            open(os.path.join(self.root, "documents", f), "w").close()
+        kc = importlib.import_module("kit_config")
+        self.body = os.path.join(self.root, "body.txt")
+        with open(self.body, "w", encoding="utf-8") as fh:
+            fh.write(f"Hi, Jo!\n\nGood to reconnect.\n\n"
+                     f"Anyone you know at ZZNorthwind, BetaCo or GammaCo?\n\n"
+                     f"I led a platform rebuild last year, so if anyone you know needs that, "
+                     f"send them my way.\n\nOpen to a chat?\n\n"
+                     f"Thanks,\n\n\n{kc.OWNER_FIRST}\n{kc.OWNER_SITE}\n")
+        self.pdf = os.path.join(self.root, f"{kc.OWNER_NAME} - Resume - ZZNorthwind.pdf")
+        with open(self.pdf, "w", encoding="utf-8") as fh:
+            fh.write("SUMMARY A builder. EXPERIENCE Acme 2020-2024.\n")
+
+    def _env(self):
+        return dict(os.environ, PATH=self.bin + os.pathsep + os.environ.get("PATH", ""),
+                    CLAUDE_PROJECT_DIR=self.root, JOBKIT_LEDGER_KEYFILE=self.keyfile)
+
+    def _ruling(self, company):
+        row = {"ts": "2026-01-15T00:00:00Z", "session": "s1", "question": "Build outreach?",
+               "header": "Decision", "answer": "build", "ruling": "BUILD",
+               "company": company, "source": "posttooluse-hook"}
+        row["mac"] = record_decision.row_mac(row, self.key)
+        with open(self.ledger, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+
+    def _seed_panel_receipt(self):
+        """The OUTREACH-BODY panel receipt (a separate mechanism from the résumé receipt this
+        class tests), seeded exactly as TestMailDraftRungProfiles._seed_panel_receipt does."""
+        import hashlib
+        with open(self.body, encoding="utf-8") as fh:
+            sha = hashlib.sha256(fh.read().encode("utf-8")).hexdigest()
+        d = os.path.join(self.root, "documents", "state", "outreach-panels")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, f"{sha}.json"), "w", encoding="utf-8") as fh:
+            json.dump({"body_sha256": sha,
+                       "findings": {"recipient": [], "method": [], "honesty_voice": []}}, fh)
+
+    def _review(self, company):
+        return subprocess.run([sys.executable, os.path.join(self.root, "scripts", "review_resume.py"),
+                               self.pdf, "--company", company, "--record",
+                               '{"ceo":[],"cto":[],"cpo":[]}'],
+                              capture_output=True, text=True, env=self._env(), cwd=self.root)
+
+    def _send(self, company):
+        self._ruling(company)
+        self._seed_panel_receipt()
+        cmd = ["bash", os.path.join(self.root, "scripts", "mail-draft.sh"),
+               "--to", "j@x.com", "--subject", "Reconnecting", "--body-file", self.body,
+               "--attach", self.pdf, "--panel-check", "pass", "--resume-panel-check", "pass",
+               "--company", company, "--segment", _first_segment_slug(),
+               "--praise-source", "https://example.com/post", "--lacivita-check", "pass",
+               "--praise-phrasing", "Good to reconnect"]
+        return subprocess.run(cmd, capture_output=True, text=True, env=self._env(), cwd=self.root)
+
+    def test_mail_draft_accepts_a_company_keyed_receipt(self):
+        r0 = self._review("ZZNorthwind")
+        self.assertEqual(0, r0.returncode, r0.stderr)
+        r = self._send("ZZNorthwind")
+        self.assertEqual(0, r.returncode, f"company-keyed receipt not accepted: {r.stderr[-500:]}")
+        self.assertIn("résumé panel: receipt found", r.stdout + r.stderr)
+
+    def test_mail_draft_never_accepts_a_different_companys_receipt(self):
+        """A receipt that exists only for a DIFFERENT company must not pass the gate for this one
+        — the negative case that proves the fix doesn't reopen the hole it closes."""
+        r0 = self._review("SomeOtherCompany")
+        self.assertEqual(0, r0.returncode, r0.stderr)
+        r = self._send("ZZNorthwind")
+        self.assertEqual(4, r.returncode, r.stderr[-300:])
+        self.assertIn("no résumé-panel receipt", r.stderr)
 
 
 class TestDeskCriteriaScoring(unittest.TestCase):
@@ -7183,7 +7418,10 @@ class TestResolveEmployersSourceIsCited(unittest.TestCase):
             path = os.path.join(tmp, "batch.json")
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh)
-            args = argparse.Namespace(path=path, dry_run=True)
+            # #36: SomeCo is a fixture name, never in the real rankable pool — --add-employer
+            # keeps the rejection this test checks attributable to the citation gate, not the
+            # (unrelated) pool gate.
+            args = argparse.Namespace(path=path, dry_run=True, add_employer=True)
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 self.re_.cmd_ingest(args)
@@ -7199,7 +7437,9 @@ class TestResolveEmployersSourceIsCited(unittest.TestCase):
             path = os.path.join(tmp, "batch.json")
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh)
-            args = argparse.Namespace(path=path, dry_run=True)
+            # #36: SomeCo is a fixture name, never in the real rankable pool — --add-employer
+            # keeps this test's scope on the citation gate it actually checks.
+            args = argparse.Namespace(path=path, dry_run=True, add_employer=True)
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 self.re_.cmd_ingest(args)
@@ -8441,6 +8681,94 @@ class TestBankedTopupFoundInThisFile(unittest.TestCase):
         self.assertEqual(out, [])
         self.assertNotIn("CANNOT READ", buf.getvalue(),
                          "a fully-redundant-but-readable file was misreported as unreadable")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# verify_resume: a .pdf argument was read as if it were the .tex source (the 09-09 false
+# positive). `check(path)` computed `pdf = full[:-4] + ".pdf"` with no extension check, so a
+# `.pdf` argument fed the checker its OWN bytes as "source" AND as the built PDF — the live
+# case was `python3 scripts/verify_resume.py "documents/cv/<name>.pdf"`, which reported
+# STALE BUILD at ~6% match against PDF stream tokens, plus "no summary found" and "0 bullets".
+# The fix resolves a `.pdf` argument to its sibling `.tex` (same directory only) and checks
+# the resolved .tex against the given .pdf; an orphan .pdf (no sibling .tex) is refused
+# outright rather than misread.
+# ─────────────────────────────────────────────────────────────────────────────
+class TestVerifyResumeResolvesAPdfArgumentToItsSiblingTex(unittest.TestCase):
+    TEX = (
+        r"\documentclass{article}" "\n"
+        r"\begin{document}" "\n"
+        r"{\fontsize{18}{20}\selectfont\bfseries Jane Doe}\\[2pt]" "\n"
+        r"{\fontsize{10.5}{12}\selectfont Product Operations and Business Analysis}\\[3pt]" "\n"
+        r"Jacksonville, FL $\cdot$ Remote (US) $\mid$ (555) 555-0100 $\mid$ linkedin.com/in/janedoe"
+        "\n\n"
+        r"\section*{Objective}" "\n"
+        "Product operations and business analysis, building the systems that make teams faster.\n"
+        r"\end{document}" "\n"
+    )
+    # The rendered text a REAL pdftotext would hand back for a correctly built PDF of TEX above.
+    RENDERED = (
+        "Jane Doe\nProduct Operations and Business Analysis\n"
+        "Jacksonville, FL · Remote (US) | (555) 555-0100 | linkedin.com/in/janedoe\n\n"
+        "Objective\n"
+        "Product operations and business analysis, building the systems that make teams faster.\n"
+    )
+    # What the RAW BYTES of an actual PDF file look like — never valid LaTeX, and nothing like
+    # RENDERED. Reading THIS as "source" (the bug) is what scores as ~6% drift / PDF stream tokens.
+    PDF_BYTES = (
+        "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+        "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+        "3 0 obj<</Type/Page/Contents 4 0 R>>endobj\n"
+        "4 0 obj<</Length 44>>stream\nBT /F1 12 Tf 72 700 Td (Resume) Tj ET\nendstream endobj\n"
+        "trailer<</Root 1 0 R>>\n%%EOF\n"
+    )
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.bin = os.path.join(self.root, "bin")
+        os.makedirs(self.bin, exist_ok=True)
+        # A stand-in pdftotext that always hands back RENDERED, exactly as a real binary would for
+        # a freshly built PDF of TEX — regardless of what bytes actually sit on disk at the path it
+        # is given, so the fixture never depends on a real pdflatex/poppler toolchain being present.
+        fake = os.path.join(self.bin, "pdftotext")
+        with open(fake, "w") as fh:
+            fh.write("#!/bin/sh\ncat <<'RENDERED_EOF'\n" + self.RENDERED + "RENDERED_EOF\n")
+        os.chmod(fake, 0o755)
+
+    def _run(self, pdf_path):
+        env = dict(os.environ, PATH=self.bin + os.pathsep + os.environ.get("PATH", ""))
+        return subprocess.run(
+            [sys.executable, os.path.join(SCRIPTS, "verify_resume.py"), pdf_path],
+            capture_output=True, text=True, env=env)
+
+    def test_a_pdf_with_a_sibling_tex_is_checked_against_the_tex_not_itself(self):
+        """RED before the fix: the old code re-derives `pdf` from the .pdf argument itself, so
+        `src` becomes the raw PDF bytes and the STALE BUILD gate compares the PDF to itself and
+        fails loud. GREEN after: the argument resolves to its sibling .tex as the source."""
+        tex_path = os.path.join(self.root, "r.tex")
+        pdf_path = os.path.join(self.root, "r.pdf")
+        with open(tex_path, "w", encoding="utf-8") as fh:
+            fh.write(self.TEX)
+        with open(pdf_path, "w", encoding="utf-8") as fh:
+            fh.write(self.PDF_BYTES)
+        r = self._run(pdf_path)
+        self.assertNotIn("STALE BUILD", r.stdout,
+                         f"a .pdf argument with a sibling .tex must not read as a stale build "
+                         f"(fed the PDF bytes back to itself as source)\nstdout:\n{r.stdout}")
+
+    def test_an_orphan_pdf_with_no_sibling_tex_is_refused_not_misread(self):
+        """RED before the fix: an orphan .pdf silently ran the checks against its own bytes and
+        printed a bogus 'no summary found' / '0 bullets' report. GREEN after: a plain refusal,
+        no checks run, non-zero exit."""
+        pdf_path = os.path.join(self.root, "orphan.pdf")
+        with open(pdf_path, "w", encoding="utf-8") as fh:
+            fh.write(self.PDF_BYTES)
+        r = self._run(pdf_path)
+        self.assertNotEqual(r.returncode, 0, "an orphan .pdf must not exit 0")
+        self.assertIn("verify_resume needs the .tex source; got a PDF with no sibling .tex",
+                      r.stdout)
+        self.assertNotIn("no summary found", r.stdout)
+        self.assertNotIn("0 bullets", r.stdout)
 
 
 # ⛔ THIS GUARD MUST BE THE LAST THING IN THE FILE, AND IT WAS NOT (fixed 2026-08-11).

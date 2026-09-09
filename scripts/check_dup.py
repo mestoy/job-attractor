@@ -506,6 +506,78 @@ def sendlog_hits(needles: set):
     return strong, weak
 
 
+def _group_hits(flat):
+    """Rebuild the {store: (status, [(line, text), ...])} shape `dump()` expects, from the flat
+    hit list `prior_contact()` returns — first-seen order preserved, so printed output is
+    unaffected by going through the flat representation."""
+    grouped = {}
+    for h in flat:
+        store = h["store"]
+        if store not in grouped:
+            grouped[store] = (h["status"], [])
+        grouped[store][1].append((h["line"], h["text"]))
+    return grouped
+
+
+def prior_contact(company: str, person: str = "") -> dict:
+    """Card-build-time dedup: has THIS company (and optionally person) already been contacted?
+
+    This is exactly the SEND-GATE signal set (`--send-gate`'s scoped stores plus the authoritative
+    send log) pulled out of `main()` so it can run BEFORE a card is built, not only at the final
+    send gate. See documents/state/dedup-card-build-bug-draft-02-2026-09-09.md for why: a full
+    build (beat 1/2, offer list, ask, close, subject, all scored and staged) got blocked at
+    mail-draft.sh AFTER the expensive work was already done, with no earlier gate to catch it.
+
+    Deliberately narrower than the plain (non-send-gate) verdict `main()` computes: it does not
+    scan the construction/discovery stores (decision-log, queues, discovery-board, metrics) or the
+    QUEUED_STORES banked board — those mean "being worked", not "already contacted", and are not
+    this function's question.
+
+    Returns {"strong": [...], "weak": [...], "verdict": "red"|"yellow"|"clean"}. Each hit is
+    {"store": path, "status": status, "line": line_no, "text": excerpt}. "red" = a strong hit
+    exists (an actual record/delivery, not incidental prose) — same-person delivered sends belong
+    here. "yellow" = weak hits only (prose mention, or a send-log row that did not deliver —
+    staged/bounced/failed). "clean" = neither.
+    """
+    needles = variants(company)
+    loose = loose_tokens(company)
+    if person:
+        needles |= {norm(person)}
+        toks = [t for t in norm(person).split() if len(t) >= 4]
+        if toks:
+            needles.add(toks[-1])  # last name
+
+    stores = {p: s for p, s in STORES.items() if p in SEND_GATE_STORES}
+    strong_found, weak_found = {}, {}
+    for path, status in stores.items():
+        res = search_file(path, needles, loose)
+        if not res:
+            continue
+        strong, weak = res
+        if strong:
+            strong_found[path] = (status, strong)
+        elif weak:
+            weak_found[path] = (status, weak)
+
+    sl_strong, sl_weak = sendlog_hits(needles)
+    if sl_strong:
+        strong_found[SENDLOG] = ("DELIVERED per the send log (already contacted)", sl_strong)
+    elif sl_weak:
+        weak_found[SENDLOG] = ("in the send log, NOT delivered (staged/bounced/failed)", sl_weak)
+
+    def _flatten(found):
+        out = []
+        for store, (status, hits) in found.items():
+            for ln, txt in hits:
+                out.append({"store": store, "status": status, "line": ln, "text": txt})
+        return out
+
+    strong_list = _flatten(strong_found)
+    weak_list = _flatten(weak_found)
+    verdict = "red" if strong_list else ("yellow" if weak_list else "clean")
+    return {"strong": strong_list, "weak": weak_list, "verdict": verdict}
+
+
 def main():
     args = [a for a in sys.argv[1:] if a != "--send-gate"]
     send_gate = "--send-gate" in sys.argv[1:]
@@ -545,12 +617,32 @@ def main():
                     found_weak[path] = (status, weak)
         return found_strong, found_weak
 
-    strong_found, weak_found = _scan(stores)
-    # ⛔ QUEUED (banked) hits are scanned SEPARATELY and never feed strong_found/weak_found — see
-    # QUEUED_STORES above. `--send-gate` never searched the banked store before this fix either
-    # (it was never in SEND_GATE_STORES), so that scope is preserved exactly.
-    queued_strong, queued_weak = _scan(QUEUED_STORES) if not send_gate else ({}, {})
-    queued_found = queued_strong or queued_weak
+    if send_gate:
+        # ⛔ THE SEND-GATE PATH, factored out to `prior_contact()` so card-build-time callers
+        # (boss_registry.py cmd_add, filter_blocked.py) can ask the same question BEFORE a card is
+        # built, not only here at the final gate. Reused verbatim, not reimplemented, so the two
+        # never drift: this rebuilds the exact same strong_found/weak_found this branch always
+        # produced (SEND_GATE_STORES scan + sendlog_hits merge, no QUEUED_STORES), just from
+        # prior_contact()'s flat return shape.
+        pc = prior_contact(company, boss)
+        strong_found, weak_found = _group_hits(pc["strong"]), _group_hits(pc["weak"])
+        queued_strong, queued_weak = {}, {}
+        queued_found = {}
+    else:
+        strong_found, weak_found = _scan(stores)
+        # ⛔ QUEUED (banked) hits are scanned SEPARATELY and never feed strong_found/weak_found —
+        # see QUEUED_STORES above. `--send-gate` never searched the banked store before this fix
+        # either (it was never in SEND_GATE_STORES), so that scope is preserved exactly.
+        queued_strong, queued_weak = _scan(QUEUED_STORES)
+        queued_found = queued_strong or queued_weak
+
+        # The authoritative record of what actually went out (see sendlog_hits). Merged into the
+        # same verdict buckets so it prints through the normal dump().
+        sl_strong, sl_weak = sendlog_hits(needles)
+        if sl_strong:
+            strong_found[SENDLOG] = ("DELIVERED per the send log (already contacted)", sl_strong)
+        elif sl_weak:
+            weak_found[SENDLOG] = ("in the send log, NOT delivered (staged/bounced/failed)", sl_weak)
 
     def dump(found):
         for path, (status, hits) in found.items():
@@ -559,15 +651,6 @@ def main():
                 print(f"       L{ln}: {txt}")
             if len(hits) > 3:
                 print(f"       … +{len(hits)-3} more line(s)")
-
-    # The authoritative record of what actually went out (see sendlog_hits). Merged into the
-    # same verdict buckets so it prints through the normal dump(), and included under
-    # --send-gate because "already delivered to this person" is precisely a do-not-send fact.
-    sl_strong, sl_weak = sendlog_hits(needles)
-    if sl_strong:
-        strong_found[SENDLOG] = ("DELIVERED per the send log (already contacted)", sl_strong)
-    elif sl_weak:
-        weak_found[SENDLOG] = ("in the send log, NOT delivered (staged/bounced/failed)", sl_weak)
 
     # ⛔ PRECISE BLOCKED-LIST CHECK, independent of the fuzzy needles above. Runs BEFORE the
     # needle verdicts so a blocked company reports as blocked even when a space-stripped form

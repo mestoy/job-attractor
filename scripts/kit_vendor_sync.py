@@ -42,6 +42,7 @@ import datetime as _dt
 import json
 import os
 import shutil
+import tempfile
 import subprocess
 import sys
 
@@ -54,6 +55,17 @@ PROTECTED_PREFIXES = (
     ".superseded/",
 )
 PROTECTED_EXACT = frozenset({"scripts/kit_config.py"})
+
+# Files the kit SEEDS once and the partner WRITES from then on. Kit-owned by the manifest, partner-
+# written in practice: the changelog is the partner's own dated story of their pipeline. A sync
+# adds it when absent and never replaces it once present (kit #80, third comment: a sync dropped 14
+# dated lines of a partner's log).
+PARTNER_ONCE_PRESENT = frozenset({"JOB-ATTRACTOR-CHANGELOG.md"})
+
+# The subject prefix commit_sync() writes. A commit that does NOT start with it and touches a
+# kit-owned file is the partner's own work on that file, which is what the local-edit guard and
+# the clobber audit both look for.
+KIT_SYNC_COMMIT_PREFIX = "Kit sync "
 
 KIT_CANONICAL = os.environ.get("JOBKIT_CANONICAL", "mestoy/job-attractor-kit")
 
@@ -223,6 +235,183 @@ def _differs(repo, ref, rel, dest):
 
 
 # ─────────────────────────────────────────────────────────────────────────────────────────────────
+#  THE LOCAL-EDIT GUARD (kit #80, Matthew, 2026-09-05 and 2026-09-08).
+#
+#  The old plan was "every kit-owned file whose bytes differ from the NEW kit version gets replaced,
+#  backed up, and committed". That is silent by construction: a partner's committed fix to a kit
+#  script differs from the new kit version too, so it was replaced with the same one-line outcome
+#  as a routine update. Five real fixes on one install were dead for a week, one of them a screening
+#  gate; a sixth was reverted forty minutes after it was committed. The commit stayed in history, so
+#  nothing ordinary could tell.
+#
+#  The information that separates "behind" from "edited" was always there: the LAST kit version of
+#  the file. A partner copy that equals the last kit version is merely behind, and replacing it is
+#  right. A partner copy that differs from BOTH the last kit version and the new one carries the
+#  partner's own work, and the file is HELD: left exactly as it is, named in the report with the
+#  commits that touched it, never replaced without being asked. `--merge` tries a three-way merge
+#  first and holds only on conflict; `--replace-local` restores the old behaviour for named files.
+#
+#  Where does "the last kit version" come from? Two places, in order: the ref the previous sync
+#  recorded in its manifest (works for the unrelated clone, which is the common partner shape), then
+#  the merge-base with the kit (works for a real clone). A first-ever sync of an unrelated clone has
+#  neither, so it behaves as before, backup and replace, and says so per file.
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+def last_synced_ref(repo):
+    """The kit ref the most recent sync vendored, if its objects are still readable here."""
+    man = latest_manifest(repo) or {}
+    # The manifest's `ref` is a NAME (origin/main), which now points at the newest kit, not the
+    # one that was vendored. The sha of that one is in the ancestry block the same sync wrote.
+    sha = (man.get("ancestry") or {}).get("ref") or man.get("ref_sha") or ""
+    if not sha:
+        return ""
+    ok = _out(repo, "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}")
+    return ok or ""
+
+
+def _merge_base(repo, ref):
+    p = _git(repo, "merge-base", "HEAD", ref)
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
+def baseline_blob(repo, rel, last_ref, base):
+    """The last kit version of `rel` this partner received, or None when there is no way to know."""
+    for r in (last_ref, base):
+        if r:
+            b = _kit_blob(repo, r, rel)
+            if b is not None:
+                return b
+    return None
+
+
+def local_commits_touching(repo, rel, limit=8):
+    """The partner's OWN commits that touched `rel`: every commit in HEAD's history on that path
+    whose subject is not a Kit sync. Newest first, `limit` at most."""
+    p = _git(repo, "log", f"--max-count={limit * 4}", "--format=%h%x09%s", "--", rel)
+    if p.returncode != 0:
+        return []
+    out = []
+    for line in p.stdout.splitlines():
+        sha, _, subject = line.partition("\t")
+        if subject.startswith(KIT_SYNC_COMMIT_PREFIX):
+            continue
+        out.append({"sha": sha, "subject": subject})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def three_way_merge(base, ours, theirs):
+    """`git merge-file` on three blobs. Returns (merged_bytes, clean). Conflicts leave markers in the
+    output and clean=False; the caller must NOT write that file."""
+    d = tempfile.mkdtemp(prefix="kit-sync-merge-")
+    try:
+        paths = {}
+        for name, data in (("base", base), ("ours", ours), ("theirs", theirs)):
+            paths[name] = os.path.join(d, name)
+            with open(paths[name], "wb") as fh:
+                fh.write(data)
+        p = subprocess.run(["git", "merge-file", "-p", "-L", "yours", "-L", "last kit", "-L", "new kit",
+                            paths["ours"], paths["base"], paths["theirs"]],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return p.stdout, p.returncode == 0
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def classify_plan(repo, ref, files, last_ref, base, merge=False, replace_local=None):
+    """Sort every kit-owned file that differs from the kit into what the sync will do with it.
+    Returns (replace, content, notes): `replace` is the list vendor() may write, `content` holds
+    merged bytes for files that merge cleanly, `notes` is one dict per file that is NOT simply
+    replaced (held / merged / kept / no-baseline), for the report."""
+    replace_local = set(replace_local or [])
+    replace_all = "all" in replace_local
+    replace, content, notes = [], {}, []
+    for rel in files:
+        dest = os.path.join(repo, rel)
+        if not _differs(repo, ref, rel, dest):
+            continue
+        if not os.path.lexists(dest):
+            replace.append(rel)                                   # a new kit file: always added
+            continue
+        if rel in PARTNER_ONCE_PRESENT:
+            notes.append({"file": rel, "action": "kept", "why": "partner-written once present"})
+            continue
+        if _entry_mode(repo, ref, rel) == "120000" or os.path.islink(dest):
+            replace.append(rel)                                   # symlinks carry no partner edits
+            continue
+        ours = _read(dest)
+        theirs = _kit_blob(repo, ref, rel)
+        baseline = baseline_blob(repo, rel, last_ref, base)
+        if baseline is None:
+            replace.append(rel)
+            notes.append({"file": rel, "action": "replaced", "why": "no last kit version to compare "
+                          "against (first sync); your copy is backed up"})
+            continue
+        if ours == baseline:
+            replace.append(rel)                                   # merely behind: a clean update
+            continue
+        commits = local_commits_touching(repo, rel)
+        if replace_all or rel in replace_local:
+            replace.append(rel)
+            notes.append({"file": rel, "action": "replaced", "why": "--replace-local",
+                          "commits": commits})
+            continue
+        if merge and theirs is not None:
+            merged, clean = three_way_merge(baseline, ours, theirs)
+            if clean:
+                replace.append(rel)
+                content[rel] = merged
+                notes.append({"file": rel, "action": "merged", "commits": commits,
+                              "why": "your edit and the kit's update merged cleanly; read the result"})
+                continue
+            notes.append({"file": rel, "action": "held", "commits": commits,
+                          "why": "your edit conflicts with the kit's update; left exactly as it was"})
+            continue
+        notes.append({"file": rel, "action": "held", "commits": commits,
+                      "why": "your copy carries your own edit; left exactly as it was"})
+    return replace, content, notes
+
+
+def check_clobber(repo, ref):
+    """Retrospective audit (kit #80, ask 2): for every kit-owned file, list the partner's own commits
+    that touched it and test whether each commit's change is STILL in the working copy
+    (`git show <c> -- <file> | git apply --check --reverse`). A change that no longer reverse-applies
+    MAY have been replaced by a sync, or the kit may have upstreamed it in different wording, so
+    the verdict is "go look", never "reverted"."""
+    findings = []
+    for rel in kit_owned_files(repo, ref):
+        if not os.path.isfile(os.path.join(repo, rel)):
+            continue
+        for c in local_commits_touching(repo, rel, limit=20):
+            show = _git(repo, "show", "--format=", c["sha"], "--", rel)
+            if show.returncode != 0 or not show.stdout.strip():
+                continue
+            chk = subprocess.run(["git", "apply", "--check", "--reverse", "-"], cwd=repo,
+                                 input=show.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True)
+            findings.append({"file": rel, "sha": c["sha"], "subject": c["subject"],
+                             "live": chk.returncode == 0})
+    return {"ok": True, "repo": repo, "ref": ref, "findings": findings,
+            "suspect": [f for f in findings if not f["live"]]}
+
+
+def render_clobber(report):
+    sus = report.get("suspect") or []
+    n = len(report.get("findings") or [])
+    lines = [f"▶  Clobber audit: {_n(n, 'local commit')} of yours touch kit-owned files."]
+    if not sus:
+        lines.append("✅  Every one of them is still present in the working copy.")
+        return "\n".join(lines)
+    lines.append(f"⚠  {_n(len(sus), 'change')} may no longer be live. Go look before re-applying any of "
+                 "them: the kit may have shipped the same fix in different wording.")
+    for f in sus:
+        lines.append(f"   {f['file']}  ←  {f['sha']} {f['subject']}")
+    lines.append("ℹ  Fixed a kit script? Send it up (an issue or a PR on the kit), or the next sync will "
+                 "hold your copy and stop updating that file.")
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
 #  THE SYNC.
 # ─────────────────────────────────────────────────────────────────────────────────────────────────
 def make_restore_point(repo, backup_dir, ts, dry_run):
@@ -271,16 +460,17 @@ def _restore_file(repo, backup_rel, live_rel):
         shutil.copy2(src, dest)
 
 
-def vendor(repo, ref, plan, backup_dir, dry_run):
+def vendor(repo, ref, plan, backup_dir, dry_run, content=None):
     """Copy the kit's version of each planned file into place, backing up any existing copy first.
     Per-file errors are captured, not raised, and if a write fails after the old file was removed, the
     backup is rolled straight back so nothing of the partner's is ever left deleted. Returns
     (outcomes, failures)."""
     outcomes, failures = [], []
+    content = content or {}     # rel -> bytes to write INSTEAD of the kit blob (a clean 3-way merge)
     for rel in plan:
         dest = os.path.join(repo, rel)
         mode = _entry_mode(repo, ref, rel)
-        kit_bytes = _kit_blob(repo, ref, rel)
+        kit_bytes = content.get(rel) if rel in content else _kit_blob(repo, ref, rel)
         if kit_bytes is None:
             outcomes.append({"file": rel, "action": "skip", "why": "not in kit ref"})
             continue
@@ -290,7 +480,7 @@ def vendor(repo, ref, plan, backup_dir, dry_run):
             failures.append({"file": rel, "error": "existing file unreadable; left untouched", "backed_up": None})
             outcomes.append({"file": rel, "action": "failed", "error": "unreadable", "backed_up": None})
             continue
-        action = "add" if not exists else "update"
+        action = "add" if not exists else ("merge" if rel in content else "update")
         if dry_run:
             outcomes.append({"file": rel, "action": action + " (dry-run)"})
             continue
@@ -323,7 +513,7 @@ def vendor(repo, ref, plan, backup_dir, dry_run):
 
 
 def commit_sync(repo, outcomes, ts):
-    changed = [o["file"] for o in outcomes if o["action"] in ("add", "update")]
+    changed = [o["file"] for o in outcomes if o["action"] in ("add", "update", "merge")]
     if not changed:
         return "", ""
     for f in changed:
@@ -352,7 +542,7 @@ def write_manifest(backup_dir, data):
         json.dump(data, fh, indent=2)
 
 
-def sync(repo, dry_run=False):
+def sync(repo, dry_run=False, merge=False, replace_local=None):
     report = {"ok": False, "repo": repo, "steps": [], "outcomes": [], "dry_run": dry_run}
 
     if not is_git_repo(repo):
@@ -390,9 +580,20 @@ def sync(repo, dry_run=False):
         return report, 0
 
     files = kit_owned_files(repo, ref)
-    plan = [rel for rel in files if _differs(repo, ref, rel, os.path.join(repo, rel))]
+    last_ref = last_synced_ref(repo)
+    base = _merge_base(repo, ref) if anc.get("has_merge_base") else ""
+    report["baseline"] = {"last_synced_ref": last_ref, "merge_base": base}
+    plan, content, notes = classify_plan(repo, ref, files, last_ref, base,
+                                         merge=merge, replace_local=replace_local)
+    report["held"] = [n for n in notes if n["action"] == "held"]
+    report["merged_files"] = [n for n in notes if n["action"] == "merged"]
+    report["kept"] = [n for n in notes if n["action"] == "kept"]
+    report["notes"] = notes
     if not plan:
         report["ok"] = True
+        if report["held"]:
+            report["steps"].append(f"{len(report['held'])} file(s) held: they carry your own edits")
+            return report, 2
         report["steps"].append("all kit-owned files already match; nothing to do")
         return report, 0
 
@@ -404,11 +605,11 @@ def sync(repo, dry_run=False):
     report["restore_tag"] = tag
     report["restore_bundle"] = os.path.relpath(bundle, repo) if bundle else None
 
-    outcomes, failures = vendor(repo, ref, plan, backup_dir, dry_run)
+    outcomes, failures = vendor(repo, ref, plan, backup_dir, dry_run, content=content)
     report["outcomes"] = outcomes
     report["failures"] = failures
 
-    changed = [o for o in outcomes if o["action"] in ("add", "update")]
+    changed = [o for o in outcomes if o["action"] in ("add", "update", "merge")]
     if dry_run:
         report["ok"] = True
         report["steps"].append(f"dry-run: {len(plan)} file(s) would change")
@@ -430,7 +631,7 @@ def sync(repo, dry_run=False):
 
     # Always leave a manifest — even a partial or a commit that failed — so Undo can find its way back.
     write_manifest(backup_dir, {
-        "ts": ts, "remote": remote, "ref": ref, "ancestry": anc,
+        "ts": ts, "remote": remote, "ref": ref, "ref_sha": anc.get("ref", ""), "ancestry": anc,
         "restore_tag": tag, "restore_bundle": os.path.relpath(bundle, repo) if bundle else None,
         "commit": commit, "changed": [o["file"] for o in changed],
         "backed_up": [o.get("backed_up") for o in changed if o.get("backed_up")],
@@ -449,6 +650,10 @@ def sync(repo, dry_run=False):
 
     report["ok"] = True
     report["steps"].append(f"committed sync ({len(changed)} file(s))")
+    if report.get("held"):
+        report["error"] = "held"
+        report["steps"].append(f"{len(report['held'])} file(s) held: they carry your own edits")
+        return report, 2
     return report, 0
 
 
@@ -603,8 +808,8 @@ def render(report):
              f"   from: {report.get('remote','?')}"]
     anc = report.get("ancestry", {})
     state = anc.get("state", "")
-    changed = [o for o in report.get("outcomes", []) if o["action"] in ("add", "update")]
-    if state == "up_to_date" or (not changed and report.get("ok")):
+    changed = [o for o in report.get("outcomes", []) if o["action"] in ("add", "update", "merge")]
+    if (state == "up_to_date" or (not changed and report.get("ok"))) and not report.get("held"):
         if state in ("diverged", "unrelated"):
             lines.append("   Your own commits are untouched, and the kit's files already match — "
                          "nothing needed doing.")
@@ -628,6 +833,19 @@ def render(report):
     lines.append(f"   {_n(len(updated), 'file')} updated, {len(added)} added, one at a time.")
     if any(o.get("backed_up") for o in changed) and report.get("backup_dir"):
         lines.append(f"   Any file of yours that was replaced is saved under: {report['backup_dir']}")
+    for o in report.get("merged_files") or []:
+        lines.append(f"   ⚠  {o['file']}: your edit and the kit's update were MERGED; read the result.")
+    for o in report.get("kept") or []:
+        lines.append(f"   {o['file']}: yours, kept as is (the kit only seeds it).")
+    held = report.get("held") or []
+    for o in held:
+        who = ", ".join(f"{c['sha']} {c['subject']}" for c in (o.get("commits") or [])[:3])
+        lines.append(f"   ⛔ {o['file']} was NOT updated: it carries your own edit" +
+                     (f" ({who})" if who else "") + ". Left exactly as it was.")
+    if held:
+        lines.append("   Fixed a kit script? Send it up (an issue or a PR on the kit) so the sync can "
+                     "carry it. To take the kit's version anyway: Sync with --replace-local <file>, "
+                     "or --merge to try a three-way merge.")
     failures = report.get("failures") or []
     if failures:
         lines.append(f"   ⚠  {_n(len(failures), 'file')} could not be written and " +
@@ -635,7 +853,7 @@ def render(report):
                      ", ".join(f["file"] for f in failures[:5]))
     if report.get("restore_tag"):
         lines.append("   This is reversible: run \"Undo Kit Sync\" to return to how things were.")
-    if failures:
+    if failures or held:
         lines.append("ℹ  Finished with some files skipped (above). Nothing of yours was destroyed.")
     else:
         lines.append("✅  Done. Your documents, your settings and your own commits were never touched.")
@@ -688,13 +906,28 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true", help="report what would change, touch nothing")
     ap.add_argument("--undo", action="store_true", help="restore the pre-sync state of the last sync")
     ap.add_argument("--json", action="store_true", help="emit the raw report as JSON")
+    ap.add_argument("--merge", action="store_true",
+                    help="on a file you edited, try a three-way merge with the kit's update; hold on conflict")
+    ap.add_argument("--replace-local", nargs="*", metavar="FILE",
+                    help="take the kit's version of these files even though you edited them ('all' for every one)")
+    ap.add_argument("--check-clobber", action="store_true",
+                    help="audit only: which of your own commits to kit-owned files may no longer be live")
     a = ap.parse_args(argv)
     repo = os.path.abspath(a.repo)
+    if a.check_clobber:
+        if not is_git_repo(repo):
+            print(json.dumps({"ok": False, "error": "not_a_clone"}) if a.json else f"🛑 {_ERROR_TEXT['not_a_clone']}")
+            return 1
+        remote = find_kit_remote(repo)
+        ref = kit_ref(repo, remote) if remote else ""
+        report = check_clobber(repo, ref or "HEAD")
+        print(json.dumps(report, indent=2) if a.json else render_clobber(report))
+        return 0
     if a.undo:
         report, code = undo(repo, dry_run=a.dry_run)
         print(json.dumps(report, indent=2) if a.json else render_undo(report))
         return code
-    report, code = sync(repo, dry_run=a.dry_run)
+    report, code = sync(repo, dry_run=a.dry_run, merge=a.merge, replace_local=a.replace_local)
     print(json.dumps(report, indent=2) if a.json else render(report))
     return code
 

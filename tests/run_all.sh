@@ -40,6 +40,25 @@ for rel in ("documents/send-log.jsonl", "outreach_log.md", "documents/contact-cl
         print(f"{rel} {hashlib.sha256(open(p,'rb').read()).hexdigest()[:16]}")
     else:
         print(f"{rel} MISSING")
+
+# The enumerated list above misses anything new — which is how weights-derive.json and
+# company.jsonl fixture rows drifted clean (kit #37). Walk documents/state/ recursively too, so a
+# test can never invent a new live-store file that this guard has no name for.
+state_dir = os.path.join(repo, "documents", "state")
+# weights-derive.json is a WITNESS file: it rewrites its own last_run stamp on every ranking
+# derivation by design (see rank_criteria._stamp_derivation), so it must never feed this guard.
+IGNORE_STATE_FILES = {"documents/state/weights-derive.json"}
+if os.path.isdir(state_dir):
+    for root, dirs, files in os.walk(state_dir):
+        dirs.sort()
+        for name in sorted(files):
+            p = os.path.join(root, name)
+            rel = os.path.relpath(p, repo)
+            if rel in IGNORE_STATE_FILES:
+                continue
+            print(f"{rel} {hashlib.sha256(open(p,'rb').read()).hexdigest()[:16]}")
+else:
+    print("documents/state/ MISSING")
 PY
 }
 

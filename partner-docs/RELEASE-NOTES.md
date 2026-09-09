@@ -14,6 +14,36 @@ python3 scripts/release_notes.py --seen   # mark it read
 
 ---
 
+## v1.5 — 2026-09-08 · The sync stops replacing your own fixes, and the contact store gets written
+
+**Read this one if you have ever fixed a kit script yourself.** Reported by a partner (kit issues
+#80 and #81), both fixed the same day.
+
+### Sync Kit holds a file you edited (#80)
+
+Before, every kit-owned file that differed from the new kit version was replaced, backed up, and
+committed, with the same one-line outcome whether you were merely behind or had fixed the file
+yourself. Five real fixes on one install were dead for a week. Now the sync compares your copy with
+the LAST kit version it gave you. Merely behind: updated as before. Your own edit: the file is
+**held**, left exactly as it was, and the report names the commits that touched it and asks you to
+send the fix up. The run exits 2 so nothing reads as a clean sync.
+
+- `--merge` tries a three-way merge and holds only on a conflict.
+- `--replace-local FILE` (or `all`) takes the kit's version on request, with the usual backup.
+- `--check-clobber` audits your past commits to kit files and says which may no longer be live.
+- `JOB-ATTRACTOR-CHANGELOG.md` is seeded once and never replaced.
+
+The first sync of a clone with no shared history has no last version to compare and behaves as
+before, saying so per file. From the second sync on, the guard is live.
+
+### `parse_network.py` writes `documents/state/contact.jsonl` (#81)
+
+The shipped copy defined the register step and never called it, so every reader of the contact
+store ran on an empty map and a contact with a vanity LinkedIn slug could be re-offered after a
+send. Fixed, with a `--no-register` flag, and a second parse of the same export now writes nothing.
+
+---
+
 ## v1.4 — 2026-08-04 · The people ranker stops rewarding companies nobody can identify
 
 **Read this one if your top 10 has ever looked like a list of strangers at companies you could not

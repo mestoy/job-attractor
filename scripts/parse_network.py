@@ -428,6 +428,8 @@ def main():
     # a good parse. `--limit N` still works for anyone who wants a short printed list.
     argv, args, limit = sys.argv[1:], [], 999
     force = "--force" in argv
+    # `--no-register` regenerates the markdown WITHOUT touching documents/state/contact.jsonl.
+    no_register = "--no-register" in argv
     i = 0
     while i < len(argv):
         if argv[i] == "--limit" and i + 1 < len(argv):
@@ -728,9 +730,22 @@ def main():
     print(f"\n✅ wrote {dest} (no email addresses included)")
     print(f"   full roster: {len(all_names)} names (anchors the WARM-RUNG picker exemption)")
 
+    # LAST, and only after the file is safely on disk. `rows` here is the post-filter set, the same
+    # population the markdown describes, so the store never learns a person the source filter
+    # deliberately withheld. Kit #81: this call, the constant above, and the main guard at the end of
+    # the file were all missing from the shipped copy, so contact.jsonl was never written.
+    if no_register:
+        print("   contact store: skipped (--no-register)")
+    else:
+        _register_contacts(rows, os.path.basename(str(path)), export_date_from_name(str(path)))
 
-if __name__ == "__main__":
-    main()
+
+
+
+# The idempotency signature covers only the fields THIS writer sets. `payload["name"]` is
+# deliberately out: `state.register()` keeps whatever literal an earlier row already claimed, so
+# comparing against the export's spelling would report a false difference and re-write every run.
+_REGISTERED_FIELDS = ("linkedin", "title", "company", "connected_on")
 
 
 def _register_contacts(rows, source_name, as_of, quiet=False):
@@ -799,7 +814,10 @@ def _register_contacts(rows, source_name, as_of, quiet=False):
                           "title": (r.get("Position") or "").strip(),
                           "company": (r.get("Company") or "").strip(),
                           "connected_on": d.isoformat() if d else ""}
-                key = state.key_for("contact", name)
+                # Same key state.append() writes for this row (BUG-180: the handle when there is one),
+                # or the re-run guard compares a squashed-name key against stored "li:" keys and never
+                # matches, so every re-parse appends the whole export again (kit #81).
+                key = state.key_for("contact", name, linkedin=url)
                 sig = (key,) + tuple(str(fields.get(f) or "") for f in _REGISTERED_FIELDS)
                 if sig in seen:
                     continue
@@ -823,3 +841,7 @@ def _register_contacts(rows, source_name, as_of, quiet=False):
         print(f"   contact store: {written} of {len(rows)} rows registered with a LinkedIn slug "
               f"(as_of {iso}, source {src}{note})")
     return written, failed
+
+
+if __name__ == "__main__":
+    main()

@@ -301,6 +301,11 @@ TIERS = {
     "best-friend-lapsed": ("reunion",       "off-ladder","reunion with NO ask; outreach later, separately",  "strong"),
     "known-level-tbd":    ("warm",          "BLOCKED",   "ask the level before building anything",           "thin"),
     "never-spoke":        (None,            None,        None,                                               "none"),
+    # kit #43 item 2: connected on LinkedIn and exchanged pleasantries, but no real relationship.
+    # A LABEL, not a score — never-spoke's tuple BYTE FOR BYTE, so it is honestly named rather than
+    # silently folded into "never-spoke" on the human's screen. rung_for()'s never-spoke short
+    # circuit below is widened to match, so the two resolve identically end to end.
+    "linkedin-acquaintance": (None,         None,        None,                                               "none"),
 }
 
 # Informal spellings a human answer might use. Handled as code aliases rather than data edits:
@@ -454,7 +459,7 @@ def rung_for(row, category, today=None):
 
     tier = row.get("closeness")
     tier = TIER_ALIASES.get(tier, tier)
-    if tier == "never-spoke" or tier is None:
+    if tier in ("never-spoke", "linkedin-acquaintance") or tier is None:
         return _cold(category) + (0.0, uncertainty(row))
 
     spec = TIERS.get(tier)

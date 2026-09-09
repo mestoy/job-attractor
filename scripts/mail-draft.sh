@@ -15,7 +15,7 @@ eval "$(python3 "$HERE/kit_config.py" --sh 2>/dev/null || true)"
 KIT_OWNER_NAME="${KIT_OWNER_NAME:-Your Name}"
 KIT_RESUME_EXAMPLE="${KIT_RESUME_EXAMPLE:-$KIT_OWNER_NAME - Resume - <Company>.pdf}"
 KIT_RULES_DOC="${KIT_RULES_DOC:-documents/WORKFLOW-RULES.md}"
-TO="" BCC="" SUBJECT="" BODYFILE="" ATTACH="" FORCE="" PRAISE_SOURCE="" LACIVITA_CHECK="" PANEL_CHECK="" RESUME_PANEL_CHECK="" PRAISE_PHRASING="" COMPANY="" SEGMENT="" WARM_RUNG="" RUNG="" RUNG_EXPLICIT="" TARGETS="" POST_CONTACT="" NO_RESUME="" MTYPE="outreach" BOSS="" NAME=""
+TO="" BCC="" SUBJECT="" BODYFILE="" ATTACH="" FORCE="" PRAISE_SOURCE="" LACIVITA_CHECK="" PANEL_CHECK="" RESUME_PANEL_CHECK="" PRAISE_PHRASING="" COMPANY="" SEGMENT="" WARM_RUNG="" RUNG="" RUNG_EXPLICIT="" TARGETS="" POST_CONTACT="" NO_RESUME="" MTYPE="outreach" BOSS="" NAME="" NEXT_TARGET=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --to) TO="$2"; shift 2;;
@@ -37,6 +37,9 @@ while [ $# -gt 0 ]; do
                                                       # people-ranker dedups on. Without it a send stays invisible to that dedup
                                                       # and the person is re-offered as uncontacted.
     --targets) TARGETS="$2"; shift 2;;                # warm/referred: comma-separated companies NAMED in the ask (dedup'd instead of --company)
+    --next-target) NEXT_TARGET="1"; shift;;           # PERSON PIVOT (Andy's fallback sequence): a DIFFERENT person at a company
+                                                      # already contacted, allowed only past ~a 7-day wait; the same TO
+                                                      # address must not itself already be a prior contact
     --no-resume) NO_RESUME="1"; shift;;               # explicit opt-out of the mandatory résumé attachment
     --force) FORCE="1"; shift;;
     *) echo "unknown arg: $1" >&2; exit 2;;
@@ -145,8 +148,50 @@ if [ -z "$FORCE" ]; then
       # --send-gate: only block on BLOCKED-list / SENT / CONTACTED / correspondence stores — NOT the
       # construction records (decision-log, queues) where the in-flight build is expected to appear.
       python3 "$HERE/check_dup.py" --send-gate "$COMPANY" >/tmp/.md_dup.$$ 2>&1; _dc=$?
-      if [ "$_dc" = "1" ]; then
+      if [ "$_dc" = "1" ] && [ -n "$NEXT_TARGET" ]; then
+        # PERSON PIVOT (Andy's fallback sequence): "Pick the one most likely the direct boss and
+        # try that person first. Give them a week or so… If not, then target someone else." The
+        # dedup above blocks ANY already-contacted company, which INVERTS that fallback — a gate
+        # written to prevent re-pitching was blocking the method's own next step. --next-target
+        # allows it, but only past roughly a 7-day wait, and only if this exact PERSON has not
+        # been contacted.
+        # A STAGED/discarded/SENDLOG-marker row is this pipeline's own draft plumbing, not a
+        # delivered contact — excluded so a restage of the SAME person never reads as a pivot.
+        if grep -iF -- "$TO" "$(cd "$HERE/.." && pwd)/outreach_log.md" 2>/dev/null | grep -viE 'STAGED|discarded|SENDLOG v1' | grep -q .; then
+          echo "⛔ BLOCKED: $TO has already been contacted. --next-target is for a DIFFERENT person at that company, never a re-pitch of the same one." >&2
+          rm -f /tmp/.md_dup.$$; exit 4
+        fi
+        # THE 7-DAY WAIT, ENFORCED (was advisory-only). Most recent DELIVERED prior send to this
+        # company: send-log.jsonl status "sent", else an outreach_log SENT header if the send log
+        # has no row. Block the pivot if that date is under 7 days old.
+        _nt_wait="$(python3 - "$COMPANY" "$(cd "$HERE/.." && pwd)" <<'PYWAIT'
+import sys, json, re, os, datetime as dt
+co, root = sys.argv[1], sys.argv[2]
+canon = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())
+best = None
+for ln in open(os.path.join(root, "documents/send-log.jsonl"), encoding="utf-8", errors="ignore") if os.path.isfile(root + "/documents/send-log.jsonl") else []:
+    r = json.loads(ln) if ln.strip() else {}
+    if isinstance(r, dict) and r.get("status") == "sent" and canon(r.get("company", "")) == canon(co):
+        d = dt.date.fromisoformat(r["date"]); best = d if not best or d > best else best
+if best is None and os.path.isfile(root + "/outreach_log.md"):
+    text = open(root + "/outreach_log.md", encoding="utf-8", errors="ignore").read()
+    for m in re.finditer(r"^## (\d{4}-\d{2}-\d{2}) · ([^\n]*)\n((?:(?!^## ).)*)", text, re.M | re.S):
+        if canon(co) in canon(m.group(2)) and re.search(r"\bsent\b", m.group(2) + m.group(3), re.I):
+            d = dt.date.fromisoformat(m.group(1)); best = d if not best or d > best else best
+days = (dt.date.today() - best).days if best else 999
+print(f"{'BLOCK' if days < 7 else 'OK'} {best.isoformat() if best else '-'} {days}")
+PYWAIT
+)"
+        set -- $_nt_wait
+        if [ "$1" = BLOCK ]; then
+          echo "⛔ --next-target: '$COMPANY' was contacted $2, $3 days ago; Andy's person pivot waits about a week. Nothing staged." >&2
+          rm -f /tmp/.md_dup.$$; exit 4
+        fi
+        echo "   ↪ --next-target: '$COMPANY' already contacted; proceeding to the NEXT target type (Andy's fallback sequence)." >&2
+        echo "     Prior delivered send: $2, $3 days ago." >&2
+      elif [ "$_dc" = "1" ]; then
         echo "⛔ BLOCKED: check_dup returned 🔴 for '$COMPANY' (blocked-list or strong duplicate). Do NOT send." >&2
+        echo "   If this is Andy's FALLBACK SEQUENCE (a different person at a company already contacted, after ~a week), pass --next-target." >&2
         grep -iE "VERDICT|BLOCKED|already|declined" /tmp/.md_dup.$$ | head -3 >&2; rm -f /tmp/.md_dup.$$; exit 4
       fi
       [ "$_dc" = "3" ] && { echo "⚠️  check_dup 🟡 possible-dup for '$COMPANY' — confirm it's genuinely new before sending:" >&2; grep -iE "VERDICT|possible" /tmp/.md_dup.$$ | head -2 >&2; }
@@ -511,7 +556,8 @@ if [ -z "$FORCE" ] && [ -n "$COMPANY" ] && [ -z "$WARM_RUNG" ] && [ -z "$POST_CO
 import sys, re
 sys.path.insert(0, sys.argv[1])
 try:
-    from check_preview import _build_rulings
+    from check_preview import _build_rulings, _unscoped_build_row
+    from record_decision import BUILD_EXACT
 except Exception:
     sys.exit(0)          # fail-open only on an import break, never on a missing ruling
 co = sys.argv[2].strip().lower()
@@ -526,7 +572,17 @@ def _bounded(needle, hay):
     return re.search(r"(?<![a-z0-9])" + re.escape(needle) + r"(?![a-z0-9])", hay) is not None
 
 if not rulings or not any(_bounded(r, co) or _bounded(co, r) for r in rulings):
+    # kit #54 fix 1: state the RULE, not just the verdict.
     print(f"⛔ BUILD GATE: no valid BUILD ruling recorded for '{sys.argv[2]}'.", file=sys.stderr)
+    print(f"   RULE: the answer must be a BUILD_EXACT label ({', '.join(sorted(BUILD_EXACT))}) "
+          "and the company must appear in the QUESTION text of the picker that carried it.",
+          file=sys.stderr)
+    # kit #54 fix 3: a signed-but-unscoped row is a DIFFERENT state from no row at all.
+    unscoped = _unscoped_build_row(sys.argv[2])
+    if unscoped:
+        q = str(unscoped.get("question", ""))[:80]
+        print(f"   A BUILD ruling exists but is unscoped to '{sys.argv[2]}'; its question read: "
+              f"'{q}'.", file=sys.stderr)
     print("   workflow-checklist: present the Boss Match Scorecard and get an explicit", file=sys.stderr)
     print("   build/skip ruling BEFORE building or sending. A short go-ahead is not a ruling.", file=sys.stderr)
     sys.exit(1)
@@ -649,6 +705,19 @@ t = rr.text_layer(sys.argv[2])
 print(rr.artifact_hash(t) if t is not None else "")
 PYRP
 )"
+  # ⛔ COMPANY-KEYED RECEIPT (kit item 13 / private-repo ee1aec0b, 2026-09-09). Two companies
+  # reviewing the same text-layer sha now get two receipt files, not one shared file the second
+  # `--record` silently erases. The slug matches review_resume.py's slugify() exactly (same python
+  # fn), so the exact company-keyed file is preferred; a bare legacy sha.json still passes when no
+  # company-keyed file exists yet, and a DIFFERENT company's file for this sha is never accepted —
+  # a known company with no matching file stays a miss, never a glob to whatever happens to exist.
+  _RP_SLUG="$(python3 - "$HERE" "$_QA_CO" <<'PYRPS' 2>/dev/null
+import sys
+sys.path.insert(0, sys.argv[1])
+import review_resume as rr
+print(rr.slugify(sys.argv[2]))
+PYRPS
+)"
   if [ -z "$_RP_SHA" ]; then
     # ⚠️ FAILS OPEN, AND SAYS SO. An attachment whose text layer cannot be read (a scanned PDF, no
     # pdftotext installed) is not evidence of a skipped review, and blocking a send on a missing
@@ -657,7 +726,21 @@ PYRP
     echo "       could not be checked. Recorded as unreadable, NOT as reviewed." >&2
     RESUME_PANEL_STATE="unreadable"
   else
-    _RP_FILE="$_RP_DIR/${_RP_SHA}.json"
+    # ⛔ NEVER FALL BACK TO ANOTHER COMPANY'S FILE. When --company is known, only its exact
+    # company-keyed receipt or the company-less legacy bare file count as a pass — a glob that
+    # picked up whichever company-keyed file happened to exist would let a DIFFERENT company's
+    # review authorize THIS send, which is the collision this fix exists to close, not reopen.
+    # $_RP_SLUG empty (no company resolved) is the one case a bare-sha glob is safe.
+    if [ -n "$_RP_SLUG" ] && [ -f "$_RP_DIR/${_RP_SHA}-${_RP_SLUG}.json" ]; then
+      _RP_FILE="$_RP_DIR/${_RP_SHA}-${_RP_SLUG}.json"
+    elif [ -f "$_RP_DIR/${_RP_SHA}.json" ]; then
+      _RP_FILE="$_RP_DIR/${_RP_SHA}.json"
+    elif [ -z "$_RP_SLUG" ]; then
+      _RP_FILE="$(ls "$_RP_DIR/${_RP_SHA}"-*.json 2>/dev/null | head -1)"
+      [ -z "$_RP_FILE" ] && _RP_FILE="$_RP_DIR/${_RP_SHA}.json"
+    else
+      _RP_FILE="$_RP_DIR/${_RP_SHA}-${_RP_SLUG}.json"   # known company, no match — stays missing
+    fi
     if [ -n "$FORCE" ] && [ ! -f "$_RP_FILE" ]; then
       RESUME_PANEL_STATE="forced"
       echo "   ⚠️  résumé panel BYPASSED by --force. Recorded as resume_panel:forced in the send log." >&2

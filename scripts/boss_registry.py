@@ -39,6 +39,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import state  # noqa: E402  (path must be set first)
+import check_dup  # noqa: E402  (dedup-at-card-build: prior_contact() before a fresh row is written)
 
 # ── vocabularies. An unknown value is REFUSED loudly, never coerced to a default ──────────────
 VERDICTS = ("candidate", "finalist", "ruled-out", "contacted")
@@ -149,6 +150,45 @@ def _company_matches(want, got):
     return re.search(r"(?<![a-z0-9])" + re.escape(a) + r"(?![a-z0-9])", b) is not None
 
 
+# `check_dup.sendlog_hits()`'s own excerpt shape: "<date> · <company> · to <to> · rung <rung> ·
+# status <status>". Parsed here rather than re-reading send-log.jsonl a second time, so this file
+# stays a consumer of check_dup's one dedup signal instead of a second implementation of it.
+_SENDLOG_EXCERPT = re.compile(
+    r"^(?P<date>\S+)\s*·\s*(?P<company>[^·]*)·\s*to\s+(?P<to>[^·]*)·\s*rung\s+(?P<rung>[^·]*)"
+    r"·\s*status\s+(?P<status>.+)$")
+
+
+def _prior_contact_lines(pc):
+    """One '<date> <to> <status>' string per prior_contact() hit, for the ⚠️ PRIOR CONTACT print
+    and the row's `prior_contact` field. A send-log hit parses to real date/recipient/status; a
+    hit from one of the other SEND_GATE_STORES (blocked list, outreach_log, tracker,
+    correspondence-log) has no such structured shape, so it falls back to naming the store."""
+    out = []
+    for hit in pc["strong"] + pc["weak"]:
+        m = _SENDLOG_EXCERPT.match(hit["text"]) if hit["store"] == check_dup.SENDLOG else None
+        if m:
+            out.append(f"{m.group('date')} {m.group('to').strip()} {m.group('status').strip()}")
+        else:
+            out.append(f"{hit['store']} L{hit['line']} {hit['status']}")
+    return out
+
+
+def _same_person_delivered(pc, person):
+    """True iff a STRONG send-log hit delivered to THIS person (normalized). Only a delivered
+    send to the same person is a block; a different person, or an undelivered send (staged,
+    bounced, failed), is a warn-and-record, not a refusal."""
+    want = check_dup.norm(person)
+    for hit in pc["strong"]:
+        if hit["store"] != check_dup.SENDLOG:
+            continue
+        m = _SENDLOG_EXCERPT.match(hit["text"])
+        if not m:
+            continue
+        if check_dup.norm(m.group("to").strip()) == want and want:
+            return True
+    return False
+
+
 def cmd_add(a):
     for field, vocab in (("verdict", VERDICTS), ("boss_read", BOSS_READS),
                          ("verified", VERIFIED), ("role_status", ROLE_STATUS)):
@@ -171,6 +211,28 @@ def cmd_add(a):
         print("   Press coverage and aggregators are secondhand and have been wrong here before.", file=sys.stderr)
         print("   Record this person as 'candidate' instead, then verify and re-add.", file=sys.stderr)
         return 4
+
+    # ⛔ DEDUP AT CARD BUILD (kit, 09-08 Outmarket/Gradient AI block). Ask the same question the
+    # send gate asks, HERE, before a fresh row (and everything built on top of it) exists at all.
+    # Same person already DELIVERED: refuse, unless the caller explicitly says this is a deliberate
+    # next target (--next-target-ok — a different concern from #72's --next-target on
+    # mail-draft.sh, this one gates the REGISTRY row, not the send). A different person at an
+    # already-contacted company, or an undelivered prior send: warn and record, never block —
+    # a fallback boss after a bounce or a silence window is legitimate.
+    prior_contact_field = None
+    pc = check_dup.prior_contact(a.company)
+    if pc["verdict"] in ("red", "yellow"):
+        lines = _prior_contact_lines(pc)
+        for ln in lines:
+            print(f"⚠️  PRIOR CONTACT {ln}")
+        prior_contact_field = {"verdict": pc["verdict"], "hits": lines}
+        if _same_person_delivered(pc, a.person) and not a.next_target_ok:
+            print(f"⛔ BLOCKED: {a.person} at {a.company} already shows a DELIVERED prior contact "
+                  "above.", file=sys.stderr)
+            print("   Pass --next-target-ok if this is a deliberate re-add of the same person "
+                  "(e.g. a corrected record), or add a DIFFERENT person as the next target.",
+                  file=sys.stderr)
+            return 4
 
     # ⛔ KEY ON THE PERSON, because that is what the READER looks up (2026-07-30).
     # This used to be `a.linkedin or f"{a.company}/{a.person}"`, while `check()` has always used
@@ -221,6 +283,7 @@ def cmd_add(a):
         "verified": a.verified,
         "role_status": a.role_status,
         "source_urls": [u for u in (a.source_url or []) if u],
+        "prior_contact": prior_contact_field,
     }
     if a.dry_run:
         print(json.dumps(row, indent=2, ensure_ascii=False))
@@ -314,6 +377,9 @@ def main(argv=None):
     p.add_argument("--source-url", action="append", default=[])
     p.add_argument("--date", default="")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--next-target-ok", dest="next_target_ok", action="store_true",
+                    help="allow this add even though the SAME person shows a delivered prior "
+                         "contact (dedup-at-card-build gate)")
     p.set_defaults(fn=cmd_add)
 
     p = sub.add_parser("show", help="latest row per person, with provenance")

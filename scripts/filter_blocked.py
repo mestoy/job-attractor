@@ -26,7 +26,26 @@ live-role, ownership) — this closes only the blocked-list hole, which is step 
 import sys, os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from check_dup import blocked_key_hit, _blocked_entry_lines
+from check_dup import blocked_key_hit, _blocked_entry_lines, prior_contact, SENDLOG
+
+
+# `check_dup.sendlog_hits()`'s own excerpt shape: "<date> · <company> · to <to> · rung <rung> ·
+# status <status>". Parsed here, not re-read from send-log.jsonl, so this stays a consumer of
+# check_dup's one dedup signal (dedup-at-card-build, kit 09-08 Outmarket/Gradient AI block).
+import re
+_SENDLOG_EXCERPT = re.compile(
+    r"^(?P<date>\S+)\s*·\s*(?P<company>[^·]*)·\s*to\s+(?P<to>[^·]*)·\s*rung\s+(?P<rung>[^·]*)"
+    r"·\s*status\s+(?P<status>.+)$")
+
+
+def _contacted_line(pc):
+    """'<date> <person> <status>' for the first hit, sendlog parsed structurally; a hit from
+    another SEND_GATE_STORE falls back to naming the store since it carries no such fields."""
+    hit = (pc["strong"] + pc["weak"])[0]
+    m = _SENDLOG_EXCERPT.match(hit["text"]) if hit["store"] == SENDLOG else None
+    if m:
+        return f"{m.group('date')} {m.group('to').strip()} {m.group('status').strip()}"
+    return f"{hit['store']} L{hit['line']} {hit['status']}"
 
 
 def classify(name: str):
@@ -63,6 +82,17 @@ def main():
             print(f"⚠️  ERROR    {n}  ->  {detail}")
         else:
             print(f"✅ CLEAN    {n}")
+
+        # DEDUP AT CARD BUILD (kit, 09-08 Outmarket/Gradient AI block). The blocked-list check
+        # above answers "is this company off-limits"; this answers "has anyone here already been
+        # contacted" — a different question, and a card built with no note of it is exactly how a
+        # full build (beat 1/2, offer list, ask, close, subject, all staged) reached the send gate
+        # before the prior contact surfaced. Runs for every name, blocked or not, so a card never
+        # reaches a picker without this fact visible; it never changes this tool's exit code —
+        # the send gate (mail-draft.sh) stays the last line of defense on the block itself.
+        pc = prior_contact(n)
+        if pc["verdict"] in ("red", "yellow"):
+            print(f"CONTACTED: {_contacted_line(pc)}")
 
     if any_error:
         return 2

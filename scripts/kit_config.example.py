@@ -755,3 +755,13 @@ RUN_WALL_CLOCK_SECONDS = 720      # shell timeout per run (12 min)
 MAX_COMPANIES_PER_SWEEP = 8       # record_finding refuses beyond this per day
 DAILY_TOKEN_BUDGET = 500_000      # summed from the ledger; a run over it aborts
 DAILY_AGENT_BUDGET = 10           # same
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. WORK-SAMPLE TIMER — scripts/sample_timer.py's default log location. A take-home work
+#    sample usually names an honesty cap ("finish within N hours"); this script timestamps
+#    section starts/stops to a JSONL log so the reported time is measured, not estimated.
+#    Override per-sample with its own --log flag; this default just keeps one uncommitted
+#    JSONL file per sample under documents/applications/, which is git-ignored like the rest
+#    of documents/.
+# ─────────────────────────────────────────────────────────────────────────────
+WORK_SAMPLE_DIR = _env("JOBKIT_WORK_SAMPLE_DIR", "documents/applications/work-sample")
