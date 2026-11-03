@@ -1,0 +1,71 @@
+# --- YOUR PERSONAL DATA — never committed or pushed ---
+# Your filled-in profile, blocked list, outreach log, metrics, résumés, tracker.
+# Templates live in partner-docs/ (tracked); the installer copies them here.
+# documents/* (not documents/) so the negation below can re-include one file -- git cannot
+# re-include a path whose PARENT DIRECTORY itself is excluded, only a path excluded by a
+# same-level pattern.
+documents/*
+# ...except this one: a TRACKED example (obviously-fake content, never a real record) for
+# scripts/build_app_feed.py's build_voice() -- copy-to documents/writing-samples.md to try it.
+!documents/writing-samples.example.md
+
+# --- YOUR filled-in config — seeded from scripts/kit_config.example.py by install.sh ---
+# Kept OUT of git on purpose: /setup tells you to fill this in, and a TRACKED file you were
+# told to edit makes `git pull --ff-only` abort on every future update.
+scripts/kit_config.py
+
+# --- build / OS junk ---
+node_modules/
+**/node_modules/
+*.log
+*.aux
+*.out
+*.tmp
+bun.lockb
+.DS_Store
+
+# --- compiled Python, regenerated on every import ---
+# 138 of these were tracked before 2026-09-12. A .pyc regenerates the moment its module is
+# imported, so running the test suite alone dirtied the tree and blocked a history rewrite with
+# a confusing message about a file nobody had edited. They also drown git status in noise, which
+# invites filtering it out and then reading the filtered view as a clean tree.
+__pycache__/
+*.pyc
+
+# --- local dev environment — never shipped, carries a home path and local contact names ---
+.devcontainer/
+.claude/settings.local.json
+
+# --- YOUR live enforcement wiring — created by /setup from .claude/settings.example.json ---
+# install.sh's own comment on this file: "git never manages it." True in intent, not yet in
+# .gitignore, which is the exact gap that took kit_config.py out of tracking above: a TRACKED
+# file the installer refreshes in place makes `git pull --ff-only` abort. Added 2026-09-12
+# after checking every local-settings-shaped path an install creates, alongside issue 125.
+.claude/settings.json
+
+# Files the PARTNER edits. Tracking any of these recreates the defect that took kit_config.py out of
+# tracking: git refuses to overwrite a locally-modified tracked file, so `git pull --ff-only` aborts
+# on every future update and the updater misreports it as a network problem. Added 2026-08-03 after
+# a `git add -A` was about to track all four.
+job_search_tracker.csv
+outreach_log.md
+prospect_queue.md
+bun.lock
+
+# Built app page: generated from the LIVE feed, carries real contacts.
+# pii_gate returns 24 blocking findings on it. Never track build output.
+app/design/job-attractor-app.html
+
+# rendered activity pages are build output, never source
+activities/out/
+
+# --- private test denylist: real names the kit tests check for, never committed ---
+tests/.private-denylist.txt
+
+# per-run test temp dirs (tests/run_all.sh), never committed
+.test-tmp/
+
+# Send prefill: notes /app prepares for the page, and the prep Claude Code saves for them.
+# Per-card, per-person, never tracked (app/design/draft_schema.md).
+documents/state/app-drafts/
+documents/state/app-prep/

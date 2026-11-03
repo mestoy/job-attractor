@@ -1,0 +1,7 @@
+{"kind": "contact", "key": "fake-person-1", "payload": {"name": "Fake Person One", "company": "Example Co (FAKE)"}}
+{"kind": "contact", "key": "fake-person-2", "payload": {"name": "Fake Person Two", "company": "Example Co (FAKE)"}}
+{"kind": "contact", "key": "fake-person-3", "payload": {"name": "Fake Person Five", "company": "Example Co (FAKE)"}}
+{"kind": "contact", "key": "fake-person-4", "payload": {"name": "Fake Person Six", "company": "Example Co (FAKE)"}}
+{"kind": "contact", "key": "fake-person-5", "payload": {"name": "Fake Person Seven", "company": "Example Co (FAKE)"}}
+{"kind": "contact", "key": "fake-person-6", "payload": {"name": "Fake Person Eleven", "company": "Example Co (FAKE)"}}
+{"kind": "contact", "key": "fake-person-7", "payload": {"name": "Fake Person Twelve", "company": "Example Co (FAKE)"}}

@@ -1,0 +1,427 @@
+{
+ "_about": "BUG-590: ONE list of asset links, read by the Python test (build.asset_ok) AND the browser test (JA_FILES.open). Both must agree on every entry. Add a case here, never inline in a test.",
+ "accept": [
+  "0123456789abcdef0123456789abcdef",
+  "0123456789ABCDEF0123456789ABCDEF",
+  "ffffffffffffffffffffffffffffffff",
+  "https://example.invalid/resume.pdf",
+  "https://assets.example.invalid/a/b?c=d&e=f",
+  "https://example.com/resume.pdf",
+  "https://assets.example.net/x/y?z=1",
+  "https://example.com:8443/a/b?x=1#frag",
+  "https://sub.example.co.uk/x.pdf",
+  "https://1.2.3.4/x",
+  "https://example.com",
+  "https://example.com?x=1",
+  "https://example.com/a%20b",
+  "https://example.com/caf\u00e9",
+  "https://xn--bcher-kva.example/x",
+  "https://example.com:1/x",
+  "https://example.com:65535/x",
+  "https://example.com:08080/x",
+  "https://a-b.example/x",
+  "https://EXAMPLE.COM/X",
+  "https://example.com/a\u0350b",
+  "https://example.com/a\u061db",
+  "https://example.com/\udb40\udc80",
+  "https://example.com/\u2070"
+ ],
+ "refuse": [
+  {
+   "value": "javascript:alert(1)",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "JaVaScRiPt:alert(1)",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": " javascript:alert(1)",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "data:text/html;base64,PHNjcmlwdD4=",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "file:///etc/passwd",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "//evil.example/x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "/_blob/abc",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "../x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "abc",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": " ",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "0123456789abcdef0123456789abcde",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "0123456789abcdef0123456789abcdef0",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "0123456789abcdef0123456789abcdef\n",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "\n0123456789abcdef0123456789abcdef",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "0123456789abcdef0123456789abcdeg",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "http://example.invalid/x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https:",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https:/example.invalid",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "HTTPS://example.invalid/x ",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://example.invalid/x y",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://example.invalid/\"onload=\"x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://example.invalid/<script>",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "ftp://example.invalid/x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "blob:https://example.invalid/1",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "vbscript:x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https:///x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://:80/x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://?x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://#x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "javascript:https://example.invalid",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://example.invalid/\u2028x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://user:pw@example.invalid/x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "javascript:window.__pwned=1",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "data:text/html,<b>x</b>",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "//evil.example/x.pdf",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "/relative/path.pdf",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "resume.pdf",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "gggggggggggggggggggggggggggggggg",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "http://example.com/x.pdf",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": " https://example.com/x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "ftp://example.com/x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://user:pw@evil.example/x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://user@evil.example/x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://@evil.example/x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://h.example/x y\"z",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://h.example/x y",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://h.example/x'y",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://h.example/<b>",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://h.example/x>y",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://h.example/x\\y",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://h.example/x`y",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://h.example/x\ty",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://h.example/x\ny",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://h.example/x\u2028y",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://h.example/x\u2029y",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://h.example/x\u0085y",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://h.example/x\u007fy",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://exa mple.com/x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://?q=1",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://#frag",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://evil.example@good.example/x",
+   "why": "BUG-581: not a 32-hex id or a plain https address"
+  },
+  {
+   "value": "https://example.com/a\u00a0b",
+   "why": "BUG-590: no-break space (JS used to accept)"
+  },
+  {
+   "value": "https://example.com/a\u3000b",
+   "why": "BUG-590: ideographic space (JS used to accept)"
+  },
+  {
+   "value": "https://example.com/a\u2003b",
+   "why": "BUG-590: em space (JS used to accept)"
+  },
+  {
+   "value": "https://example.com/a\u2009b",
+   "why": "BUG-590: thin space"
+  },
+  {
+   "value": "https://example.com/a\u202fb",
+   "why": "BUG-590: narrow no-break space"
+  },
+  {
+   "value": "https://example.com/a\u1680b",
+   "why": "BUG-590: ogham space mark"
+  },
+  {
+   "value": "https://exam\u202eple.com/x",
+   "why": "BUG-590: bidi override inside the host (Python used to accept)"
+  },
+  {
+   "value": "https://example.com/\u202e",
+   "why": "BUG-590: bidi override in the path"
+  },
+  {
+   "value": "https://example.com/\u2066x\u2069",
+   "why": "BUG-590: bidi isolates"
+  },
+  {
+   "value": "https://example.com/\u200fx",
+   "why": "BUG-590: right-to-left mark"
+  },
+  {
+   "value": "https://exam\u200bple.com/x",
+   "why": "BUG-590: zero-width space in the host"
+  },
+  {
+   "value": "https://example.com/\u2060x",
+   "why": "BUG-590: word joiner"
+  },
+  {
+   "value": "https://example.com/\ufeffx",
+   "why": "BUG-590: byte order mark"
+  },
+  {
+   "value": "https://example.com/\u00adx",
+   "why": "BUG-590: soft hyphen"
+  },
+  {
+   "value": "https://good.example%40evil.example/x",
+   "why": "BUG-590: percent-encoded @ in the host (Python used to accept)"
+  },
+  {
+   "value": "https://exa%6dple.com/x",
+   "why": "BUG-590: any % in the authority"
+  },
+  {
+   "value": "https://example.com:99999/x",
+   "why": "BUG-590: port out of range (Python used to accept)"
+  },
+  {
+   "value": "https://example.com:65536/x",
+   "why": "BUG-590: port 65536"
+  },
+  {
+   "value": "https://example.com:0/x",
+   "why": "BUG-590: port 0"
+  },
+  {
+   "value": "https://example.com:/x",
+   "why": "BUG-590: empty port"
+  },
+  {
+   "value": "https://example.com:8a/x",
+   "why": "BUG-590: non-numeric port"
+  },
+  {
+   "value": "https://example.com:123456/x",
+   "why": "BUG-590: six-digit port"
+  },
+  {
+   "value": "https://b\u00fccher.example/x",
+   "why": "BUG-590: a raw Unicode host (punycode passes, raw is refused)"
+  },
+  {
+   "value": "https://[::1]/x",
+   "why": "BUG-590: an IPv6 literal is not a plain hostname"
+  },
+  {
+   "value": "https://exa_mple.com/x",
+   "why": "BUG-590: underscore in the host"
+  },
+  {
+   "value": "https://example.com/a\u061cb",
+   "why": "BUG-590 R233: Arabic letter mark (invisible bidi control)"
+  },
+  {
+   "value": "https://example.com/a\u3164b",
+   "why": "BUG-590 R233: Hangul filler (renders blank)"
+  },
+  {
+   "value": "https://example.com/a\u115fb",
+   "why": "BUG-590 R233: Hangul choseong filler (renders blank)"
+  },
+  {
+   "value": "https://example.com/a\u034fb",
+   "why": "BUG-590 R233: combining grapheme joiner (invisible)"
+  },
+  {
+   "value": "https://example.com/a\u2065b",
+   "why": "BUG-590 R233: unassigned code point between the invisible operators and the isolates"
+  },
+  {
+   "value": "https://example.com/a\udb40\udc41b",
+   "why": "BUG-590 R233: tag block, tag Latin capital A (invisible)"
+  },
+  {
+   "value": "https://example.com/a\udb40\udc01b",
+   "why": "BUG-590 R233: tag block, language tag"
+  },
+  {
+   "value": "https://example.com/a\udb40\udc7fb",
+   "why": "BUG-590 R233: tag block, cancel tag (end of the block)"
+  },
+  {
+   "value": "https://exam\udb40\udc41ple.com/x",
+   "why": "BUG-590 R233: tag character inside the host"
+  },
+  {
+   "value": "https://example.com/\udb40\udc00",
+   "why": "BUG-590 R233: tag block, first code point"
+  }
+ ]
+}

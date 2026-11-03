@@ -1,0 +1,40 @@
+# The kit's regression suite. Actions minutes are a budget (Fable's CI/CD plan, 2026-09-21, adopted by the owner):
+#   - a push to main only, and only when something the suite tests changed (a documents-only push runs nothing);
+#   - one run per ref, a newer push cancels the older one;
+#   - a hard timeout on every job (the suite takes about a minute, so 10 is generous and a hang costs 10, not 360);
+#   - a browser job would run on manual dispatch only, never on a push. The kit has no browser tests today, so there is
+#     no such job; tests/test_ci_workflows.py (in the workspace repo) fails the day a kit test imports Playwright
+#     without a dispatch-only job for it.
+# ⚠️ Every path below must name a tracked file: a filter that matches nothing is silently inert and the mistake shows up as
+# a run that never happened. The same test checks that.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - 'tests/**'
+      - 'templates/**'
+      - 'install.sh'
+      - 'settings.example.json'
+      - '.github/workflows/tests.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - run: bash tests/run_all.sh

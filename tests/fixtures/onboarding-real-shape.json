@@ -1,0 +1,209 @@
+{
+ "_note": "captured from a real onboarding walk of the page (APP_HOME=local) on 2026-10-03; fake values; the allowlist is derived from this, not invented",
+ "onboarding_finish": {
+  "phase": "onboard",
+  "kind": "autosave",
+  "screen": 7,
+  "answers": {
+   "who": {
+    "name": "Pat Example",
+    "one_line": "Pat Example",
+    "email": {
+     "saved_to": "kit_config"
+    },
+    "phone": {
+     "saved_to": "kit_config"
+    },
+    "site": "https://example.invalid",
+    "resume": {
+     "kind": "paste",
+     "value": {
+      "saved_to": "resume file",
+      "file": "pasted-resume-2026-10-03T19-21-02.109Z.txt"
+     }
+    }
+   },
+   "level": "full",
+   "want": {
+    "segments": [
+     "payments-and-money-movement",
+     "applied-ai",
+     "ai-enablement-and-product-operations",
+     "regulated-workflow-modernization",
+     "govtech-and-civic-modernization"
+    ],
+    "segment_defs": [
+     {
+      "slug": "payments-and-money-movement",
+      "label": "Payments and money movement",
+      "titles": [
+       "product manager payments"
+      ],
+      "was": "payments",
+      "keep": true
+     },
+     {
+      "slug": "applied-ai",
+      "label": "Applied AI",
+      "titles": [
+       "ai product manager"
+      ],
+      "was": "applied-ai",
+      "keep": true
+     },
+     {
+      "slug": "ai-enablement-and-product-operations",
+      "label": "AI enablement and product operations",
+      "titles": [
+       "product operations lead"
+      ],
+      "was": "ai-enablement",
+      "keep": true
+     },
+     {
+      "slug": "regulated-workflow-modernization",
+      "label": "Regulated workflow modernization",
+      "titles": [
+       "product manager compliance"
+      ],
+      "was": "regulated-workflow",
+      "keep": true
+     },
+     {
+      "slug": "govtech-and-civic-modernization",
+      "label": "Govtech and civic modernization",
+      "titles": [
+       "product manager public sector"
+      ],
+      "was": "govtech",
+      "keep": true
+     }
+    ],
+    "target_level": "senior-to-staff"
+   },
+   "hard_lines": {
+    "remote_only": "Remote only",
+    "industry_vetoes": "None yet",
+    "ownership": "Ask me first",
+    "politics": "Only when it is public",
+    "no_industry_vetoes": true
+   },
+   "record": {
+    "linkedin_export": "Pat Example",
+    "warm_count": null
+   },
+   "companies": [
+    "Pat Example",
+    "Pat Example",
+    "Pat Example"
+   ],
+   "refill_queued": false
+  },
+  "complete": true,
+  "at": "2026-10-03T19:21:09Z",
+  "person": "local"
+ },
+ "setup_complete": {
+  "phase": "onboard",
+  "kind": "setup-complete",
+  "answers": {
+   "who": {
+    "name": "Pat Example",
+    "one_line": "Pat Example",
+    "email": {
+     "saved_to": "kit_config"
+    },
+    "phone": {
+     "saved_to": "kit_config"
+    },
+    "site": "https://example.invalid",
+    "resume": {
+     "kind": "paste",
+     "value": {
+      "saved_to": "resume file",
+      "file": "pasted-resume-2026-10-03T19-21-02.109Z.txt"
+     }
+    }
+   },
+   "level": "full",
+   "want": {
+    "segments": [
+     "payments-and-money-movement",
+     "applied-ai",
+     "ai-enablement-and-product-operations",
+     "regulated-workflow-modernization",
+     "govtech-and-civic-modernization"
+    ],
+    "segment_defs": [
+     {
+      "slug": "payments-and-money-movement",
+      "label": "Payments and money movement",
+      "titles": [
+       "product manager payments"
+      ],
+      "was": "payments",
+      "keep": true
+     },
+     {
+      "slug": "applied-ai",
+      "label": "Applied AI",
+      "titles": [
+       "ai product manager"
+      ],
+      "was": "applied-ai",
+      "keep": true
+     },
+     {
+      "slug": "ai-enablement-and-product-operations",
+      "label": "AI enablement and product operations",
+      "titles": [
+       "product operations lead"
+      ],
+      "was": "ai-enablement",
+      "keep": true
+     },
+     {
+      "slug": "regulated-workflow-modernization",
+      "label": "Regulated workflow modernization",
+      "titles": [
+       "product manager compliance"
+      ],
+      "was": "regulated-workflow",
+      "keep": true
+     },
+     {
+      "slug": "govtech-and-civic-modernization",
+      "label": "Govtech and civic modernization",
+      "titles": [
+       "product manager public sector"
+      ],
+      "was": "govtech",
+      "keep": true
+     }
+    ],
+    "target_level": "senior-to-staff"
+   },
+   "hard_lines": {
+    "remote_only": "Remote only",
+    "industry_vetoes": "None yet",
+    "ownership": "Ask me first",
+    "politics": "Only when it is public",
+    "no_industry_vetoes": true
+   },
+   "record": {
+    "linkedin_export": "Pat Example",
+    "warm_count": null
+   },
+   "companies": [
+    "Pat Example",
+    "Pat Example",
+    "Pat Example"
+   ],
+   "refill_queued": false
+  },
+  "level": "full",
+  "complete": true,
+  "at": "2026-10-03T19:21:06Z",
+  "person": "local"
+ }
+}

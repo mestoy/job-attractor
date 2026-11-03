@@ -1,0 +1,1242 @@
+#!/bin/bash
+# Apple Mail draft builder — creates a VISIBLE draft (NEVER sends) with the résumé attached.
+# Auto-attach uses Mail's AppleScript API, NOT screen/computer-use control. You review the
+# draft and hit Send yourself; this script never sends.
+# Terminal-only (local osascript); the cloud session can't run this.
+#
+# Usage:
+#   scripts/mail-draft.sh --to "addr@x" [--bcc "a@x,b@x"] --subject "..." \
+#       --body-file /path/to/body.txt --attach "/path/to/Resume.pdf"
+#   (--bcc comma-separated, NO spaces. --attach optional. body-file is UTF-8 text.)
+#
+# kit #165: if --from is an Exchange/M365 address, Apple Mail syncs the new draft to the
+# server as well as keeping its own local copy, so you may see the SAME draft twice in
+# Drafts (same subject, same recipient, different message IDs). Both are the one draft this
+# script made; delete the extra copy before you send, and send only once.
+# kit #228: once Mail has made the draft this script always writes the staged row, and the row says
+# what is known about the attachment (verified, or not verified with the reason). A re-read Mail
+# refuses never turns a made draft into "nothing was recorded".
+set -uo pipefail
+HERE="$(dirname "$0")"
+# Owner-specific values (your name, the résumé filename convention) come from kit_config.py.
+# The ledger owner (slice J, proxy 527) is read ONLY from the INSTALL's own kit_config.py file: clear any inherited value first, so a config load
+# that fails (the `|| true`) cannot leave a parent shell's value standing. kit_config.py is install config, never person data: it stays on $HERE.
+unset KIT_LEDGER_OWNER_ROOT
+eval "$(python3 "$HERE/kit_config.py" --sh 2>/dev/null || true)"
+KIT_OWNER_NAME="${KIT_OWNER_NAME:-Your Name}"
+KIT_RESUME_EXAMPLE="${KIT_RESUME_EXAMPLE:-$KIT_OWNER_NAME - Resume - <Company>.pdf}"
+KIT_RULES_DOC="${KIT_RULES_DOC:-documents/WORKFLOW-RULES.md}"
+TO="" BCC="" FROM="" SUBJECT="" BODYFILE="" ATTACH="" FORCE="" PRAISE_SOURCE="" LACIVITA_CHECK="" PANEL_CHECK="" RESUME_PANEL_CHECK="" PRAISE_PHRASING="" COMPANY="" SEGMENT="" WARM_RUNG="" RUNG="" RUNG_EXPLICIT="" TARGETS="" POST_CONTACT="" NO_RESUME="" MTYPE="outreach" BOSS="" NAME="" NEXT_TARGET="" DRY_RUN="" REPO_FLAG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --to) TO="$2"; shift 2;;
+    --bcc) BCC="$2"; shift 2;;
+    --from) FROM="$2"; shift 2;;                      # BUG-254: which Mail account/address sends this draft; a
+                                                      # DEFAULT ACCOUNT SEND (unchanged behavior) when absent
+    --subject) SUBJECT="$2"; shift 2;;
+    --body-file) BODYFILE="$2"; shift 2;;
+    --attach) ATTACH="$2"; shift 2;;
+    --client) CLIENT="$2"; shift 2;;                  # where the draft goes: auto (default) | gmail | outlook | apple-mail | eml | copy
+    --company) COMPANY="$2"; shift 2;;               # REQUIRED: company name — re-checked against blocked-list/dedup at send
+    --praise-source) PRAISE_SOURCE="$2"; shift 2;;   # REQUIRED: cite the researched SPECIFIC boss accomplishment + source (Andy A2)
+    --praise-phrasing) PRAISE_PHRASING="$2"; shift 2;; # REQUIRED: the Stage-2 phrasing YOU PICKED — must appear verbatim in the body
+    --lacivita-check) LACIVITA_CHECK="$2"; shift 2;;  # REQUIRED: "pass" — the A1-A10 checklist was run+reported this email
+    --panel-check) PANEL_CHECK="$2"; shift 2;;
+    --resume-panel-check) RESUME_PANEL_CHECK="$2"; shift 2;;  # REQUIRED when a résumé is attached: you READ the résumé panel findings        # REQUIRED on every INITIAL rung: you READ the reviewer-panel findings for THIS body
+    --segment) SEGMENT="$2"; shift 2;;                # REQUIRED on cold sends: one of your SEGMENTS slugs (kit_config.SEGMENTS). Andy's hot-zone test.
+    --warm) WARM_RUNG="1"; shift;;                    # BACK-COMPAT alias for `--rung warm` (see the profile switch below)
+    --rung) RUNG="$2"; RUNG_EXPLICIT=1; shift 2;;     # cold-boss|cold-stranger|warm|referred|event|thank-you|reply|follow-up
+    --boss) BOSS="$2"; shift 2;;                      # REQUIRED on cold-boss: the person, checked against the boss registry
+    --name|--to-name) NAME="$2"; shift 2;;            # the RECIPIENT'S name — written to the send-log `to_name`, the field the
+                                                      # people-ranker dedups on. Without it a send stays invisible to that dedup
+                                                      # and the person is re-offered as uncontacted.
+    --targets) TARGETS="$2"; shift 2;;                # warm/referred: comma-separated companies NAMED in the ask (dedup'd instead of --company)
+    --next-target) NEXT_TARGET="1"; shift;;           # PERSON PIVOT (Andy's fallback sequence): a DIFFERENT person at a company
+                                                      # already contacted, allowed only past ~a 7-day wait; the same TO
+                                                      # address must not itself already be a prior contact
+    --no-resume) NO_RESUME="1"; shift;;               # explicit opt-out of the mandatory résumé attachment
+    --force) FORCE="1"; shift;;
+    --repo) REPO_FLAG="$2"; shift 2;;                 # slice J: the folder that holds the PERSON'S data (blocked list, send log, receipts, logs); see DATA_ROOT below
+    --dry-run) DRY_RUN="1"; shift;;                   # kit#227: run every gate and report the verdicts, WRITE NOTHING —
+                                                      # no draft (Apple Mail/eml/link/copy), no send-log row, no
+                                                      # outreach_log/correspondence-log touch. Same exit codes as a
+                                                      # real run for a gate failure (2/3/4/5/6); exits 0 on a clean pass.
+    *) echo "unknown arg: $1" >&2; exit 2;;
+  esac
+done
+
+# ── THE DATA ROOT (slice J, the data-root rule, proxy 514) ─────────────────────────────────────
+# Every path to the PERSON'S data (the blocked list, tracker, send log, outreach_log.md, the correspondence log, the panel receipts,
+# the bounce list) is built from DATA_ROOT, resolved ONCE: --repo, else JOBSEARCH_DATA_ROOT, else CLAUDE_PROJECT_DIR, else the folder above this script.
+# kit_config.py is install config and stays on $HERE (it is read above). Scripts that are imported (sys.path) keep $HERE too.
+# JOBSEARCH_DATA_ROOT is exported to the child scripts ONLY when the caller set it (--repo or the variable itself): the CLAUDE_PROJECT_DIR
+# fallback never becomes an export, so in a plain CLI session every imported module resolves as it always did (kit #121, #156).
+# When the caller names a root, CLAUDE_PROJECT_DIR follows it too, the way serve.py sets both: check_dup reads JOBSEARCH_DATA_ROOT, but the blocked-list
+# key check (screen_sweep) and the boss registry (state.py) read CLAUDE_PROJECT_DIR, and the two must agree or one gate reads the install's list.
+# check_dup --send-gate also refuses a root that is not its own install unless JOBSEARCH_TEST=1; the app sets that for its stage (feed_install does the same).
+if [ -n "$REPO_FLAG" ]; then
+  [ -d "$REPO_FLAG" ] || { echo "--repo is not a folder: $REPO_FLAG" >&2; exit 2; }
+  DATA_ROOT="$(cd "$REPO_FLAG" && pwd)"
+  export JOBSEARCH_DATA_ROOT="$DATA_ROOT" CLAUDE_PROJECT_DIR="$DATA_ROOT"
+elif [ -n "${JOBSEARCH_DATA_ROOT:-}" ]; then
+  DATA_ROOT="$(cd "$JOBSEARCH_DATA_ROOT" 2>/dev/null && pwd)" || { echo "JOBSEARCH_DATA_ROOT is not a folder: $JOBSEARCH_DATA_ROOT" >&2; exit 2; }
+  export JOBSEARCH_DATA_ROOT="$DATA_ROOT" CLAUDE_PROJECT_DIR="$DATA_ROOT"
+elif [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "$CLAUDE_PROJECT_DIR" ]; then
+  DATA_ROOT="$(cd "$CLAUDE_PROJECT_DIR" && pwd)"
+else
+  DATA_ROOT="$(cd "$HERE/.." && pwd)"
+fi
+
+# ── WHICH scripts/ READS THE DECISION LEDGER (slice J, proxy 527) ─────────────────────────────
+# The ledger stays with the INSTALL (kit #121). _LEDGER_SCRIPTS is the install's own scripts/ ($HERE) unless the install's kit_config.py FILE
+# names a ledger owner (LEDGER_OWNER_ROOT, file-only, never an environment value) AND that owner is the very root this stage runs on
+# (same resolved path), AND no part of the configured path, DATA_ROOT or the owner's scripts/ is a symlink, AND check_preview.py and
+# record_decision.py are regular files there. Anything else falls back to $HERE: existence is not trust, a planted copy is never imported.
+_LEDGER_SCRIPTS="$HERE"
+if [ -n "${KIT_LEDGER_OWNER_ROOT:-}" ]; then
+  _LO="$(python3 - "$KIT_LEDGER_OWNER_ROOT" "$DATA_ROOT" <<'PYOWNER' 2>/dev/null
+import os, sys
+owner, root = sys.argv[1], sys.argv[2]
+def chain_ok(p):
+    p = os.path.abspath(p)
+    parts = []
+    while True:
+        parts.append(p)
+        up = os.path.dirname(p)
+        if up == p:
+            break
+        p = up
+    return not any(os.path.islink(x) for x in parts)
+try:
+    if not owner or not os.path.isabs(owner):
+        sys.exit(0)
+    if os.path.realpath(owner) != os.path.realpath(root) or not os.path.isdir(owner):
+        sys.exit(0)
+    sc = os.path.join(owner, "scripts")
+    need = [os.path.join(sc, "check_preview.py"), os.path.join(sc, "record_decision.py")]
+    if not (chain_ok(owner) and chain_ok(root) and chain_ok(sc)):
+        sys.exit(0)
+    if not all(chain_ok(f) and os.path.isfile(f) for f in need):
+        sys.exit(0)
+    if os.path.realpath(sc) != sc:
+        sys.exit(0)
+    print(sc)
+except Exception:
+    sys.exit(0)
+PYOWNER
+)"
+  [ -n "$_LO" ] && _LEDGER_SCRIPTS="$_LO"
+fi
+
+# ── THE GATE PROFILE ──────────────────────────────────────────────────────────────────────────
+# The rung is not a label, it is the GATE PROFILE. Every gate below asks which profile it belongs
+# to rather than firing unconditionally. Three profiles:
+#
+#   COLD  (cold-boss, cold-stranger) a stranger. Needs the full boss-hunt evidence: a researched
+#         accomplishment with a primary source, the method checklist, the approved praise phrasing,
+#         and a segment so the send can become hot-zone data. Dedup: --company must be NEW.
+#   WARM  (warm, referred, event) a person you know, or a referral. There IS no boss, no researched
+#         accomplishment and no praise beat in a favor asked of a friend, and the boss-hunt
+#         checklist is the wrong instrument for it. Requiring that evidence is what made the warm
+#         half of the ladder unsendable, so the whole ladder collapsed onto its cold rung.
+#         Dedup shifts to --targets: the recipient is a CONNECTOR, not a target, so what must be
+#         checked are the companies NAMED IN THE ASK.
+#   POST-CONTACT (thank-you, reply, follow-up) someone ALREADY in your process. Skips the cold
+#         evidence AND the warm --targets gate, and INVERTS dedup: the company must be
+#         already-seen. That inversion is what stops a cold draft wearing a thank-you label to
+#         skip the gauntlet.
+#
+# ⚠️ --rung is OPTIONAL here, unlike the reference implementation it was ported from. An absent
+# --rung keeps the historical COLD behavior so no existing call breaks, and `--warm` keeps working
+# as an alias rather than as a second code path that can drift.
+# A CONTRADICTION MUST NOT RESOLVE SILENTLY. `--warm --rung cold-boss` used to end up COLD, because
+# the alias only fills an EMPTY rung and the classifier below then clears WARM_RUNG. Silently
+# picking one of two flags the caller disagreed with is how a send goes out under gates nobody
+# chose. Say so and stop.
+if [ -n "$WARM_RUNG" ] && [ -n "$RUNG" ]; then
+  case "$RUNG" in
+    warm|referred|event) : ;;   # agreeing spellings of the same intent, harmless
+    *) echo "⛔ BLOCKED: --warm and --rung '$RUNG' contradict each other. --warm is an alias for" >&2
+       echo "   '--rung warm'. Drop --warm, or pass the rung you actually mean." >&2; exit 4;;
+  esac
+fi
+[ -n "$WARM_RUNG" ] && [ -z "$RUNG" ] && RUNG="warm"
+case "$RUNG" in
+  ""|cold-boss|cold-stranger) : ;;
+  warm|referred|event) : ;;
+  thank-you|reply|follow-up) POST_CONTACT=1 ;;
+  *) echo "⛔ BLOCKED: unknown --rung '$RUNG'. One of: cold-boss | cold-stranger | warm | referred | event | thank-you | reply | follow-up." >&2
+     echo "   The rung selects which evidence is required AND records the register for the tally." >&2; exit 4;;
+esac
+case "$RUNG" in warm|referred|event) WARM_RUNG=1;; *) WARM_RUNG="";; esac
+case "$RUNG" in thank-you) MTYPE=thankyou;; reply) MTYPE=reply;; follow-up) MTYPE=followup;; *) MTYPE=outreach;; esac
+# kit#225: finding the address is often the LAST step, so a --dry-run with no --to still runs every
+# gate and reports the missing address as a gate of its own (the final line, and exit 2). A real
+# send still needs --to up front.
+NO_ADDR=""
+if [ -z "$TO" ] && [ -n "$DRY_RUN" ] && [ -n "$SUBJECT" ] && [ -n "$BODYFILE" ]; then
+  NO_ADDR=1; TO="(no address yet)"
+fi
+[ -n "$TO" ] && [ -n "$SUBJECT" ] && [ -n "$BODYFILE" ] || { echo "need --to --subject --body-file" >&2; exit 2; }
+[ -f "$BODYFILE" ] || { echo "body file not found: $BODYFILE" >&2; exit 2; }
+[ -z "$ATTACH" ] || [ -f "$ATTACH" ] || { echo "attachment not found: $ATTACH" >&2; exit 2; }
+# ── BOUNCED-ADDRESS GUARD (ported from the AJS copy, slice J) ────────────────────────────────
+# documents/bounced-addresses.txt under the DATA ROOT lists addresses that bounced. Sending there again burns the attempt silently.
+# The rule is the one address_paths.load_bounced reads: trim each line, skip blank and `#` lines, whole-line, case-insensitive. Skipped only
+# under --force (the app never passes it). A dry run with no address yet has nothing to check.
+_BOUNCED_FILE="$DATA_ROOT/documents/bounced-addresses.txt"
+if [ -z "$FORCE" ] && [ -z "$NO_ADDR" ] && [ -f "$_BOUNCED_FILE" ]; then
+  _hits="$(python3 - "$_BOUNCED_FILE" "$TO,$BCC" <<'PYBOUNCE'
+import sys
+bounced = set()
+try:
+    with open(sys.argv[1], encoding="utf-8", errors="ignore") as fh:
+        for line in fh:
+            s = line.strip().lower()
+            if s and not s.startswith("#"):
+                bounced.add(s)
+except OSError:
+    pass
+print(" ".join(a for a in (x.strip() for x in sys.argv[2].split(",")) if a and a.lower() in bounced))
+PYBOUNCE
+)"
+  if [ -n "$_hits" ]; then
+    echo "⛔ BLOCKED: address(es) on the confirmed-bounce list: $_hits" >&2
+    echo "   Source: documents/bounced-addresses.txt. Sending here again burns the attempt silently." >&2
+    echo "   Find a working address, or pass --force ONLY if you have evidence the mailbox now exists." >&2
+    exit 4
+  fi
+fi
+# ── THE ONE-RESEND GATE (slice K, proxy 517 Q3): "never a third", checked BEFORE any draft exists ─────────────────────────────────
+# After a bounce one resend to a corrected address is allowed and recorded on the SAME send-log row (`resent_date`, see the rewrite in PYLOG below).
+# A bounced row for this company and person that already carries `resent_date` means that resend happened and bounced too: nothing more goes out
+# on this thread. The thread is a company and a person (the send log's `to_name`); the SUBJECT is not part of the key, or a changed subject would let a third address through.
+# It sits HERE, beside the bounce guard and long before the draft is made, because a check inside the send-log heredoc runs after
+# the real draft exists and would leave a sendable third draft in the mailbox with no row. Company and person are compared as the one-row match
+# in PYLOG compares them: exact strings, no case folding. With no person to key on, the subject stands in. UNLIKE the bounce guard it is NOT skipped under --force: the app never passes --force,
+# and a person who does still gets no third address on a thread whose second address bounced.
+# ⚠️ IT NEEDS $COMPANY. The row is keyed on company + person, so a run with no --company has nothing to match and the gate stays quiet.
+# Every cold, stranger and post-contact run reaches this point with a company: the later "missing --company" refusals (post-contact, and the
+# non-warm rungs, just below) exit 4 without one. Only a warm run may carry none, and a warm run keys its row on its first target, not on a company.
+_SLOG_GATE="$DATA_ROOT/documents/send-log.jsonl"
+if [ -n "$COMPANY" ] && [ -f "$_SLOG_GATE" ]; then
+  _GATE_PERSON="${NAME:-$BOSS}"
+  _third="$(SENDLOG_SCRIPTS="$HERE" python3 - "$_SLOG_GATE" "$COMPANY" "$SUBJECT" "$_GATE_PERSON" <<'PYRESEND'
+import os, sys
+path, company, subject, person = sys.argv[1:5]
+sys.path.insert(0, os.environ.get("SENDLOG_SCRIPTS") or os.path.dirname(os.path.abspath(path)))
+import sendlog_lock as sl
+hit = ""
+try:
+    # read_all: the main log plus any spooled change not yet folded in, so a spooled bounce or resend still stops a third address
+    for r in sl.read_all(path):
+        if (r.get("status") == "bounced" and r.get("resent_date")
+                and r.get("company") == company
+                and (r.get("to_name") == person if person else r.get("subject") == subject)):
+            hit = "1"
+except OSError:
+    pass
+print(hit)
+PYRESEND
+)"
+  if [ -n "$_third" ]; then
+    echo "⛔ BLOCKED: this thread already had its one resend; the person pivot or LinkedIn is next." >&2
+    echo "   $COMPANY · \"$SUBJECT\" went to a second address after a bounce, and that one bounced too. No third address is drafted (--force does not change this)." >&2
+    exit 4
+  fi
+fi
+# Résumé DELIVERABLE naming: the recipient SEES the attachment filename, so it must follow the
+# convention "<Your Name> - Resume - <Company>.pdf" (documents/cv/), NEVER the internal source
+# name like main_<co>.pdf. Patterns come from RESUME_FILENAME_PATTERNS in kit_config.py.
+# WARN loudly if the attachment doesn't match.
+if [ -n "$ATTACH" ]; then
+  _ab="$(basename "$ATTACH")"
+  _match=""
+  while IFS= read -r _pat; do
+    [ -z "$_pat" ] && continue
+    case "$_ab" in
+      $_pat) _match=1; break;;
+    esac
+  done <<< "${KIT_RESUME_PATTERNS:-}"
+  [ -n "$_match" ] || echo "⚠️  attachment '$_ab' is not named per the convention '$KIT_RESUME_EXAMPLE'. A recipient sees this filename — copy cv/main_<co>.pdf to \"documents/cv/$KIT_RESUME_EXAMPLE\" and attach THAT (never the internal source name)." >&2
+fi
+
+# ── RÉSUMÉ ALWAYS ATTACHED (register gap G10) ────────────────────────────────────────────────
+# The method attaches the résumé to EVERY boss-hunt email. That was documented as enforced while
+# nothing enforced it, so "always" meant "whenever someone remembered to type the flag". Requiring
+# an EXPLICIT --no-resume makes skipping it a deliberate, visible act instead of an omission.
+if [ -z "$ATTACH" ] && [ -z "$NO_RESUME" ]; then
+  echo "⛔ BLOCKED: no --attach. The method attaches your résumé to EVERY outreach email." >&2
+  echo "   Attach \"documents/cv/$KIT_RESUME_EXAMPLE\", or pass --no-resume to opt out on purpose." >&2
+  exit 4
+fi
+
+# METHOD gate: a boss-hunt email cannot fire without proof the
+# method was followed — a researched SPECIFIC boss accomplishment + source (Andy A2/A3), and
+# a run of the A1-A10 checklist. This is why the method kept getting skipped under volume:
+# nothing gated on it. Now it does. --force bypasses only for a deliberate exception.
+if [ -z "$FORCE" ]; then
+  # G2 — DEDUP / BLOCKED-LIST at the send boundary: a dedup check that only runs at discovery
+  # time does not protect the irreversible step, so a blocked or already-contacted company can
+  # still reach a visible draft. Re-check here and block on a 🔴 hit.
+  if [ -n "$POST_CONTACT" ]; then
+    # POST-CONTACT INVERSE ANCHOR. A thank-you / reply / follow-up goes to someone ALREADY in your
+    # process, so check_dup --send-gate must return 🔴 ALREADY-SEEN (exit 1). If it returns 🟢 NEW,
+    # this is cold outreach wearing a thank-you label to skip the cold gauntlet: BLOCK. It is not
+    # forgeable, because the company has to genuinely appear in a SENT or contacted store. The
+    # normal dedup below blocks ON 🔴, so it is the OPPOSITE test and is skipped for post-contact.
+    [ -n "$COMPANY" ] || { echo "⛔ BLOCKED: post-contact (thank-you/reply/follow-up) needs --company for the already-contacted anchor." >&2; exit 4; }
+    if [ -f "$HERE/check_dup.py" ]; then
+      python3 "$HERE/check_dup.py" --send-gate "$COMPANY" >/tmp/.md_pc.$$ 2>&1; _pc=$?
+      rm -f /tmp/.md_pc.$$
+      if [ "$_pc" != "1" ]; then
+        echo "⛔ BLOCKED: a '$RUNG' goes to a company ALREADY in your process, but '$COMPANY' has no" >&2
+        echo "   strong prior-contact record (check_dup --send-gate exit=$_pc, need 🔴 already-seen)." >&2
+        echo "   If this is a NEW target, use a cold rung. You do not thank someone you never contacted." >&2
+        exit 4
+      fi
+    fi
+  elif [ -z "$WARM_RUNG" ]; then
+    [ -n "$COMPANY" ] || { echo "⛔ BLOCKED: missing --company. Needed to re-check the blocked-list + dedup at send." >&2; exit 4; }
+    if [ -f "$HERE/check_dup.py" ]; then
+      # --send-gate: only block on BLOCKED-list / SENT / CONTACTED / correspondence stores — NOT the
+      # construction records (decision-log, queues) where the in-flight build is expected to appear.
+      python3 "$HERE/check_dup.py" --send-gate "$COMPANY" >/tmp/.md_dup.$$ 2>&1; _dc=$?
+      if [ "$_dc" = "1" ] && [ -n "$NEXT_TARGET" ]; then
+        # PERSON PIVOT (Andy's fallback sequence): "Pick the one most likely the direct boss and
+        # try that person first. Give them a week or so… If not, then target someone else." The
+        # dedup above blocks ANY already-contacted company, which INVERTS that fallback — a gate
+        # written to prevent re-pitching was blocking the method's own next step. --next-target
+        # allows it, but only past roughly a 7-day wait, and only if this exact PERSON has not
+        # been contacted.
+        # A STAGED/discarded/SENDLOG-marker row is this pipeline's own draft plumbing, not a
+        # delivered contact — excluded so a restage of the SAME person never reads as a pivot.
+        if [ -z "$NO_ADDR" ] && grep -iF -- "$TO" "$DATA_ROOT/outreach_log.md" 2>/dev/null | grep -viE 'STAGED|discarded|SENDLOG v1' | grep -q .; then
+          echo "⛔ BLOCKED: $TO has already been contacted. --next-target is for a DIFFERENT person at that company, never a re-pitch of the same one." >&2
+          rm -f /tmp/.md_dup.$$; exit 4
+        fi
+        # THE 7-DAY WAIT, ENFORCED (was advisory-only). Most recent DELIVERED prior send to this
+        # company: send-log.jsonl status "sent", else an outreach_log SENT header if the send log
+        # has no row. Block the pivot if that date is under 7 days old.
+        # kit#159: a read here used errors="ignore" and no guard at all, so a bad encoding or a
+        # permission error on either store silently computed best=None -> days=999 -> "OK", the
+        # 7-day wait waved through as if the company had never been contacted. Strict-decode both
+        # reads and print CANTVERIFY on any failure, which the shell side below now stops on.
+        _nt_wait="$(SENDLOG_SCRIPTS="$HERE" python3 - "$COMPANY" "$DATA_ROOT" <<'PYWAIT'
+import sys, json, re, os, datetime as dt
+co, root = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.environ.get("SENDLOG_SCRIPTS") or root)
+import sendlog_lock as sl
+canon = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())
+def _read_strict(path):
+    with open(path, "rb") as fh:
+        return fh.read().decode("utf-8")
+try:
+    best = None
+    # read_all (strict): the main log plus any spooled change not yet folded in, so a spooled send still holds the 7-day wait
+    for r in sl.read_all(os.path.join(root, "documents", "send-log.jsonl"), strict=True):
+        if r.get("status") == "sent" and canon(r.get("company", "")) == canon(co):
+            d = dt.date.fromisoformat(r["date"]); best = d if not best or d > best else best
+    ol = root + "/outreach_log.md"
+    if best is None and os.path.isfile(ol):
+        text = _read_strict(ol)
+        for m in re.finditer(r"^## (\d{4}-\d{2}-\d{2}) · ([^\n]*)\n((?:(?!^## ).)*)", text, re.M | re.S):
+            if canon(co) in canon(m.group(2)) and re.search(r"\bsent\b", m.group(2) + m.group(3), re.I):
+                d = dt.date.fromisoformat(m.group(1)); best = d if not best or d > best else best
+except (OSError, UnicodeDecodeError) as e:
+    print(f"CANTVERIFY {e.__class__.__name__}: {e}")
+else:
+    days = (dt.date.today() - best).days if best else 999
+    print(f"{'BLOCK' if days < 7 else 'OK'} {best.isoformat() if best else '-'} {days}")
+PYWAIT
+)"
+        set -- $_nt_wait
+        if [ "$1" = CANTVERIFY ]; then
+          echo "⛔ --next-target: could not verify '$COMPANY's prior-contact date ($2 $3 $4 $5). Refusing the pivot rather than proceeding on a partial store." >&2
+          rm -f /tmp/.md_dup.$$; exit 4
+        fi
+        if [ "$1" = BLOCK ]; then
+          echo "⛔ --next-target: '$COMPANY' was contacted $2, $3 days ago; Andy's person pivot waits about a week. Nothing staged." >&2
+          rm -f /tmp/.md_dup.$$; exit 4
+        fi
+        echo "   ↪ --next-target: '$COMPANY' already contacted; proceeding to the NEXT target type (Andy's fallback sequence)." >&2
+        echo "     Prior delivered send: $2, $3 days ago." >&2
+      elif [ "$_dc" = "1" ]; then
+        echo "⛔ BLOCKED: check_dup returned 🔴 for '$COMPANY' (blocked-list or strong duplicate). Do NOT send." >&2
+        echo "   If this is Andy's FALLBACK SEQUENCE (a different person at a company already contacted, after ~a week), pass --next-target." >&2
+        grep -iE "VERDICT|BLOCKED|already|declined" /tmp/.md_dup.$$ | head -3 >&2; rm -f /tmp/.md_dup.$$; exit 4
+      fi
+      [ "$_dc" = "3" ] && { echo "⚠️  check_dup 🟡 possible-dup for '$COMPANY' — confirm it's genuinely new before sending:" >&2; grep -iE "VERDICT|possible" /tmp/.md_dup.$$ | head -2 >&2; }
+      # kit#159: a nonzero exit that is neither 0 (NEW), 1 (BLOCKED, handled above) nor 3
+      # (possible-dup, warns and proceeds) means check_dup could not run its check at all --
+      # a store it depends on was unreadable. That must stop the send, not fall through silently.
+      if [ "$_dc" != "0" ] && [ "$_dc" != "1" ] && [ "$_dc" != "3" ]; then
+        echo "⛔ BLOCKED: check_dup could not complete its check for '$COMPANY' (exit $_dc)." >&2
+        tail -5 /tmp/.md_dup.$$ >&2; rm -f /tmp/.md_dup.$$; exit 4
+      fi
+      rm -f /tmp/.md_dup.$$
+    fi
+  else
+    # WARM / REFERRED: the recipient's own employer is irrelevant, because the person is a
+    # CONNECTOR, not a target. What must be dedup'd are the companies NAMED IN THE ASK, so you
+    # never ask a friend for an intro to a company that is blocked or already contacted.
+    if [ -z "$TARGETS" ]; then
+      if [ -n "$RUNG_EXPLICIT" ]; then
+        echo "⛔ BLOCKED: rung '$RUNG' needs --targets \"Co1,Co2,Co3\" — the companies named in the ask." >&2
+        echo "   They get dedup'd so you never ask for an intro to a blocked or already-contacted company." >&2
+        exit 4
+      fi
+      # BACK-COMPAT: the bare `--warm` spelling predates --targets, so blocking it would break the
+      # one warm call shape that already works. Warn loudly instead, and name what it costs.
+      echo "⚠️  --warm with no --targets: the companies named in your ask were NOT dedup-checked, and" >&2
+      echo "   this send records no targets, so trio burn-tracking cannot tell what you already asked" >&2
+      echo "   about. Prefer: --rung warm --targets \"Co1,Co2,Co3\"." >&2
+    else
+      _bad=""; _checked=0
+      IFS=',' read -ra _tg <<< "$TARGETS"
+      for _t in "${_tg[@]}"; do
+        _t="$(echo "$_t" | sed 's/^ *//;s/ *$//')"; [ -n "$_t" ] || continue
+        _checked=$((_checked+1))
+        if [ -f "$HERE/check_dup.py" ]; then
+          python3 "$HERE/check_dup.py" --send-gate "$_t" >/tmp/.md_t.$$ 2>&1
+          [ "$?" = "1" ] && { echo "⛔ BLOCKED: named target '$_t' is blocked or already contacted — do not ask for an intro to it." >&2; _bad=1; }
+          rm -f /tmp/.md_t.$$
+        fi
+      done
+      # A NON-EMPTY --targets THAT DEDUPS NOTHING IS NOT A PASS. `--targets ","` cleared the -n test
+      # above, then every element trimmed to empty and hit the `continue`, so the loop ran ZERO
+      # dedup checks and the send proceeded. The gate that exists to stop you asking a friend for an
+      # intro to a blocked company was bypassable by typing one comma. Presence of the FLAG was
+      # being treated as evidence the CHECK ran; those are different facts.
+      if [ "$_checked" -eq 0 ]; then
+        echo "⛔ BLOCKED: --targets \"$TARGETS\" contains no usable company name, so no dedup ran." >&2
+        echo "   Pass the real companies named in the ask, e.g. --targets \"SomeCo,Globex,Initech\"." >&2
+        exit 4
+      fi
+      [ -n "$_bad" ] && exit 4
+
+      # ── G2b — THE BODY MUST NOT NAME A COMPANY THE DEDUP NEVER SAW (2026-07-25) ───────────────
+      # The loop above dedups --targets. Nothing checked that --targets is what the BODY actually
+      # asks about, and the only other reader of $BODYFILE is the praise-phrasing grep. So
+      # `--targets "SomeCo"` with a body asking for intros to SomeCo, Globex and Initech sent with two
+      # companies no dedup ever saw — precisely the harm the warm gate exists to prevent, reached by
+      # under-declaring the flag rather than by omitting it. Same shape as the `--targets ","` defect
+      # right above: the FLAG was treated as evidence about the BODY, and they are different facts.
+      #
+      # check_dup is the arbiter, which is what lets the extractor be generous: a capitalized phrase
+      # that is not a company comes back 🟢 NEW and is ignored, so over-extraction costs a subprocess,
+      # not a false block. Only a 🔴 (blocked or already-contacted) stops the send.
+      if [ -f "$HERE/check_dup.py" ] && [ -f "$BODYFILE" ]; then
+        # The cross-check lives in body_gates.py so preflight_note.py runs the SAME code.
+        if ! python3 "$HERE/body_gates.py" targets "$DATA_ROOT" "$BODYFILE" "$TARGETS"; then
+          exit 4
+        fi
+      fi
+    fi
+  fi
+  # ── The boss-hunt proofs below are COLD-RUNG EVIDENCE ──────────────────────────────────────
+  # A warm connector ask has no praise beat and no boss accomplishment, and the A1-A10 checklist is
+  # the wrong instrument for it. Requiring them on a warm send is what made the warm lane
+  # unsendable, which collapsed the whole ladder onto its cold rung.
+  if [ -z "$WARM_RUNG" ] && [ -z "$POST_CONTACT" ]; then
+  [ -n "$PRAISE_SOURCE" ] || { echo "⛔ BLOCKED: missing --praise-source. Andy A2 requires a RESEARCHED specific boss accomplishment + source (run boss-research-and-compliment first). No generic product/mission praise." >&2; exit 4; }
+  # DEEP boss-research: the praise-source must carry a PRIMARY-SOURCE citation (a URL), not just a
+  # bare claim — same rigor as the culture deep-screen. A secondhand metric repeated by a blog is a
+  # false-positive risk: praise built on a number the person never claimed reads as flattery.
+  case "$PRAISE_SOURCE" in
+    *http://*|*https://*) : ;;
+    *) echo "⛔ BLOCKED: --praise-source has no primary-source URL. Deep boss-research requires the accomplishment verified to a PRIMARY source (company blog / their own talk / named case study / filing — not a contact-database or SEO blurb) and cited with its URL. If the metric is secondhand-only, drop it." >&2; exit 4;;
+  esac
+  [ "$LACIVITA_CHECK" = "pass" ] || { echo "⛔ BLOCKED: missing --lacivita-check pass. Run the boss-hunt method checklist and report the ✅/⚠️/❌ table for THIS email first. See $KIT_RULES_DOC." >&2; exit 4; }
+  # TWO-STAGE PRAISE gate: the praise TEXT must be a Stage-2 phrasing the HUMAN picked, not one the
+  # assistant wrote and then presented as final. Require --praise-phrasing and confirm it appears
+  # VERBATIM in the body — you cannot assemble-and-fire without isolating the approved phrasing.
+  # See "Boss-praise = two-stage" in $KIT_RULES_DOC.
+  [ -n "$PRAISE_PHRASING" ] || { echo "⛔ BLOCKED: missing --praise-phrasing. The praise beat must be a Stage-2 phrasing YOU picked (Stage 1 concept → Stage 2 phrasing). Never author-then-present-as-final. Pass the approved phrasing text." >&2; exit 4; }
+  if ! python3 "$HERE/body_gates.py" phrasing "$BODYFILE" "$PRAISE_PHRASING"; then   # body_gates, so preflight runs the same check; blank lines stripped
+    echo "⛔ BLOCKED: --praise-phrasing text does not appear verbatim in the body. The body's praise beat must be the phrasing approved at Stage 2 (skipping or altering it is an unapproved edit). Reconcile them." >&2; exit 4;
+  fi
+  # ── BOSS REGISTRY ──────────────────────────────────────────────────────────────────────────
+  # A cold-boss send names the person you researched, and that person must already have a fresh
+  # registry record. Sends with no recipient identity cannot be attributed to anyone, and the
+  # research behind them becomes unrecoverable.
+  #
+  # ⛔ SCOPED TO cold-boss ALONE, deliberately. Binding this to the shared cold branch would catch
+  # cold-stranger, which by definition has no boss. A gate written for one rung binds every rung
+  # that falls through to it, and that has been a recurring defect in this pipeline.
+  if [ "$RUNG" = "cold-boss" ] && [ -f "$HERE/boss_registry.py" ]; then
+    if [ -z "$BOSS" ]; then
+      echo "⛔ BLOCKED: missing --boss on a cold-boss send. Name the person you researched." >&2
+      exit 4
+    fi
+    if ! python3 "$HERE/boss_registry.py" check --company "$COMPANY" --person "$BOSS"; then
+      exit 4
+    fi
+  fi
+  fi   # end cold-rung-only proofs
+  # SEGMENT gate: the method tests segments to find the hot-zone (5/segment, then compare reply
+  # rates), so a COLD send with no segment can never become data. Warm/referred and post-contact
+  # sends are chosen by relationship, so they carry no segment. Closed vocabulary from
+  # kit_config.SEGMENTS (KIT_SEGMENT_SLUGS via --sh): a free-text label defeats the comparison.
+  if [ -z "$WARM_RUNG" ] && [ -z "$POST_CONTACT" ]; then
+    [ -n "$SEGMENT" ] || { echo "⛔ BLOCKED: missing --segment on a cold send. Pass one of your segment slugs ($KIT_SEGMENT_SLUGS), or 'off-segment' for a genuinely-authorized target outside every one of them, so the send becomes hot-zone data (or excluded from it honestly). --warm is for a relationship-based send. Define segments in scripts/kit_config.py + docs/segments.md." >&2; exit 4; }
+    # kit#120: "off-segment" is always accepted, the same closed-vocabulary escape valve every
+    # other consumer of SEGMENT_SLUGS already honors (contact_signals._VALID_SEGMENTS,
+    # record_finding.lanes(), balancer.py's untagged/off-segment share). This was the one gate
+    # in the pipeline that had not adopted it, so a real BUILD-ruled target outside every one of
+    # an install's lanes had no honest --segment value except one the gate refused on principle.
+    _segok=""; [ "$SEGMENT" = "off-segment" ] && _segok=1
+    for _s in $KIT_SEGMENT_SLUGS; do [ "$_s" = "$SEGMENT" ] && _segok=1; done
+    [ -n "$_segok" ] || { echo "⛔ BLOCKED: --segment '$SEGMENT' is not one of your defined segments ($KIT_SEGMENT_SLUGS) and is not 'off-segment'. A lane from a discovery sweep is a FINDING, not a segment — see docs/segments.md." >&2; exit 4; }
+  fi
+fi
+[ -z "$PRAISE_SOURCE" ] || echo "  praise-source: $PRAISE_SOURCE"
+[ -z "$PRAISE_PHRASING" ] || echo "  praise-phrasing (Stage-2 pick, verbatim in body): $PRAISE_PHRASING"
+
+# SEND-TIME conformance tripwire: scrub AI-tells / retired figures / format
+# before building the draft. FAIL blocks unless --force (for a verified false positive).
+# ── THE DETERMINISTIC BODY CHECK RUNS BEFORE THE PANEL RECEIPT. The panel receipt is bound to the SHA-256 of the body,
+# so any edit after the panel orphans it. check_outreach used to run after the panel gate: a note could pass three
+# lenses and then fail on an em dash or the signature block, and fixing that sent you back through the whole panel.
+# Running the cheap check first means the panel only sees a body that already passes it. Same check, exit code and
+# --force semantics; only the order moved.
+if [ -f "$HERE/check_outreach.py" ]; then
+  # --rung/--type matter: holding a warm connector ask to the cold-boss ingredient shape FAILS
+  # correct messages, which is the other half of how the warm lane went unused.
+  if ! python3 "$HERE/check_outreach.py" "$BODYFILE" --rung "${RUNG:-cold-boss}" --type "$MTYPE"; then
+    if [ -z "$FORCE" ]; then
+      echo "⛔ mail-draft blocked by check_outreach (fix the body, or re-run with --force if a false positive)." >&2
+      exit 3
+    fi
+    echo "⚠️  check_outreach FAILED but --force given — proceeding." >&2
+  fi
+fi
+
+# ── THE REVIEWER PANEL RECEIPT, AND IT IS BOUND TO THIS EXACT BODY ────────────────────────────
+#
+# WHY THIS EXISTS. The operating rules have said "3-panel review before finalizing ANY artifact"
+# since July. It was never mechanized, it sits among the résumé rules so it reads as résumé-scoped,
+# and it was skipped on a real message to a real person. A rule that nothing enforces runs when
+# somebody remembers it. The question that surfaced it came from a partner install: "does your
+# install run multiple independent reviewers over the outreach EMAIL itself, beyond the checklist
+# and the linters?" The honest answer was no.
+#
+# ⛔ WHY A HASH AND NOT A FLAG. `--lacivita-check pass` is an assertion: whoever types it is
+# promising the checklist ran. That is honor-system and it can be typed by an agent that did not run
+# it. This receipt cannot: `scripts/review_outreach.py` writes it under the SHA-256 of the body it
+# reviewed, so editing one character of the draft orphans the receipt and the send blocks again.
+# **A panel run on an earlier draft cannot authorize a later one.**
+#
+# ⚖️ SCOPED TO INITIAL OUTREACH, deliberately. Every rung that opens a conversation needs it,
+# including the warm ones, because a bad warm ask costs a relationship rather than a reply. The
+# POST-CONTACT rungs (thank-you, reply, follow-up) are excluded: they answer inside a live thread
+# where the recipient already knows you, and requiring a three-lens panel to send "thank you, that
+# was useful" is the kind of friction that gets a gate bypassed rather than obeyed.
+PANEL_STATE="n/a"
+if [ -z "$POST_CONTACT" ] && [ -f "$HERE/review_outreach.py" ]; then
+  _PANEL_DIR="$DATA_ROOT/documents/state/outreach-panels"
+  _BODY_SHA="$(shasum -a 256 "$BODYFILE" 2>/dev/null | cut -d' ' -f1)"
+  _PANEL_FILE="$_PANEL_DIR/${_BODY_SHA}.json"
+  if [ -z "$_BODY_SHA" ]; then
+    echo "⛔ BLOCKED: could not hash the body file, so the panel receipt cannot be verified." >&2; exit 4
+  fi
+  # ⚖️ --force BYPASSES THIS GATE, AND THE BYPASS IS RECORDED. A --force that works on eight gates
+  # and silently not on the ninth is surprising, and surprising escape hatches get worked around
+  # rather than obeyed. ⛔ THE GOAL WAS NEVER TO PREVENT SKIPS, IT WAS TO PREVENT SILENT ONES: the
+  # send-log row carries `panel: forced`, so a forced send stays visible in the record forever.
+  if [ -n "$FORCE" ] && [ ! -f "$_PANEL_FILE" ]; then
+    PANEL_STATE="forced"
+    echo "   ⚠️  reviewer panel BYPASSED by --force. This is recorded as panel:forced in the send log." >&2
+  elif [ ! -f "$_PANEL_FILE" ]; then
+    echo "⛔ BLOCKED: no reviewer-panel receipt for THIS body." >&2
+    echo "   Run:  python3 scripts/review_outreach.py \"$BODYFILE\" --rung \"$RUNG\"" >&2
+    echo "   It runs three independent lenses (RECIPIENT, METHOD, HONESTY+VOICE), shows you the" >&2
+    echo "   findings, and writes a receipt keyed to this body's hash ($_BODY_SHA)." >&2
+    echo "   ⚠️ If you edited the draft after reviewing it, that is exactly what this caught: the" >&2
+    echo "   receipt is bound to the reviewed text, so re-run the panel on the version you are sending." >&2
+    exit 4
+  fi
+  if [ "$PANEL_CHECK" != "pass" ] && [ -n "$FORCE" ]; then
+    PANEL_STATE="forced"
+    echo "   ⚠️  panel receipt present but unread (--panel-check absent); --force recorded it as forced." >&2
+  elif [ "$PANEL_CHECK" != "pass" ]; then
+    echo "⛔ BLOCKED: a panel receipt exists for this body but --panel-check pass was not given." >&2
+    echo "   Read the findings in $_PANEL_FILE, apply what you accept, then pass --panel-check pass." >&2
+    echo "   ⚖️ The receipt proves the panel RAN. This flag is you saying you READ it." >&2
+    exit 4
+  fi
+  if [ "$PANEL_STATE" != "forced" ]; then
+    PANEL_STATE="reviewed"
+    echo "   ✅ reviewer panel: receipt found for this body (${_BODY_SHA:0:12})"
+  fi
+fi
+
+# RÉSUMÉ QA AT SEND: a QA script that nothing consumes is decoration. verify_resume.py existed
+# for a long time while NOTHING anywhere checked its exit code, so a failing résumé could be
+# attached to a real draft. Verify the SOURCE .tex for the résumé being attached, when findable.
+# WARM-RUNG FALLBACK: this used to be gated on -n "$COMPANY" alone, and a warm rung identifies by
+# --targets rather than --company. So a warm send attached a résumé that NOTHING had QA'd, silently,
+# because the whole block was skipped rather than failed.
+_QA_CO="$COMPANY"
+[ -z "$_QA_CO" ] && _QA_CO="$(printf '%s' "$TARGETS" | cut -d',' -f1 | sed 's/^ *//;s/ *$//')"
+if [ -n "$ATTACH" ] && [ -f "$HERE/verify_resume.py" ] && [ -n "$_QA_CO" ]; then
+  _slug="$(printf '%s' "$_QA_CO" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')"
+  _repo="$DATA_ROOT"
+  for _tex in "$_repo/cv/main_${_slug}.tex" "$_repo/documents/cv/main_${_slug}.tex"; do
+    if [ -f "$_tex" ]; then
+      if ! python3 "$HERE/verify_resume.py" "$_tex"; then
+        if [ -z "$FORCE" ]; then
+          echo "⛔ mail-draft blocked by verify_resume ($_tex). Fix the résumé, or --force if a verified false positive." >&2
+          exit 5
+        fi
+        echo "⚠️  verify_resume FAILED but --force given — proceeding." >&2
+      fi
+      break
+    fi
+  done
+fi
+
+# ── BUILD GATE AT SEND ────────────────────────────────────────────────────────────────────────
+# The PreToolUse/PostToolUse hooks fire on AskUserQuestion ONLY — there is no hook on Bash, Write
+# or Edit. So an agent that drafted a body with Write and then ran this script never touched the
+# gate at all: check_preview.py guards *asking about* a draft, not drafting, and not the
+# irreversible send. Enforce the same ledger check HERE, at the boundary that actually matters.
+# check_preview.py's own docstring concedes the point: the send boundary "is the irreversible step
+# and the one that matters."
+#
+# Warm rungs are not company-scoped, so the per-company gate below cannot apply. They still need a
+# LANE-level ruling — you having said to work the warm/network lane at all. Proportionality: the
+# per-company gate exists to stop expensive misdirected research; a four-sentence connector ask has
+# no such failure mode, and you review every draft before sending. But "no gate" is not the answer
+# either, so require at least one genuine recorded ruling to exist.
+#
+# ⛔ FAILS CLOSED WHEN THE GATE CANNOT LOAD (2026-09-15). Both blocks below used to `sys.exit(0)` on an
+# import error and to skip themselves when check_preview.py was absent, so a broken or deleted gate
+# file sent with no ruling checked at all. An unloadable gate is not evidence of a ruling. The
+# heredocs exit 7 on any import failure (BaseException, so a module that calls sys.exit while
+# importing cannot pass for success), and every non-zero status blocks, including a missing python3.
+_gate_unloadable() {
+  echo "⛔ BLOCKED: the send check could not load, so no ruling can be verified and nothing was drafted." >&2
+  echo "   Run:  python3 \"$HERE/doctor.py\"" >&2
+  echo "   Exact error:  python3 -c 'import sys; sys.path.insert(0, \"$HERE\"); import check_preview'" >&2
+  exit 6
+}
+if [ -z "$FORCE" ] && [ -n "$WARM_RUNG" ]; then
+  _bg_rc=0
+  python3 - "$_LEDGER_SCRIPTS" <<'PYLANE' || _bg_rc=$?
+import sys
+sys.path.insert(0, sys.argv[1])
+try:
+    from check_preview import _build_rulings
+except BaseException as e:
+    print(f"   send check import error: {type(e).__name__}: {e}", file=sys.stderr)
+    sys.exit(7)
+sys.exit(0 if _build_rulings() else 1)
+PYLANE
+  [ "$_bg_rc" -eq 7 ] && _gate_unloadable
+  if [ "$_bg_rc" -ne 0 ]; then
+    echo "⛔ BLOCKED: warm rung needs a LANE-level ruling. documents/decision-ledger.jsonl holds no" >&2
+    echo "   genuine recorded BUILD ruling. Get an explicit go on working the warm lane first." >&2
+    exit 6
+  fi
+fi
+
+if [ -z "$FORCE" ] && [ -n "$COMPANY" ] && [ -z "$WARM_RUNG" ] && [ -z "$POST_CONTACT" ]; then
+  _bg_rc=0
+  python3 - "$_LEDGER_SCRIPTS" "$COMPANY" <<'PYGATE' || _bg_rc=$?
+import sys, re
+sys.path.insert(0, sys.argv[1])
+try:
+    from check_preview import _build_rulings, _unscoped_build_row
+    from record_decision import BUILD_EXACT
+except BaseException as e:
+    print(f"   send check import error: {type(e).__name__}: {e}", file=sys.stderr)
+    sys.exit(7)
+co = sys.argv[2].strip().lower()
+rulings = {r for r in _build_rulings() if r}
+
+# WORD-BOUNDARY MATCH, bounded on BOTH sides. A naive bidirectional substring test
+# (`any(r in co or co in r ...)`) lets a ruling for "ZZ" authorize a real draft to "ZZNorthwind",
+# and a ruling for "Alpha" authorize "Alphabet Systems". Bidirectional is still required — a ruling
+# recorded from a scorecard as "Alpha (alpha.io)" must still authorize --company Alpha — but each
+# direction must respect word boundaries.
+def _bounded(needle, hay):
+    return re.search(r"(?<![a-z0-9])" + re.escape(needle) + r"(?![a-z0-9])", hay) is not None
+
+if not rulings or not any(_bounded(r, co) or _bounded(co, r) for r in rulings):
+    # kit #54 fix 1: state the RULE, not just the verdict.
+    print(f"⛔ BUILD GATE: no valid BUILD ruling recorded for '{sys.argv[2]}'.", file=sys.stderr)
+    # Name the REAL cause when rulings exist that this machine's keys cannot verify (kit issue #149).
+    try:
+        from check_preview import build_ruling_diagnosis
+        _diag = build_ruling_diagnosis()
+        if _diag:
+            print("   " + _diag, file=sys.stderr)
+    except Exception:
+        pass
+    print(f"   RULE: the answer must be a BUILD_EXACT label ({', '.join(sorted(BUILD_EXACT))}) "
+          "and the company must appear in the QUESTION text of the picker that carried it.",
+          file=sys.stderr)
+    # kit #54 fix 3: a signed-but-unscoped row is a DIFFERENT state from no row at all.
+    unscoped = _unscoped_build_row(sys.argv[2])
+    if unscoped:
+        q = str(unscoped.get("question", ""))[:80]
+        print(f"   A BUILD ruling exists but is unscoped to '{sys.argv[2]}'; its question read: "
+              f"'{q}'.", file=sys.stderr)
+    print("   workflow-checklist: present the Boss Match Scorecard and get an explicit", file=sys.stderr)
+    print("   build/skip ruling BEFORE building or sending. A short go-ahead is not a ruling.", file=sys.stderr)
+    sys.exit(1)
+PYGATE
+  [ "$_bg_rc" -eq 7 ] && _gate_unloadable
+  if [ "$_bg_rc" -ne 0 ]; then
+    echo "⛔ mail-draft blocked by the BUILD GATE (no recorded ruling for --company \"$COMPANY\")." >&2
+    exit 6
+  fi
+fi
+
+# AppleScript's `POSIX file` REQUIRES absolute paths — a relative path attaches nothing (silent fail).
+BODYFILE="$(python3 -c 'import os,sys;print(os.path.abspath(sys.argv[1]))' "$BODYFILE")"
+[ -n "$ATTACH" ] && ATTACH="$(python3 -c 'import os,sys;print(os.path.abspath(sys.argv[1]))' "$ATTACH")"
+
+# ── WHERE THE DRAFT GOES (kit #145 port) ──────────────────────────────────────────────────────
+# Apple Mail through AppleScript is one delivery of several. mail_deliver.py resolves the rest: a
+# web compose link, a .eml file, or a copy file, for a person on Linux, Gmail, Outlook or a phone.
+# It is not a send route. The lint, the dedup, the BUILD gate and the send-log row all still run.
+# ⛔ FAIL CLOSED. If mail_deliver.py is present but cannot be imported or resolved, this exits 6
+# and writes no draft. An unreadable delivery module must never fall through to "Apple Mail".
+_gate_token() { printf '%s' "gated:$$:$BODYFILE:$TO" | shasum -a 256 | cut -d' ' -f1; }
+DELIVERY="apple-mail"
+if [ -f "$HERE/mail_deliver.py" ]; then
+  _RES="$(python3 "$HERE/mail_deliver.py" --resolve "${CLIENT:-auto}" 2>&1)" || {
+    echo "$_RES" >&2
+    echo "⛔ the delivery module could not be read, so nothing was written. Nothing was staged." >&2
+    exit 6
+  }
+  DELIVERY="${_RES%%|*}"
+  echo "  delivery: $DELIVERY (${_RES#*|})"
+fi
+
+# ── kit#227: --dry-run NEVER MAKES THE DRAFT ─────────────────────────────────────────────────────
+# Every gate above this point (dedup/blocked-list, boss registry, segment, praise, LaCivita, the
+# outreach panel receipt, the BUILD gate) has already run in full and would have exited nonzero
+# above on a failure — --dry-run changes none of that. What is left below is the FIRST place
+# anything gets written: the osascript/mail_deliver call that makes a real draft/.eml/link/copy,
+# and — one gate still lives past this point too, the RÉSUMÉ-PANEL receipt check further down,
+# which only runs after STATUS reads 0. So a dry run fakes a clean STATUS (never calling osascript
+# or mail_deliver) and lets that gate run for real on the way through; only the actual WRITES
+# (send-log.jsonl, outreach_log.md, correspondence-log.md) are skipped, further down, each guarded
+# on DRY_RUN individually so a résumé-panel BLOCK still exits nonzero exactly as a real send would.
+_OSA_OUT=""   # kit #228: set under set -u even when a dry run never calls osascript
+if [ -n "$DRY_RUN" ]; then
+  echo "DRY RUN: would deliver via $DELIVERY to $TO — no draft is being made." >&2
+  _OSA_RC=0
+elif [ "$DELIVERY" = "apple-mail" ]; then
+_OSA_OUTFILE="$(mktemp 2>/dev/null || echo /tmp/mail-draft-osa.$$)"
+osascript - "$TO" "$BCC" "$SUBJECT" "$BODYFILE" "$ATTACH" "$FROM" <<'APPLESCRIPT' >"$_OSA_OUTFILE"
+on run argv
+    set toAddr to item 1 of argv
+    set bccList to item 2 of argv
+    set subj to item 3 of argv
+    set bodyFile to item 4 of argv
+    set attachPath to item 5 of argv
+    set fromAddr to item 6 of argv
+    set bodyText to (read (POSIX file bodyFile) as «class utf8»)
+    -- iOS-QUOTED-BODY FIX: Mail composes in Rich Text (HTML) by default, and a
+    -- body injected with bare LF (\n) line breaks gets wrapped so iOS Mail shows the whole body inside
+    -- a quote bar (macOS Mail renders it flat). Normalizing LF -> CR (return) makes Mail build clean
+    -- paragraphs, which both clients render flat. Handles CRLF too (strip CR first, then LF -> CR).
+    set AppleScript's text item delimiters to (ASCII character 13) & (ASCII character 10)
+    set bodyText to (text items of bodyText) as text            -- CRLF -> (joined)
+    set AppleScript's text item delimiters to (ASCII character 13)
+    set bodyText to (text items of bodyText) as text            -- drop any stray CR
+    set AppleScript's text item delimiters to (ASCII character 10)
+    set _parts to text items of bodyText
+    set AppleScript's text item delimiters to return
+    set bodyText to _parts as text                              -- LF -> CR (clean paragraphs)
+    set AppleScript's text item delimiters to ""
+    tell application "Mail"
+        -- NOTE: `activate` deliberately removed -- bringing Mail to the foreground via AppleScript
+        -- `activate` was observed waking unrelated media apps. The visible draft is still created
+        -- (visible:true); Mail just will not jump to the front -- click over to it.
+        launch
+        -- let Mail finish launching if it was closed (cold-start race)
+        delay 2
+        -- BEGIN #228 attach-and-verify (kit #165 port + kit #228)
+        -- kit #228: once Mail has made the draft, nothing after this line may take the no-draft branch. Every
+        -- statement that follows sits in ONE try, and every path ends by RETURNING a word the wrapper reads, so a
+        -- re-read that Mail refuses (-1728 on an Exchange sender) can never turn a made draft into "nothing recorded".
+        -- osascript exits nonzero only when the draft itself was not made.
+        set startStamp to current date
+        -- trailing newline gives "after the last paragraph" a valid anchor for the attachment
+        set m to make new outgoing message with properties {subject:subj, content:bodyText & return, visible:true}
+        try
+            -- BUG-254: `sender` selects which of the user's own Mail accounts sends this draft. Left unset
+            -- (fromAddr = "") the draft opens on whatever account Mail defaults to.
+            if fromAddr is not "" then
+                set sender of m to fromAddr
+            end if
+            tell m to make new to recipient at end of to recipients with properties {address:toAddr}
+            if bccList is not "" then
+                set AppleScript's text item delimiters to ","
+                set bccItems to text items of bccList
+                set AppleScript's text item delimiters to ""
+                repeat with b in bccItems
+                    if (b as text) is not "" then
+                        tell m to make new bcc recipient at end of bcc recipients with properties {address:(b as text)}
+                    end if
+                end repeat
+            end if
+            if attachPath is "" then return "ATTACH_NA"
+            -- let Mail fully render the draft before attaching (race-condition fix)
+            delay 1.5
+            tell m to tell content to make new attachment with properties {file name:(POSIX file attachPath)} at after the last paragraph
+            delay 1
+            -- kit #165: the attach call is silent on failure, so read the count back. kit #228: on an Exchange
+            -- sender the outgoing message object can stop answering, so retry the read (1 s, 2 s, 4 s) before
+            -- looking the draft up in the Drafts mailbox.
+            set attachCount to -1
+            try
+                set attachCount to (count of mail attachments of m)
+            on error
+                delay 1
+                try
+                    set attachCount to (count of mail attachments of m)
+                on error
+                    delay 2
+                    try
+                        set attachCount to (count of mail attachments of m)
+                    on error
+                        delay 4
+                        try
+                            set attachCount to (count of mail attachments of m)
+                        end try
+                    end try
+                end try
+            end try
+            if attachCount is -1 then
+                -- Exchange keeps duplicate copies of a draft (#165): only a draft newer than the start stamp, and only a
+                -- single match, may count. Zero or several is "ambiguous", never "verified".
+                try
+                    if fromAddr is "" then return "ATTACH_UNVERIFIED: unreadable"
+                    set draftAccount to first account whose email addresses contains fromAddr
+                    set draftMatches to (messages of mailbox "Drafts" of draftAccount whose subject is subj and date received > startStamp)
+                    if (count of draftMatches) is not 1 then
+                        return "ATTACH_UNVERIFIED: ambiguous (" & (count of draftMatches) & " drafts)"
+                    end if
+                    set attachCount to (count of mail attachments of (item 1 of draftMatches))
+                on error
+                    return "ATTACH_UNVERIFIED: unreadable"
+                end try
+            end if
+            if attachCount is 0 then return "ATTACH_MISSING"
+            return "ATTACH_VERIFIED"
+        on error errMsg
+            return "ATTACH_ERROR: " & errMsg
+        end try
+        -- END #228 attach-and-verify
+    end tell
+end run
+APPLESCRIPT
+_OSA_RC=$?
+# kit #228: the script's stdout is the word it returns, kept in a file so the heredoc above stays attached to the
+# osascript line (and bash 3.2 never parses a heredoc inside a command substitution). A nonzero exit still means NO draft.
+_OSA_OUT="$(cat "$_OSA_OUTFILE" 2>/dev/null)"
+rm -f "$_OSA_OUTFILE"
+[ -z "$_OSA_OUT" ] || printf '   Mail said: %s\n' "$_OSA_OUT"
+
+else
+  # ── EVERY OTHER DELIVERY (kit #145 port) ────────────────────────────────────────────────────
+  # A web compose link, a .eml file, or a copy file. Gated: mail_deliver.py refuses unless this
+  # script vouches for the call, so running it by hand cannot skip the lint, the dedup, the BUILD
+  # gate or the send-log row.
+  MAIL_DRAFT_GATED="$(_gate_token)" python3 "$HERE/mail_deliver.py" --deliver "$DELIVERY" \
+      --to "$TO" --subject "$SUBJECT" --body-file "$BODYFILE" ${ATTACH:+--attach "$ATTACH"}
+  _OSA_RC=$?
+fi
+
+# ⛔ THIS USED TO END ON AN echo, SO THE SCRIPT EXITED 0 WITH NO DRAFT. Apple Mail refused, or
+# osascript is absent, which it always is on Linux: nothing was made, no row was logged, and every
+# wrapper was told it worked. 7 means this and nothing else, so a caller can tell a refusal from a
+# gate refusal (3, 4, 6).
+if [ "$_OSA_RC" -ne 0 ]; then
+  echo "   Nothing was recorded as staged. Your note is still in $BODYFILE: copy it into your mail" >&2
+  echo "   program, attach your résumé, and press Send yourself." >&2
+  exit 7
+fi
+# ⛔ STATUS MUST CARRY THE DELIVERY'S CODE, NOT THE `if` ABOVE IT. `$?` here reads the exit of
+# that `fi`, which is 0 whether the branch ran or not, so STATUS was ALWAYS 0 and the success
+# path below was taken unconditionally. Proved by running it. The delivery's own code is the
+# only honest source.
+# BEGIN #228 attachment state (kit #228): the AppleScript reports a word; the row says what is known.
+: "${DELIVERY:=apple-mail}"   # this copy has one route; the kit copy sets DELIVERY above
+_ATTACH_STATE="n/a"; _ATTACH_REASON=""
+if [ "$DELIVERY" = "apple-mail" ] && [ -n "$ATTACH" ]; then
+  _ATTACH_WORD="$(printf '%s\n' "$_OSA_OUT" | tr -d '\r' | grep -v '^[[:space:]]*$' | tail -n 1)"
+  case "$_ATTACH_WORD" in
+    ATTACH_VERIFIED*)   _ATTACH_STATE="verified" ;;
+    ATTACH_MISSING*)    _ATTACH_STATE="missing" ;;
+    ATTACH_UNVERIFIED*) _ATTACH_STATE="unverified" ;;
+    ATTACH_ERROR*)      _ATTACH_STATE="attach_error" ;;
+    *)                  _ATTACH_STATE="unverified"; _ATTACH_WORD="ATTACH_UNVERIFIED: Mail gave no answer" ;;
+  esac
+  case "$_ATTACH_WORD" in
+    *:*) _ATTACH_REASON="${_ATTACH_WORD#*:}"; _ATTACH_REASON="${_ATTACH_REASON# }" ;;
+  esac
+fi
+_ATTACH_NOTE=""
+case "$_ATTACH_STATE" in
+  unverified)   _ATTACH_NOTE="attachment not verified by Mail: ${_ATTACH_REASON:-no reason given} (the draft was made; open it and check the résumé is on it before you send)" ;;
+  missing)      _ATTACH_NOTE="the draft is in Mail WITHOUT the résumé: attach it or delete the draft before sending" ;;
+  attach_error) _ATTACH_NOTE="the draft is in Mail WITHOUT the résumé (Mail said: ${_ATTACH_REASON:-nothing}): attach it or delete the draft before sending" ;;
+esac
+# END #228 attachment state
+# a dry run makes no draft, so it has no attachment state to report
+[ -z "$DRY_RUN" ] || { _ATTACH_STATE="n/a"; _ATTACH_REASON=""; _ATTACH_NOTE=""; }
+STATUS="$_OSA_RC"
+if [ $STATUS -eq 0 ]; then
+  # STAGED entry in the shared stores so a parallel session sees the in-flight draft. Additive: the
+  # "STAGED ... awaiting your send" marker carries no "sent" token, so it never reads as a real send
+  # (your own Send later turns it into a SENT record). Re-staging the same company is prevented
+  # upstream by the dedup gate, which will then see this company in outreach_log.md.
+  _LOG_CO="$COMPANY"
+  # Same warm-rung fallback as the résumé QA: a warm send identifies by --targets, not --company.
+  [ -z "$_LOG_CO" ] && _LOG_CO="$(printf '%s' "$TARGETS" | cut -d',' -f1 | sed 's/^ *//;s/ *$//')"
+  _LOG_CO="${_LOG_CO:-(unspecified)}"
+  _OLOG="$DATA_ROOT/outreach_log.md"
+  _CLOG="$DATA_ROOT/documents/correspondence-log.md"
+  _TODAY="$(python3 "$HERE/local_day.py" 2>/dev/null || date '+%Y-%m-%d')"
+  # ── FOLLOW-UP ARMING, WARM RUNGS ONLY ────────────────────────────────────────────────────────
+  # A cold non-replier gets a NEW target, never a chase, so only warm rungs arm a second touch.
+  # The token must be PRESENT either way: a cold send writes `FOLLOWUP-DUE: none` so the follow-up
+  # checker reads it as a DECISION rather than an un-armed send, which is what stopped every
+  # compliant cold send from reding the consistency check forever. This set must stay in sync with
+  # ARMS_FOLLOWUP in log_linkedin_send.py, or the two paths disagree and the rule is decorative.
+  # ⛔ NO RUNG ARMS A FOLLOW-UP (BUG-094, fixed 2026-08-09). This case armed four rungs while
+  # check_followups.ARMS_FOLLOWUP was already empty, so the kit wrote follow-up dates its own
+  # checker never looked for. All three sites now agree: here, log_linkedin_send.ARMS_FOLLOWUP,
+  # and check_followups.ARMS_FOLLOWUP. The empty case is kept rather than deleted so restoring a
+  # rung is a one-line change, and so this stays the single arming site.
+  case "$RUNG" in
+    *) _FUP="none" ;;
+  esac
+# ── THE RÉSUMÉ PANEL RECEIPT, BOUND TO THE TEXT LAYER OF THE ATTACHED FILE (2026-08-09) ───────
+#
+# WHY, and it is the SAME rule as the outreach panel rather than a second idea. `WORKFLOW-RULES.md`
+# has carried "3-panel review (CEO/CTO/CPO) before finalizing ANY artifact" since July with nothing
+# enforcing it, and that line sits among the RÉSUMÉ rules. The outreach half was mechanized this
+# earlier. This is the half the rule was literally written next to.
+#
+# ⚖️ IT COMPLEMENTS verify_resume, IT DOES NOT DUPLICATE IT. verify_resume asks mechanical
+# questions: one page, reverse chronological, summary length, retired figures, a clean text layer.
+# Nothing asked whether the résumé is CONVINCING, DEFENSIBLE in the interview it earns, or TARGETED
+# at the role. Those are the three lenses, and no linter can answer them.
+#
+# ⚖️ THE HASH IS OF THE TEXT LAYER, NOT THE FILE BYTES. pdflatex stamps a creation date, so two
+# builds of an unchanged .tex differ in bytes. Hashing bytes would orphan the receipt on every
+# recompile and teach everyone to re-run the panel without reading it, which is how a gate becomes a
+# formality. Measured: two builds of one source share a text-layer hash and differ in bytes; one
+# reworded line moves the text-layer hash. So a content edit still orphans the receipt.
+RESUME_PANEL_STATE="n/a"
+if [ -n "$ATTACH" ] && [ -f "$HERE/review_resume.py" ]; then
+  _RP_DIR="$DATA_ROOT/documents/state/resume-panels"
+  # The hash is recomputed from the artifact rather than parsed out of `--show`'s human output:
+  # --show prints a receipt when one exists and a sentence when it does not, and a gate that reads
+  # a sentence breaks the day somebody rewords it.
+  _RP_SHA="$(python3 - "$HERE" "$ATTACH" <<'PYRP' 2>/dev/null
+import sys, os
+sys.path.insert(0, sys.argv[1])
+import review_resume as rr
+t = rr.text_layer(sys.argv[2])
+print(rr.artifact_hash(t) if t is not None else "")
+PYRP
+)"
+  # ⛔ COMPANY-KEYED RECEIPT (kit item 13 / private-repo ee1aec0b, 2026-09-09). Two companies
+  # reviewing the same text-layer sha now get two receipt files, not one shared file the second
+  # `--record` silently erases. The slug matches review_resume.py's slugify() exactly (same python
+  # fn), so the exact company-keyed file is preferred; a bare legacy sha.json still passes when no
+  # company-keyed file exists yet, and a DIFFERENT company's file for this sha is never accepted —
+  # a known company with no matching file stays a miss, never a glob to whatever happens to exist.
+  _RP_SLUG="$(python3 - "$HERE" "$_QA_CO" <<'PYRPS' 2>/dev/null
+import sys
+sys.path.insert(0, sys.argv[1])
+import review_resume as rr
+print(rr.slugify(sys.argv[2]))
+PYRPS
+)"
+  if [ -z "$_RP_SHA" ]; then
+    # ⚠️ FAILS OPEN, AND SAYS SO. An attachment whose text layer cannot be read (a scanned PDF, no
+    # pdftotext installed) is not evidence of a skipped review, and blocking a send on a missing
+    # system binary would strand the whole method on one dependency. Loud, never silent.
+    echo "   ⚠️  résumé panel: no text layer could be read from $(basename "$ATTACH"), so the receipt" >&2
+    echo "       could not be checked. Recorded as unreadable, NOT as reviewed." >&2
+    RESUME_PANEL_STATE="unreadable"
+  else
+    # ⛔ NEVER FALL BACK TO ANOTHER COMPANY'S FILE. When --company is known, only its exact
+    # company-keyed receipt or the company-less legacy bare file count as a pass — a glob that
+    # picked up whichever company-keyed file happened to exist would let a DIFFERENT company's
+    # review authorize THIS send, which is the collision this fix exists to close, not reopen.
+    # $_RP_SLUG empty (no company resolved) is the one case a bare-sha glob is safe.
+    if [ -n "$_RP_SLUG" ] && [ -f "$_RP_DIR/${_RP_SHA}-${_RP_SLUG}.json" ]; then
+      _RP_FILE="$_RP_DIR/${_RP_SHA}-${_RP_SLUG}.json"
+    elif [ -f "$_RP_DIR/${_RP_SHA}.json" ]; then
+      _RP_FILE="$_RP_DIR/${_RP_SHA}.json"
+    elif [ -z "$_RP_SLUG" ]; then
+      _RP_FILE="$(ls "$_RP_DIR/${_RP_SHA}"-*.json 2>/dev/null | head -1)"
+      [ -z "$_RP_FILE" ] && _RP_FILE="$_RP_DIR/${_RP_SHA}.json"
+    else
+      _RP_FILE="$_RP_DIR/${_RP_SHA}-${_RP_SLUG}.json"   # known company, no match — stays missing
+    fi
+    if [ -n "$FORCE" ] && [ ! -f "$_RP_FILE" ]; then
+      RESUME_PANEL_STATE="forced"
+      echo "   ⚠️  résumé panel BYPASSED by --force. Recorded as resume_panel:forced in the send log." >&2
+    elif [ ! -f "$_RP_FILE" ]; then
+      echo "⛔ BLOCKED: no résumé-panel receipt for THIS résumé." >&2
+      echo "   Run:  python3 scripts/review_resume.py \"$ATTACH\" --company \"$_QA_CO\"" >&2
+      echo "   It runs three independent lenses (CEO, CTO, CPO), shows you the findings, and writes" >&2
+      echo "   a receipt keyed to this résumé's text layer ($_RP_SHA)." >&2
+      echo "   ⚠️ If you edited and rebuilt the résumé after reviewing it, that is what this caught." >&2
+      exit 4
+    fi
+    if [ "$RESUME_PANEL_CHECK" != "pass" ] && [ -n "$FORCE" ]; then
+      RESUME_PANEL_STATE="forced"
+      echo "   ⚠️  résumé receipt present but unread (--resume-panel-check absent); --force recorded it as forced." >&2
+    elif [ "$RESUME_PANEL_CHECK" != "pass" ]; then
+      echo "⛔ BLOCKED: a résumé-panel receipt exists but --resume-panel-check pass was not given." >&2
+      echo "   Read the findings in $_RP_FILE, apply what you accept, then pass --resume-panel-check pass." >&2
+      echo "   ⚖️ The receipt proves the panel RAN. This flag is you saying you READ it." >&2
+      exit 4
+    fi
+    if [ "$RESUME_PANEL_STATE" != "forced" ]; then
+      RESUME_PANEL_STATE="reviewed"
+      echo "   ✅ résumé panel: receipt found for this résumé (${_RP_SHA:0:12})"
+    fi
+  fi
+fi
+
+  # kit#227: --dry-run reaches every gate above (including the résumé-panel receipt check right
+  # above this line, which can still exit 4), but writes NONE of send-log.jsonl, outreach_log.md
+  # or correspondence-log.md. Wrapping the whole write section, rather than skipping it earlier,
+  # is what lets a résumé-panel BLOCK still exit nonzero under --dry-run exactly as a real send.
+  if [ -z "$DRY_RUN" ]; then
+  # SEND-LOG, the machine-readable record. rank_criteria.py reads the `targets` field to burn-track
+  # which companies a warm ask already named, so without this the trio generator keeps proposing
+  # companies you already asked about.
+  _SLOG="$DATA_ROOT/documents/send-log.jsonl"
+  # RECIPIENT NAME ON THE ROW: the people-ranker dedups on the CONTACT (contacted_people reads
+  # `to_name`), not the address, so a nameless row never matches the roster entry and the person is
+  # re-offered as uncontacted. Resolve from --name, falling back to --boss exactly as
+  # log_linkedin_send.py does, so one vocabulary (`to_name`) covers both writers.
+  _TONAME="$NAME"
+  [ -z "$_TONAME" ] && _TONAME="$BOSS"
+  # ⛔ THIS BLOCK LIVED INSIDE THE PYTHON HEREDOC BELOW until 2026-09-21, put there by a bad
+  # port of kit #145. Shell inside a heredoc is Python source, so every run raised SyntaxError on
+  # it, the `2>/dev/null || true` threw the error away, and send-log.jsonl was never written.
+  # What the STAGED record says depends on what exists. It must say "draft" (check_dup reads that
+  # word to tell an in-flight draft from a real send) and must NEVER say a draft was created in a
+  # mail program when only a file or a link was.
+  case "$DELIVERY" in
+    eml)                   _STAGED_WORDS="draft written to ${BODYFILE%.*}.eml, awaiting your send" ;;
+    gmail-web|outlook-web) _STAGED_WORDS="draft link prepared, awaiting your send" ;;
+    copy)                  _STAGED_WORDS="draft copy prepared, awaiting your send" ;;
+    *)                     _STAGED_WORDS="draft created, awaiting your send" ;;
+  esac
+  if [ -d "$(dirname "$_SLOG")" ]; then
+    # ⛔ THIS CALL USED TO END IN `2>/dev/null || true`, and for a day it wrote nothing at all:
+    # a shell block had been ported into the heredoc, python raised SyntaxError every run, and the
+    # error went straight to /dev/null while the script printed success. A write whose failure
+    # cannot be observed is indistinguishable from a write that had nothing to do.
+    # It stays NON-FATAL, because a logging problem must never cost a person their draft. What
+    # changes is that it is LOUD.
+    _SLOG_ERR="$(mktemp 2>/dev/null || echo /tmp/mail-draft-slog-err.$$)"
+    _SLOG_RC=0
+    SEND_DAY="$(python3 "$HERE/local_day.py" 2>/dev/null)" SENDLOG_SCRIPTS="$HERE" python3 - "$_SLOG" "${RUNG:-cold-boss}" "$TO" "$_LOG_CO" "$TARGETS" "$SUBJECT" "$_FUP" "$SEGMENT" "$PANEL_STATE" "${RESUME_PANEL_STATE:-n/a}" "$_TONAME" "$FROM" "${BOSS:-}" "$BCC" "$_ATTACH_STATE" "$_ATTACH_REASON" <<'PYLOG' 2>"$_SLOG_ERR" || _SLOG_RC=$?
+import json, sys, datetime, os
+path, rung, to, company, targets, subject, fup, segment, panel, resume_panel, to_name, from_addr, boss, bcc, att_state, att_reason = sys.argv[1:17]
+# ⛔ ONE DEFINITION OF THE STATUS THIS FILE WRITES. The row below and the rebuild guard further
+# down must agree, and they are twelve lines apart. A guard that matched a status this script does
+# not write would never fire, and the fix would be present in the file and dead in practice.
+STAGED_STATUS = "staged"
+# ⚠️ `targets` is a COMMA-SEPARATED STRING, not a list. rank_criteria.burned_targets() reads it as
+# `(row.get("targets") or "").split(",")`, and log_linkedin_send.py writes it the same way. A list
+# here is silently unreadable to the consumer, so the burn guard that stops one company being named
+# in two different warm trios would stay dead while this log looked perfectly populated. Match the
+# READER, not what looks tidier in JSON.
+row = {"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+       "date": os.environ.get("SEND_DAY") or datetime.date.today().isoformat(),
+       "channel": "email", "status": STAGED_STATUS, "rung": rung, "to": to, "to_name": to_name,
+       # rung-mix drift (2026-09-12): the boss-registry gate already required and verified $BOSS
+       # on a cold-boss send; rung_ladder's equipped/unequipped split reads this field and nothing
+       # wrote it. Always present, empty on a rung with no boss.
+       "boss": boss,
+       # kit#163: --bcc is a sanctioned option and Mail adds the BCC recipients to the compose
+       # window, but the row carried only `to`/`to_name`, so prior-contact and dedup checks
+       # (which read this file) never saw a BCC address as contacted. Same comma-split shape as
+       # `targets` above, empty list when --bcc was not given.
+       "bcc": [b.strip() for b in bcc.split(",") if b.strip()],
+       "company": company,
+       "targets": ",".join(t.strip() for t in targets.split(",") if t.strip()),
+       "subject": subject, "followup_due": fup, "segment": segment,
+       "panel": panel,
+       # the résumé half of the same rule: reviewed | forced | unreadable | n/a
+       "resume_panel": resume_panel,
+       # kit #228: what is known about the attachment. `status` stays "staged": none of these fields is a send, and no
+       # reader of this log looks at them. attachment_verified is true | false | "n/a"; false covers unverified, missing
+       # and attach_error, and attachment_state / attachment_reason say which.
+       "attachment_verified": {"verified": True, "n/a": "n/a"}.get(att_state, False),
+       "attachment_state": att_state,
+       "attachment_reason": att_reason,
+       # BUG-254: the sending address when --from was passed, "" (default account) otherwise --
+       # so reply rate can be compared by domain once enough sends exist on each.
+       "from": from_addr,
+       # The reply state is INITIALIZED here, never asserted. `null` means nobody has checked yet;
+       # it is NOT `false`, which means checked and no reply came. 125 rows predating this line
+       # carry no key at all (seat 1b, 2026-09-11), and every one of them is "never checked" —
+       # which anything reading a missing key as a negative silently reports as a real zero.
+       "replied": None}
+# ── ONE ROW PER DRAFT, NOT ONE PER BUILD ──────────────────────────────────────────────────
+# Rebuilding a draft (a corrected attachment, a reworded subject line) used to append a SECOND
+# staged row here while the outreach log's own marker guard correctly deduplicated, so the two
+# stores disagreed in BOTH directions and the daily counters could not be reconciled. A rebuild
+# is the SAME draft in a later state, so the existing row is overwritten rather than joined.
+# ⚠️ Only staged rows are eligible. A row that already reads as sent is history and is never
+# touched. Unparseable lines are preserved exactly as found rather than dropped, and the rewrite
+# is atomic (temp file + os.replace) so an interrupted run cannot truncate a shared store.
+# ── THE LOCK (BUG-687): the read-modify-write below runs under sendlog_lock.locked, the ONE lock every writer of the send log takes. This writer runs AFTER delivery, so it
+# waits up to 60 s and then SPOOLS the row as an operation (never drops it); the next writer folds it in. A rebuild of a spooled draft still overwrites its staged row.
+sys.path.insert(0, os.environ.get("SENDLOG_SCRIPTS") or os.path.dirname(os.path.abspath(path)))
+import sendlog_lock as sl
+replaced = False
+try:
+    with sl.locked(path, timeout=sl.LOCK_TIMEOUT_AFTER):
+        rows, replaced = [], False
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.rstrip("\n")
+                    if not line.strip():
+                        continue
+                    try:
+                        rows.append(json.loads(line))
+                    except ValueError:
+                        rows.append(line)
+        for i in range(len(rows) - 1, -1, -1):
+            r = rows[i]
+            if (isinstance(r, dict) and r.get("status") == STAGED_STATUS and r.get("to") == to
+                    and r.get("company") == company and r.get("subject") == subject):
+                rows[i] = row
+                replaced = True
+                break
+        # ── THE ONE RESEND, ON THE SAME ROW (slice K, proxy 517 Q3) ──────────────────────────────────
+        # No staged row matched: a `bounced` row for this company and person (the subject is not part of the key), with NO `resent_date`, is the thread's first touch that never landed. The
+        # corrected address is recorded ON THAT ROW, not beside it: new `to`, status staged, the original `date` and `sent_ts` kept, `resent_date` today,
+        # and the bounce history carried forward (`bounced_to` = the address that bounced, `first_bounced_at` = the first bounce date) so After can say
+        # "bounced at X, resent to Y". Company and person are compared as exact strings; only the NEW `to` is normalized (trim, lower-case), and
+        # an address on documents/bounced-addresses.txt is never written back (the bounce guard refuses it before any draft; --force skips that guard).
+        # A bounced row that ALREADY carries `resent_date` is never matched here: the pre-draft gate (PYRESEND) stops that run before a draft exists,
+        # and this refusal is the backstop that should never fire.
+        if not replaced:
+            # the resend rewrite is ONE function (sendlog_lock.resend_into), also used by the fold when this row was spooled
+            try:
+                replaced = sl.resend_into(rows, row, company, to_name, subject, sl.bounced_listed(path))
+            except sl.ResendBlocked:
+                print("⛔ BLOCKED: this thread already had its one resend; the person pivot or LinkedIn is next.", file=sys.stderr)
+                sys.exit(4)
+        if not replaced:
+            rows.append(row)
+        sl.atomic_write_rows(path, rows)
+except sl.SendLogBusy:
+    sl.spool(path, "append", "mail-draft.sh", {"to": to, "company": company, "subject": subject, "to_name": to_name, "resend": True}, row)
+    print("the row is spooled; the next writer folds it in")
+if replaced:
+    print("   ♻️  rebuild: existing staged row updated in place (one row per draft)")
+PYLOG
+    _SLOG_STEM="${_SLOG%.jsonl}"
+    if [ "$_SLOG_RC" -ne 0 ] || { [ ! -s "$_SLOG" ] && [ ! -s "$_SLOG_STEM.pending.jsonl" ] && [ -z "$(ls -A "$_SLOG_STEM.pending.d" 2>/dev/null)" ]; }; then
+      echo "   ⚠️  the send log was NOT written ($_SLOG)." >&2
+      echo "      Your draft is fine. What is lost is the machine-readable record, so this" >&2
+      echo "      person may be offered to you again as someone you have not contacted." >&2
+      [ -s "$_SLOG_ERR" ] && sed 's/^/      /' "$_SLOG_ERR" >&2
+    fi
+    rm -f "$_SLOG_ERR"
+  fi
+  _STAG_KEY="STAGED · ${_LOG_CO} · ${SUBJECT}"
+  if [ -f "$_OLOG" ] && grep -qF -- "$_STAG_KEY" "$_OLOG" 2>/dev/null; then
+    echo "   📝 STAGED entry already present for '${_LOG_CO}' / this subject — not duplicating."
+  else
+    {
+      printf '\n## %s · %s · %s — STAGED (draft)\n' "$_TODAY" "$_LOG_CO" "$TO"
+      printf '<!-- %s -->\n' "$_STAG_KEY"
+      # ⛔ THIS LINE USED TO HARDCODE "draft created, awaiting your send" ON EVERY ROUTE, which
+      # told the log a mail-program draft existed when only a file or a link did. $_STAGED_WORDS
+      # is the per-route wording, set above; it had been computed and never read since the port.
+      printf '**Status:** STAGED (%s) %s to %s.\n' "${_STAGED_WORDS:-draft created, awaiting your send}" "$_TODAY" "$TO"
+      [ -z "$FROM" ] || printf '**From:** %s\n' "$FROM"
+      printf '**Subject:** %s\n' "$SUBJECT"
+      # Rung + FOLLOWUP-DUE on the block itself: check_followups.py reads this file, and a SENT
+      # block with no FOLLOWUP-DUE token at all is what it flags as un-armed.
+      printf '**Rung:** %s | FOLLOWUP-DUE: %s\n' "${RUNG:-cold-boss}" "$_FUP"
+      # ── THE MACHINE-READABLE RECONCILE MARKER (2026-08-10) ────────────────────────────────
+      # ⛔ WHY A MARKER AND NOT PROSE. The narrative already carries the address and the rung, but
+      # in shapes that drift as the log's conventions change: older entries write the address and
+      # no rung, newer ones write the rung and no address. Measured on one real log, the two sets
+      # were DISJOINT, 30 with an address and 81 with a rung and ZERO with both, so
+      # `reconcile_outreach_log.py` could reconstruct nothing and the ladder's denominator stayed
+      # permanently unverifiable. Prose that a human edits is not a schema.
+      #
+      # ⚖️ ONE LINE, WRITTEN ONCE, SURVIVING THE HUMAN EDIT. It goes in the STAGED block because
+      # that is the moment both fields are known for certain, and it is an HTML comment so it stays
+      # invisible in every rendered view and is carried along when the entry is edited into its SENT
+      # form. `subject` is LAST and any `-->` in it is defanged, so a subject can never truncate it.
+      printf '<!-- SENDLOG v1 date=%s rung=%s channel=%s to=%s subject=%s -->\n' \
+        "$_TODAY" "${RUNG:-}" "email" "$TO" "$(printf '%s' "$SUBJECT" | sed 's/--*>/-->/g; s/-->/->/g')"
+      [ -z "$_ATTACH_NOTE" ] || printf '**Attachment:** %s\n' "$_ATTACH_NOTE"
+      [ -z "$TARGETS" ] || printf '**Targets:** %s\n' "$TARGETS"
+    } >> "$_OLOG" 2>/dev/null \
+      && echo "   📝 STAGED touch logged to $_OLOG (company=$_LOG_CO)" || true
+    if [ -d "$(dirname "$_CLOG")" ]; then
+      printf -- '- %s · OUTBOUND (STAGED, not yet sent) · %s → %s · subj: %s%s\n' \
+        "$_TODAY" "$_LOG_CO" "$TO" "$SUBJECT" "${_ATTACH_NOTE:+ · $_ATTACH_NOTE}" >> "$_CLOG" 2>/dev/null || true
+    fi
+  fi
+  fi   # end: writes skipped under --dry-run (kit#227)
+  # ⛔ THIS LINE SAID "draft created in Apple Mail" WHATEVER ROUTE RAN, including on Linux, where
+  # Apple Mail does not exist, three lines after the script had correctly said it wrote a file.
+  # The last line of a run is the one a person believes.
+  if [ -n "$DRY_RUN" ]; then
+    if [ -n "$NO_ADDR" ]; then
+      _SKIPPED=""
+      [ -z "$NEXT_TARGET" ] || [ -n "$FORCE" ] || _SKIPPED=" The --next-target check that this exact person was not already contacted needs an address, so it was skipped."
+      echo "DRY RUN: every gate that does not need an address passed. ADDRESS gate: MISSING, no --to was given, so a real send would stop at the argument check.${_SKIPPED} Nothing was written."
+      exit 2
+    fi
+    echo "DRY RUN: every gate passed. Nothing was written — no draft, no send-log row, no log touch."
+  else
+  case "$DELIVERY" in
+    eml|copy|gmail-web|outlook-web)
+      echo "OK: ${_STAGED_WORDS:-draft prepared}. Nothing is in your mailbox and nothing was sent. CONFIRM the résumé is attached, then send it yourself." ;;
+    *)
+      [ -z "$_ATTACH_NOTE" ] || echo "⚠️  $_ATTACH_NOTE"
+      case "$_ATTACH_STATE" in
+        missing|attach_error) : ;;   # no "OK" line: the draft exists without the résumé; the warn above says so
+        unverified) echo "OK: draft created in Apple Mail (visible, NOT sent). attachment not verified by Mail: open the draft and check before you send it yourself." ;;
+        *) echo "OK: draft created in Apple Mail (visible, NOT sent). CONFIRM the résumé is attached, then send it yourself." ;;
+      esac ;;
+  esac
+  fi
+else
+  # ⛔ THIS BRANCH USED TO END ON AN echo, SO THE SCRIPT EXITED 0 WITH NO DRAFT. Apple Mail
+  # refused, or osascript is absent, which it always is on Linux: nothing was made, no row was
+  # logged, and every wrapper and agent was told it had worked. 7 means a refusal and nothing
+  # else, so a caller can tell it from a gate refusal (3, 4, 6).
+  # It is reached only if the earlier _OSA_RC guard is ever removed. Kept anyway: a dead branch
+  # that lies is a live hazard the moment someone deletes the guard above it.
+  echo "ERROR creating draft (exit $STATUS)." >&2
+  echo "   Nothing was recorded as staged. Your note is still in $BODYFILE: copy it into your mail" >&2
+  echo "   program, attach your résumé, and press Send yourself." >&2
+  exit 7
+fi
+# kit #228: the draft exists and every store above now carries its row; a draft with no résumé on it is still a failure the
+# caller must see, so it exits 7 here, AFTER the stores. (The only exit 7 before the stores is the no-draft branch.)
+case "$_ATTACH_STATE" in
+  missing|attach_error) exit 7 ;;
+esac

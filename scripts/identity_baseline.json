@@ -1,0 +1,26 @@
+{
+  "_meta": {
+    "generated": "2026-09-15 by W0-GATE seat",
+    "plan": "documents/plan-screen-continuity-and-navigation-2026-09-15.md section 5",
+    "purpose": "today's check_identity.py violation counts, so the gate is green now and red only on NEW drift past these counts. Each slice that fixes a class of drift should lower its row (or delete the row once a file/rule reaches zero) -- this file never grows on its own.",
+    "rules": "custom_property = a --name: declared outside tokens.css and not on the short allowlist; font_size_scale = a px font-size off 11/13/16/19/23/28/33/40/48; font_family = a font-family other than the token faces; hex_literal = a bare hex color outside a var() fallback and outside an allowlisted property declaration; var_fallback = var(--x, fallback) whose fallback differs from tokens.css's light value for --x",
+    "known_sources": "app2.py custom_property = Doors' --door-a/--door-b/--frame/--glow/--glow-2/--floor/--shadow, 3 theme blocks x 7 names; app2.py var_fallback = --radius-reveal's 0 vs 14px; home.py custom_property = the --ja-home-* namespace (8 names x 2 theme blocks); home.py font_family = the -apple-system stack at home.py:487; find.py var_fallback = --tap/--accent/--good/--bad/--warn/--rule/--rule-control/--on-accent/--ink-2/--ink-3 fallbacks that predate tokens.css; font_size_scale across app2.py/build.py/find.py/home.py = pre-token literal px sizes"
+  },
+  "app/design/app2.py": {
+    "custom_property": 21,
+    "font_size_scale": 20,
+    "var_fallback": 1
+  },
+  "app/design/phases/build.py": {
+    "font_size_scale": 5
+  },
+  "app/design/phases/find.py": {
+    "font_size_scale": 8,
+    "var_fallback": 34
+  },
+  "app/design/phases/home.py": {
+    "custom_property": 16,
+    "font_family": 1,
+    "font_size_scale": 9
+  }
+}

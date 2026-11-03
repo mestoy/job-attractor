@@ -1,0 +1,23 @@
+{
+  "_about": "ONE source for the mail clients, read by scripts/mail_deliver.py (the CLI) and, once the app is moved over, by app/design/phases/build.py. Nothing else may hold these values as literals: tests/test_mail_clients_single_source.py fails if it does. Only WHO the clients are, WHERE their web compose pages are and WHAT WORDS to share live here. How each surface delivers (files, links, copy buttons) stays in that surface.",
+  "version": 1,
+  "url_max": 1800,
+  "aliases": {"apple": "apple-mail", "thunderbird": "other"},
+  "clients": [
+    {"key": "gmail", "label": "Gmail", "delivery": "gmail-web",
+     "web": {"base": "https://mail.google.com/mail/?view=cm&fs=1", "subject_param": "su"},
+     "hedge": "The link has worked from the app. Opened from a terminal it is likely, not yet checked."},
+    {"key": "outlook", "label": "Outlook", "delivery": "outlook-web",
+     "web": {"base": "https://outlook.office.com/mail/deeplink/compose", "subject_param": "subject"},
+     "hedge": "Not tried on this device yet. If nothing opens, use the copy steps below."},
+    {"key": "apple-mail", "label": "Apple Mail", "delivery": "apple-mail",
+     "why_it_differs": "The app cannot control Mail, so it gives you copy steps instead. The command line can make the draft for you."},
+    {"key": "phone", "label": "On my phone", "delivery": "copy"},
+    {"key": "other", "label": "Something else", "delivery": "eml"}
+  ],
+  "strings": {
+    "too_long": "This message is too long to fill in all the way, so the body stays out. Copy the body and paste it in.",
+    "add_address": "Add their email address in the To line.",
+    "send_head": "Check it, attach your résumé, press Send"
+  }
+}

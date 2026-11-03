@@ -1,0 +1,938 @@
+#!/usr/bin/env python3
+"""check_style.py — house-style linter: APA construct plus YOUR informal voice, no AI slop.
+
+WHY THIS EXISTS
+    The repo already gates VOICE, but only on two surfaces. check_outreach.py lints an email
+    BODY. check_preview.py imports that same BANNED list to lint AskUserQuestion previews.
+    Everything else written in your name — dossiers, scorecards, JD-fit analyses,
+    session-state handoffs, and every chat reply — has never been linted at all.
+
+    The owner's ruling (2026-07-24): "I prefer the construct of APA versus yours while using my
+    informal voice. Let's try a blend." Plus: adopt petergyang/no-ai-slop, all 20 patterns
+    MINUS rule 16 (formatting slop), because his status badges and 🔬/📊/💡 depth markers are
+    deliberate signal, not decoration.
+
+PRECEDENCE (the whole point of the blend)
+    When APA and YOUR voice collide, YOUR VOICE WINS. Encoded here so it stops being
+    re-litigated every session:
+        compound modifiers  APA hyphenates      → his rule: no hyphens ("civic tech")
+        contractions        APA avoids them     → his rule: keep them, they ARE the voice
+        numbers under 10    APA spells them out → his rule: numerals for money and metrics
+        em dashes           APA permits them    → his rule: none, ever (stricter than APA)
+
+WHAT REGEX CAN AND CANNOT DO
+    Honest split, because a linter that pretends to judge prose quality is worse than none:
+      HARD FAIL  deterministic string/shape matches — em dashes, banned vocabulary, empty
+                 phrases, throat-clearing, faux-insight setups, colon reveals, superficial
+                 -ing analysis, importance puffery, weasel attribution, fake-strong verbs,
+                 rhetorical setups, summary-recap endings.
+      WARN       heuristics that carry false positives — binary contrasts, negative listing,
+                 dramatic fragmentation, robotic rhythm, anthropomorphism, serial comma,
+                 heading-level skips.
+      SKILL ONLY not mechanizable at all — synonym cycling, fake-profound kickers,
+                 preserve-the-voice, minimum-effective-edit. Those live in
+                 .claude/skills/house-style/ and are judgment, not regex.
+
+VOCABULARY SOURCE
+    Imports BANNED / RETIRED / RETIRED_PATTERNS from check_outreach (the same import proven at
+    check_preview.py:460). One canonical hard-block core, three consumers. This file ADDS a
+    prose-only layer on top; it never forks the core.
+
+Usage:
+    scripts/check_style.py <file.md> [--mode prose|outreach|resume|chat]
+    scripts/check_style.py --stdin [--mode chat]
+    scripts/check_style.py <file.md> --hook     # advisory: exempt paths exit 0 silently
+    scripts/check_style.py --hook-write         # PostToolUse(Write|Edit), reads payload on stdin
+    scripts/check_style.py --hook-stop [--strict]   # Stop hook, lints the last assistant message
+
+Exit: 0 = clean (or warns only, in --hook mode) · 1 = warns · 2 = hard fail / usage error
+"""
+import sys, os, re, fnmatch, subprocess, collections
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import kit_config as cfg
+except Exception:  # pragma: no cover - a missing config must not wedge a Write
+    class cfg:  # noqa: N801 - stand-in namespace, not a real class
+        OWNER_EMAIL = ""
+        OWNER_PHONE = ""
+try:
+    from check_outreach import BANNED, SOFT, RETIRED, RETIRED_PATTERNS, banned_hit
+    _LISTS_DEGRADED = ""
+except Exception as _e:
+    # ⚠️ THE FALLBACK IS A DEGRADED GATE AND IT MUST SAY SO (mirrors verify_resume.py's own fix
+    # for this exact shape, 2026-08-07 panel finding). A failed import here used to silently empty
+    # every list, and check_style ran on every Write/Edit with nothing left to check while still
+    # printing "✅ clean" — proven live 2026-09-12: three planted AI-tell words, reported clean.
+    BANNED, SOFT, RETIRED, RETIRED_PATTERNS = [], [], [], []
+    def banned_hit(body, word):
+        return bool(re.search(r"(?<![A-Za-z])" + re.escape(word) + r"(?![A-Za-z])", body, re.I))
+    _LISTS_DEGRADED = f"check_outreach did not import ({type(_e).__name__}: {_e}); running with zero banned/soft/retired words"
+    print(f"⚠️  check_style: {_LISTS_DEGRADED}", file=sys.stderr)
+
+REPO = os.path.abspath(os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+_REPO_AT_IMPORT = REPO
+
+
+def _repo():
+    """The project root, resolved at CALL time (BUG-156, kit #37).
+
+    `REPO` is bound from CLAUDE_PROJECT_DIR once at import, so a harness that sets the variable
+    AFTER this module was first imported kept reading and writing the live tree. Order: a patched
+    module constant wins (suites assign `REPO = tmp` directly), then the live environment, then
+    the import-time default, so nothing moves when the variable is unset. Same idiom as
+    `contact_card._shown_path()`."""
+    if REPO != _REPO_AT_IMPORT:
+        return REPO
+    env = os.environ.get("CLAUDE_PROJECT_DIR")
+    return os.path.abspath(env) if env else REPO
+
+# ── EXEMPT PATHS ─────────────────────────────────────────────────────────────────────────────
+# A slop linter that fires on the documents which QUOTE slop as examples is a linter nobody
+# leaves switched on. Every path here legitimately contains the patterns as specimens: the voice
+# corpus, the style guide, the logs that store verbatim drafts, the skill references, and the
+# memory store (which records rulings verbatim, including the words the ruling bans).
+# The GUARDRAIL documents are exempt for the same reason, and the hook taught me this by firing on
+# its own wiring commit: CLAUDE.md flagged "98%" and "adopted company-wide" as retired claims. Both
+# appear there because CLAUDE.md is the file that BANS them. A rule index must be free to name what
+# it forbids, and these files also predate the em-dash rule, which covers job-search materials
+# (résumé, letters, outreach), not repo configuration.
+EXEMPT_GLOBS = [
+    "CLAUDE.md",
+    "WORKFLOW-RULES.md",
+    "documents/HARD-INVARIANTS.md",
+    "documents/*checklist*.md",
+    "documents/writing-style-guide.md",
+    "documents/writing-samples.md",
+    "documents/lacivita-*.md",
+    "documents/session-state-*.md",
+    "documents/interview-question-bank.md",
+    # Culture screens are REQUIRED by HARD-INVARIANTS to carry "5 recent pos + 5 recent neg
+    # VERBATIM" employee reviews. Employees write "genuinely", "actually", "really" and
+    # "cutting-edge", and their sentences carry em dashes. A quote may not be edited to satisfy a
+    # linter, and [[quote-exemption-needs-attribution]] already exempts ATTRIBUTED quotes, which
+    # every quote in these files is. Added 2026-07-29 when one company's screen tripped five
+    # hard rules, all of them inside quoted review text. The surrounding prose is still held to the
+    # house style by hand; this exemption buys the quotes, not the analysis.
+    "documents/culture-screen-*.md",
+    "documents/culture-screens-*.md",
+    "outreach_log.md",
+    "documents/correspondence-log.md",
+    "documents/skills/*",
+    # Instruction files, not deliverables. A skill or command that teaches the rules has to quote
+    # the patterns it bans ("civic-tech", "The best part:"), and every one of them predates this
+    # linter using em dashes as separators. The em-dash rule covers job-search materials, which
+    # these are not.
+    ".claude/skills/*",
+    ".claude/commands/*",
+    "_memory-backup/*",
+    "partner-starter/*",
+    "cover_letters/*",
+    "tests/*",
+    "scripts/*",
+]
+
+
+# Extensions this linter actually reads. Anything else exits 0 with a stderr line saying so
+# (kit #123) — silence used to be indistinguishable from a clean pass, and it was read that way
+# live: "check_style.py: 0 findings, exit 0" recorded against a .py file that was never opened.
+HOOK_SCANNED_EXTS = (".md", ".markdown", ".tex")
+CLI_SCANNED_EXTS = (".md", ".txt", ".markdown", ".tex")
+
+
+def _print_skip(path):
+    """One stderr line: this path's extension is not one check_style reads.
+
+    Exit stays 0 everywhere this is called. The Write/Edit PostToolUse hook runs on every file
+    the harness writes, most of which are outside this linter's scope (Python, JSON, shell); a
+    nonzero exit there would block an ordinary edit that has nothing to do with house style.
+    """
+    ext = os.path.splitext(str(path))[1].lower()
+    name = os.path.basename(str(path)) or str(path)
+    if ext:
+        print(f"check_style: skipped {name}, {ext} files are not checked", file=sys.stderr)
+    else:
+        print(f"check_style: skipped {name}, files with no extension are not checked",
+              file=sys.stderr)
+
+
+def is_exempt(path):
+    """True when `path` is a file that legitimately quotes the patterns this linter bans."""
+    if not path:
+        return False
+    try:
+        rel = os.path.relpath(os.path.abspath(path), _repo())
+    except ValueError:
+        return False
+    if rel.startswith(".."):
+        return True  # outside the repo (scratchpad, plan files, memory dir) — not ours to lint
+    rel = rel.replace(os.sep, "/")
+    return any(fnmatch.fnmatch(rel, g) for g in EXEMPT_GLOBS)
+
+
+# ── PROSE-ONLY VOCABULARY ────────────────────────────────────────────────────────────────────
+# Deliberately NOT added to check_outreach.BANNED. These two carry repo-specific meanings that
+# would false-block a legitimate sentence: "harness" is the Claude Code harness, "underscore" is
+# a character. They are AI tells in prose, so they warn here and nowhere else.
+PROSE_WARN_WORDS = ["harness", "underscore", "underscores", "underscoring"]
+
+# Empty phrases (no-slop "Words to cut"). Hard: they always delay the point.
+EMPTY_PHRASES = [
+    "it's worth noting", "it is worth noting", "it's important to note",
+    "it is important to note", "at the end of the day", "when it comes to",
+    "at its core", "in today's world", "in the age of", "in the world of",
+    "the reality is", "the truth is", "in this article", "let's dive in",
+    "needless to say", "it goes without saying",
+]
+# Milder — real writing uses these. Warn, never block.
+SOFT_PHRASES = ["in order to", "with regard to", "in terms of", "going forward", "to be honest"]
+
+# ── NO-SLOP PATTERNS ─────────────────────────────────────────────────────────────────────────
+# (label, regex, hard?) — 19 of the source skill's 20. Rule 16 (formatting slop) is DELIBERATELY
+# ABSENT: your badges and depth markers are signal you asked for. See visual-indicators-required.
+HARD_PATTERNS = [
+    ("throat-clearing opener",
+     r"(?:^|[.!?]\s+|\n)\s*(?:\*\*)?(here'?s the thing|here'?s what i mean|let me be clear|"
+     r"let'?s be clear|i'?ll be honest|the uncomfortable truth is|here'?s the deal)"),
+
+    ("faux-insight setup",
+     r"(this is the part (?:most people|everyone) skips?|what (?:most people|everyone) gets? wrong|"
+     r"(?:here'?s )?what nobody tells you|the part (?:everyone|most people) miss(?:es)?|"
+     r"nobody talks about|what they don'?t tell you|most people (?:never|don'?t) realize)"),
+
+    # Curated colon reveals. The GENERAL shape is a warn below, because markdown labels
+    # ("**Status:** sent") are the same shape and are correct here.
+    ("colon reveal",
+     r"\b(?:the (?:best part|catch|kicker|twist|trick|secret|detail that makes it work)|"
+     r"here'?s the kicker|plot twist|bottom line|the real (?:problem|question|issue|moat|story)):\s+[a-z]"),
+
+    # A trailing -ing clause that pretends to explain significance. Cleanest signal on the list.
+    ("superficial analysis (-ing clause)",
+     r",\s+(highlighting|underscoring|reflecting|showcasing|demonstrating|signaling|"
+     r"cementing|solidifying|emphasizing|illustrating|marking)\b"),
+
+    ("importance puffery",
+     r"((?:stands as|is) a testament|marks? a (?:pivotal|defining|watershed|turning) (?:moment|point)|"
+     r"plays? a (?:vital|crucial|key|pivotal|critical) role|solidif(?:ies|ying) its position|"
+     r"underscores (?:its|the) (?:significance|importance)|cements? its|speaks volumes|"
+     r"cannot be overstated|a pivotal moment)"),
+
+    ("weasel attribution",
+     r"\b(experts (?:agree|say|note|believe)|industry reports suggest|studies show|"
+     r"research shows|many (?:argue|believe|say)|widely (?:regarded|considered|seen) as|"
+     r"it is (?:widely )?believed|critics argue|observers note|some would say)\b"),
+
+    ("fake-strong verb",
+     r"\b(serves? as (?:a|an|the)|acts? as (?:a|an|the)|functions? as (?:a|an|the)|"
+     r"ha(?:s|ve) the ability to|made? a decision|provides? the ability)\b"),
+
+    ("rhetorical setup",
+     r"(what if i told you|think about it:|plot twist:|ask yourself:|sound familiar\?|"
+     r"let that sink in|here'?s a question for you)"),
+
+    # Recap ending. "ultimately" is a soft adverb anywhere; at a paragraph head it is THE tell.
+    ("summary-recap ending",
+     r"(?:^|\n)\s*(?:[*_>#\s]*)(in conclusion|ultimately|overall|to sum up|to summarize|"
+     r"in summary|all in all)\b[,.]?\s"),
+
+    ("dramatic fragmentation",
+     r"\bthat'?s it\.\s+that'?s\b"),
+]
+
+WARN_PATTERNS = [
+    ("binary contrast",
+     r"\b(?:it'?s|this is|that'?s|the (?:question|problem|point|issue|answer))\s+(?:is\s+)?n(?:o|')t\b"
+     r"[^.!?]{0,60}[.,;]\s*(?:it'?s|it is|but|rather)\b"),
+
+    ("negative listing",
+     r"\bnot an? [^.!?\n]{1,30}\.\s*not an? [^.!?\n]{1,30}\."),
+
+    # APA anthropomorphism ban. Restricted to verbs only a person can do — APA permits
+    # "the results suggest" and "the data indicate", so those are absent on purpose.
+    ("anthropomorphism (APA)",
+     r"\bthe (?:study|data|research|report|paper|analysis|table|figure|results?|role|posting|"
+     r"jd|company|score|model|document|section)\s+"
+     r"(?:argues?|believes?|thinks?|feels?|wants?|knows?|hopes?|decides?|claims?|worries|"
+     r"concluded|assumes?)\b"),
+]
+
+
+# ── TEXT PREPARATION ─────────────────────────────────────────────────────────────────────────
+# A fence opener must START A LINE (up to 3 spaces of indent, per CommonMark), and an unterminated
+# one runs to end of file. Both halves of that sentence were bugs, and they pull in OPPOSITE
+# directions, so neither can be fixed alone:
+#
+#   ANCHORING alone   — the old `​```.*?```` needed a closer, so a doc with an odd number of fences
+#                       had its code linted as prose. Real: the tilde form was never matched at all.
+#   EOF-TOLERANCE     — but `.*?(?:```|\Z)` WITHOUT anchoring is far worse than the bug it fixes.
+#     alone             `documents/HARD-INVARIANTS.md:70` writes a bare (```) mid-sentence while
+#                       explaining the fenced-draft rule, and `email-body-checklist.md` does the
+#                       same. Measured: that reads as an unterminated opener and blanks 7,458 of
+#                       28,153 non-space chars in HARD-INVARIANTS (26%) and 65% of the checklist.
+#                       A style gate that silently stops reading a quarter of its own rulebook is a
+#                       false NEGATIVE, which is the failure this linter cannot afford.
+#
+# Anchored + EOF-tolerant is byte identical to the old behavior on 181 of 182 repo Markdown files.
+# The one difference is an improvement: `.claude/commands/apply.md:141` opens with ```json, and the
+# old regex left the bare word "json" behind to be linted as prose.
+#
+# The closer allows a trailing info string (```json closes an open block). Not strict CommonMark,
+# but it makes an unterminated block end at the NEXT fence rather than eating the rest of the file,
+# and blanking less is the safer error here.
+FENCE_RE = re.compile(r"(?ms)^[ \t]{0,3}(?P<f>```|~~~).*?(?:^[ \t]{0,3}(?P=f)[^\n]*$|\Z)")
+
+
+_COMMANDS_CACHE = None
+
+
+def _command_names():
+    """Slash-command names that exist on disk, in whichever layout this install uses.
+
+    ⚖️ READ, NEVER TYPED. A typed list goes stale the moment a command is added, and the new
+    command's own doc would be the thing that failed — which is the defect being fixed. Both
+    layouts are checked because the assembled kit keeps commands at `commands/` while a Claude Code
+    checkout keeps them at `.claude/commands/`, and an install may be either.
+
+    Degrades to an EMPTY set when no such directory exists. Empty means "exempt nothing", so the
+    rule keeps its old behavior rather than silently going quiet.
+    """
+    global _COMMANDS_CACHE
+    root = _repo()
+    if _COMMANDS_CACHE is not None and _COMMANDS_CACHE[0] == root:
+        return _COMMANDS_CACHE[1]
+    names = set()
+    for sub in ("commands", os.path.join(".claude", "commands")):
+        try:
+            for entry in os.listdir(os.path.join(_repo(), sub)):
+                if entry.endswith(".md"):
+                    names.add(entry[: -len(".md")])
+        except OSError:
+            continue
+    for sub in ("skills", os.path.join(".claude", "skills")):
+        d = os.path.join(_repo(), sub)
+        try:
+            for entry in os.listdir(d):
+                if os.path.isdir(os.path.join(d, entry)):
+                    names.add(entry)
+        except OSError:
+            continue
+    # Longest first, so `/no-slop` is consumed before a hypothetical `/no` could bite into it.
+    _COMMANDS_CACHE = (root, sorted(names, key=len, reverse=True))
+    return _COMMANDS_CACHE[1]
+
+
+def strip_noise(text, token=False):
+    """Remove regions that quote other people or hold code, replacing them with blanks.
+
+    Blockquotes are where this file stores the owner's verbatim drafts and other people's words;
+    linting them means telling a source it wrote badly. Fenced/inline code and link targets hold
+    identifiers, not prose. Newlines are preserved so line-anchored patterns stay accurate.
+
+    ⛔ `token=True` REPLACES WITH `x` INSTEAD OF SPACES, and it exists for one rule (BUG-089).
+    Blanking is correct for every word-level check: a code span is not prose and should not be
+    counted or matched. But it is WRONG for any rule that reads the characters BETWEEN words,
+    because two adjacent stripped regions collapse into whitespace and manufacture a hit that the
+    author never wrote. The live instance, in the kit's own `/level-network` doc:
+
+        `~/Downloads`/`~/Desktop`      →      "            /            "
+
+    which the spaced-slash rule then reports as spaces around a slash. The author wrote no spaces.
+    ⚠️ Do NOT make `token` the default. Turning code spans into words would change sentence-length
+    counts and let banned-word patterns match inside identifiers, which is the bug this whole
+    function exists to prevent. One rule needs the gap preserved; the rest need it gone.
+    """
+    fill = "x" if token else " "
+
+    def blank(m):
+        return re.sub(r"[^\n]", fill, m.group(0))
+
+    text = re.sub(r"^---\n.*?\n---\n", blank, text, count=1, flags=re.S)   # YAML frontmatter
+    text = re.sub(FENCE_RE, blank, text)                                    # fenced code
+    text = re.sub(r"`[^`\n]+`", blank, text)                                # inline code
+    text = re.sub(r"^[ \t]*>.*$", blank, text, flags=re.M)                  # blockquotes
+    text = re.sub(r"\]\([^)]*\)", blank, text)                              # markdown link targets
+    # ⚠️ WIKI-LINK TARGETS ARE IDENTIFIERS TOO (2026-08-04). `[[some-memory-slug]]` names a FILE in
+    # the memory store, and this repo cites them constantly. Linting one means telling a filename it
+    # wrote badly: `[[build-picker-labels-must-match-build-exact]]` fired the banned-word rule on
+    # "exact", and the only ways out were a WRONG path or dropping a correct citation. Both are worse
+    # than the warning. Same reasoning as the markdown link targets on the line above, which this
+    # function's own docstring already states.
+    text = re.sub(r"\[\[[^\]\n]+\]\]", blank, text)                         # wiki-link targets
+    text = re.sub(r"https?://\S+", blank, text)                             # bare URLs
+    # ⛔ A SLASH-COMMAND NAME IS AN IDENTIFIER, exactly like a wiki-link slug or a code span, and
+    # this function's own docstring already states the principle. Measured upstream 2026-08-10: ALL
+    # 19 shipped command docs failed the spaced-slash rule, every one on its own title line
+    # (`# /apply`, `# /rank`, …), because `\S\s+/\S` reads the `# ` plus `/a` as a spaced slash. A
+    # command doc's title has to name the command, so the rule was unfollowable for the whole file
+    # type — the same "a shipped command prescribes wording its own gate then blocks" shape the
+    # partner channel reported as kit issue #9.
+    #
+    # 🎯 RESOLVED AGAINST THE REAL COMMAND LIST, never a generic `/[a-z-]+` pattern. A blanket
+    # pattern would also swallow `payments /fintech`, a genuine typo this rule exists to catch. Only
+    # a name that IS a command on disk is an identifier; anything else stays prose and stays linted.
+    for _name in _command_names():
+        text = re.sub(r"(?<![A-Za-z0-9_-])/" + re.escape(_name) + r"(?![A-Za-z0-9_-])", blank, text)
+    return text
+
+
+LATEX_DROP_CMDS = (
+    "documentclass|usepackage|input|include|includegraphics|hypersetup|geometry|pagestyle|"
+    "fancyhead|fancyfoot|label|ref|pageref|cite|bibliography|bibliographystyle|"
+    "newcommand|renewcommand|providecommand|newenvironment|renewenvironment|def|let|"
+    "setlength|addtolength|definecolor|titleformat|titlespacing|vspace|hspace|rule|phantom|"
+    "fontsize|selectfont|color|begin|end|hyphenchar|raisebox|makebox"
+)
+_LATEX_INNER = r"(?:\[[^\]]*\])*(?:\{[^{}]*\})+"
+
+
+def _blank_marker_blocks(text, marker_pattern):
+    """Within each CONTIGUOUS block of non-blank lines, blank from the FIRST marker-matching line
+    FORWARD, keeping every line ABOVE it. Blank lines bound the blocks, so this cannot spread into
+    an unrelated paragraph.
+
+    ⚠️ SOURCE SIDE ONLY. This runs via strip_latex -> source_signature, on the .tex. The PDF side
+    (verify_resume.render_signature) does NOT call this; it blanks contact lines line-by-line and
+    collapses identifiers via _IDENT_RE. #41's PDF-side wrapped-tail survival is handled there,
+    independently of this function.
+
+    Why forward-from-the-marker and not the whole block (kit #51 REGRESSION, fixed the #41 fix):
+    blanking the WHOLE block was too broad. A résumé header is three ADJACENT lines (name, then
+    tagline, then contact) with no blank between them, so a whole-block blank ate the name and the
+    tagline on the SOURCE side while the PDF side (line-by-line) kept them. The two signatures then
+    differed by exactly the header, build_drift scored ~0.99 against the 0.999 threshold, and every
+    résumé failed the NEVER_WAIVABLE STALE BUILD check and could not be exported. Keeping the lines
+    ABOVE the first marker preserves the name and tagline, which sit above the contact line, so the
+    two signatures agree again (build_drift 1.000 on a conventional header).
+
+    ⚖️ Two template conventions are load-bearing for correctness, not cosmetic, and real templates
+    satisfy both: (1) the contact line sits BELOW the name/tagline (a contact-above-name layout would
+    blank the name); (2) the header is blank-line-separated from the body, because this blanks ALL
+    forward lines in the block, so any non-marker content sharing the contact's block with no blank
+    separator is dropped on the source side while the PDF keeps it.
+    """
+    lines = text.split("\n")
+    marker_re = re.compile(marker_pattern)
+    blocks, current = [], []
+    for ln in lines:
+        if ln.strip() == "":
+            if current:
+                blocks.append(current)
+                current = []
+            blocks.append([ln])
+        else:
+            current.append(ln)
+    if current:
+        blocks.append(current)
+    out = []
+    for block in blocks:
+        first = next((i for i, ln in enumerate(block) if marker_re.search(ln)), None)
+        if first is None:
+            out.extend(block)
+        else:
+            out.extend(block[:first])              # keep name / tagline above the contact line
+            out.extend("" for _ in block[first:])   # blank the contact line + its forward-wrapped tail
+    return "\n".join(out)
+
+
+def strip_latex(text):
+    """Reduce a .tex source to the words a reader sees, so the prose rules can run on it.
+
+    The linter used to skip .tex entirely and exit 0, which read as a pass, so no résumé was
+    ever style-checked. Widening the extension tuple alone is worse than the bug: an unstripped
+    .tex lights up on \\textbf, \\hfill and package names, and an operator who learns to ignore
+    a gate has no gate. So the markup comes off first.
+
+    What goes: the preamble (everything before \\begin{document}), comment lines, the contact
+    header line, URLs and \\href targets, command names and the braces of markup-only commands.
+    What stays: the sentences and bullets a hiring manager reads.
+    """
+    # 1. preamble and back matter: only the document body is prose
+    m = re.search(r"\\begin\{document\}", text)
+    if m:
+        text = text[m.end():]
+    m = re.search(r"\\end\{document\}", text)
+    if m:
+        text = text[:m.start()]
+    # 2. comments never render (a lone \% is an escaped percent sign, not a comment)
+    text = re.sub(r"(?<!\\)%.*", "", text)
+    # 3. \href{target}{label} keeps the label only
+    text = re.sub(r"\\href\s*\{[^{}]*\}\s*\{([^{}]*)\}", r"\1", text)
+    # 4. the contact/header line is identifiers, not prose.
+    # ⚠️ This used to blank LINE BY LINE. In the .tex source the whole header (all its \href's,
+    # now reduced to label text by step 3) is ONE physical line, so a per-line blank wipes it
+    # whole. But pdftotext -layout WRAPS that same header across several physical PDF lines with
+    # no blank line between them, and a per-line blank only wipes the wrapped line that still
+    # literally contains the email/phone/linkedin marker — any trailing \href label (e.g. the
+    # website or github label) that wrapped onto its own line carries none of those markers and
+    # survives unblanked on the PDF side while the source side has nothing there, a text-wrap
+    # artifact a stale-build check can misread as real drift. Fixed by blanking the whole
+    # CONTIGUOUS block of non-blank lines (the paragraph) once any line in it matches, not just
+    # the one matching line — wrap-insensitive on both sides, blank-line-bounded, so it cannot
+    # reach into an unrelated paragraph.
+    _contact = "|".join(re.escape(s) for s in (
+        cfg.OWNER_EMAIL, cfg.OWNER_PHONE, "linkedin.com/in/") if s)
+    if _contact:
+        text = _blank_marker_blocks(text, _contact)
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"\b[\w.-]+@[\w.-]+\.\w+\b", " ", text)
+    # 5. markup-only commands go whole; everything else surrenders its braces and keeps the text
+    for _ in range(6):
+        new = re.sub(r"\\(?:" + LATEX_DROP_CMDS + r")\*?" + _LATEX_INNER, " ", text)
+        new = re.sub(r"\\[a-zA-Z@]+\*?(?:\[[^\]]*\])*\{([^{}]*)\}", r" \1", new)
+        if new == text:
+            break
+        text = new
+    # 6. escaped characters render as themselves, so restore them before the bare-command sweep.
+    # An escaped \$ is a DOLLAR SIGN and a bare $ is a math delimiter, and step 7 deletes the
+    # delimiters. Park the real ones out of reach first, or a retired dollar figure survives
+    # without its sign and the retired-figure rule never sees it.
+    text = text.replace(r"\$", "\x00")
+    text = re.sub(r"\\([%&#_{}])", r"\1", text)
+    # ⛔ TeX DIMENSION KEYWORDS DIE WITH THE COMMAND THAT TOOK THEM (2026-08-09).
+    # `\hrule height 0.6pt` is a rule specification, not prose. The bare-command sweep above removes
+    # `\hrule` and the length sweep below removes `0.6pt`, but `height` is a plain word and survived
+    # into the reader-text signature. The PDF has no such word, so the source and the render
+    # disagreed and a FRESHLY COMPILED résumé tripped STALE BUILD at 99.88% against a 99.9% floor.
+    # ⚠️ Preamble rules dodged it entirely, because the preamble is discarded wholesale, so this
+    # only ever bit a hand-built file with a body-level rule. That asymmetry is why it went unseen:
+    # every template-built résumé passed. Reported from a partner install.
+    # ⛔ MATCHED AS A WHOLE CONSTRUCT, NEVER AS BARE WORDS. A first attempt stripped a standalone
+    # `height|width|depth` anywhere, which also deleted them from real prose: "increased height of
+    # the funnel" lost its noun, and every downstream prose rule then read corrupted text. The
+    # keyword only dies when it is attached to the rule command that owns it.
+    text = re.sub(r"\\[hv]rule\s*(?:(?:height|width|depth)\s*-?\d*\.?\d*(?:pt|em|ex|in|cm|mm)?\s*)*", " ", text)
+
+    # 7. leftovers: bare commands (\hfill, \item, \\), math delimiters, orphan braces, lengths
+    text = re.sub(r"\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?", " ", text)
+    text = re.sub(r"\\\\(?:\[[^\]]*\])?", " ", text)
+    text = re.sub(r"\\[^a-zA-Z]", " ", text)
+    text = text.replace("{", " ").replace("}", " ")
+    text = re.sub(r"[ \t]*\$[ \t]*", " ", text)
+    text = re.sub(r"(?<![A-Za-z0-9])-?\d+(?:\.\d+)?(?:pt|em|ex|in|cm|mm)\b", " ", text)
+    text = text.replace("\x00", "$")
+    text = re.sub(r"[ \t]+", " ", text)
+    return text
+
+
+def sentences(text):
+    """Rough sentence split, good enough for the rhythm heuristics below."""
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+
+
+# ── CHECKS ───────────────────────────────────────────────────────────────────────────────────
+def check(text, mode="prose", is_markdown=True):
+    """Return (fails, warns). `mode` selects which layers apply."""
+    fails, warns = [], []
+    if _LISTS_DEGRADED:
+        # ⚠️ A HARD entry, not advisory: both hook paths (_hook_write, main()'s --hook) print
+        # NOTHING at all when `fails` is empty, warns included, so a degraded-but-otherwise-clean
+        # file would still surface as silence on the exact write path this gate exists to cover.
+        # Every reader (CLI, --hook, --hook-write) treats a nonzero fails count the same way: it
+        # is what turns "✅ clean" into a visible, unmissable finding. This never blocks the write
+        # itself -- both hook paths already document exit 2 here as advisory revision feedback,
+        # the write has already landed by the time this runs.
+        fails.append(f"GATE DEGRADED: {_LISTS_DEGRADED}")
+    body = strip_noise(text) if is_markdown else text
+    low = body.lower()
+
+    def hit(label, pat, bucket, flags=re.I):
+        m = re.search(pat, low if flags & re.I else body, flags)
+        if m:
+            frag = " ".join(m.group(0).split())[:70]
+            bucket.append(f'{label}: "{frag}"')
+
+    # — precedence-table rules (his voice wins, and it is stricter than APA) —
+    if "—" in body:
+        fails.append('em dash present (his hard rule: commas, ellipses, or parentheses)')
+    # BUG-089: read the TOKEN-masked body, so a stripped region cannot collapse into a slash the
+    # author never wrote. Everything else keeps the blank-masked body on purpose.
+    _slash_body = strip_noise(text, token=True) if is_markdown else body
+    if re.search(r"\S\s+/\s+\S|\S\s+/\S|\S/\s+\S", _slash_body):
+        fails.append("spaces around a slash (write applied-AI/platform, never ' / ')")
+
+    # — shared hard-block vocabulary (the check_outreach core, proper-noun aware) —
+    for w in BANNED:
+        if banned_hit(body, w):
+            fails.append(f'banned/AI-tell word: "{w}"')
+    for w in SOFT:
+        if re.search(r"(?<![a-z])" + re.escape(w) + r"(?![a-z])", low):
+            warns.append(f'often-empty adverb: "{w}" — cut it unless it earns the word')
+    # Inflected forms escape the word-boundary check ("leveraged", "robustness", "fostering").
+    # Lowercase-only on purpose: a Capitalized stem is almost always a name (Foster, Example Inc).
+    for stem in ("seamless", "leverag", "delv", "robust", "showcas", "utiliz", "foster"):
+        m = re.search(r"(?<![A-Za-z])(" + stem + r"[a-z]*)", body)
+        if m:
+            fails.append(f'banned/AI-tell word: "{m.group(1)}"')
+
+    # — honesty guardrails: OUTBOUND surfaces only —
+    # These gate what SHIPS to an employer, not what the workspace writes about itself. Found by
+    # smoke-testing the hook against documents/compass.md, which reads: "$7.6M is the
+    # tenure-scoped figure, not $11.5M." That is the guardrail doing its job, and flagging it
+    # would train the reader to ignore the linter. A prose doc has to be able to name the retired
+    # figure in order to warn about it; an email does not.
+    if mode in ("outreach", "resume"):
+        for w in RETIRED:
+            if w.lower() in low:
+                fails.append(f'retired/incorrect figure: "{w}"')
+        # re.I: `low` is already lowercased, so an uppercase literal in a RETIRED_PATTERNS entry would
+        # be DEAD here while looking alive in your config. Ported from main 2026-08-07 after a panel
+        # found a live pattern that fired on resumes and on nothing else.
+        for pat, label in RETIRED_PATTERNS:
+            if re.search(pat, low, re.I):
+                fails.append(f"retired/incorrect claim: {label}")
+
+    # — no-slop patterns —
+    for label, pat in HARD_PATTERNS:
+        hit(label, pat, fails)
+    for label, pat in WARN_PATTERNS:
+        hit(label, pat, warns)
+
+    for p in EMPTY_PHRASES:
+        if p in low:
+            fails.append(f'empty phrase: "{p}"')
+    for p in SOFT_PHRASES:
+        if p in low:
+            warns.append(f'often-empty phrase: "{p}" (keep only if it earns the words)')
+    for w in PROSE_WARN_WORDS:
+        if re.search(r"(?<![a-z])" + w + r"(?![a-z])", low):
+            warns.append(f'AI-tell in prose: "{w}"')
+
+    # — rhythm heuristics —
+    sents = sentences(body)
+    run = 0
+    for s in sents:
+        run = run + 1 if len(s.split()) <= 4 else 0
+        if run >= 3:
+            warns.append("dramatic fragmentation: 3+ consecutive sentences of 4 words or fewer")
+            break
+    openers, streak = [s.split()[0].lower() for s in sents if s.split()], 1
+    for i in range(1, len(openers)):
+        streak = streak + 1 if openers[i] == openers[i - 1] else 1
+        if streak >= 3:
+            warns.append(f'robotic rhythm: 3+ sentences in a row opening with "{openers[i]}"')
+            break
+
+    # — APA construct (advisory: these are the two mechanizable ones) —
+    # Serial comma. Lowercase-initial items only, which keeps dates and names
+    # ("In January, Dana and I…") from reading as a three-item list.
+    # Skipped on résumés: a Core Skills line IS a comma list by design, so this heuristic fires on
+    # every clean CV and teaches the reader to skim past the output.
+    if mode != "resume" and re.search(r"\b[a-z][\w-]*,\s+[a-z][\w-]*(?:\s+[a-z][\w-]*){0,2}\s+and\s+[a-z]", body):
+        warns.append("serial comma: a 3-item list may be missing the comma before 'and' (APA)")
+    if is_markdown:
+        levels = [len(m.group(1)) for m in re.finditer(r"^(#{1,6})\s", body, re.M)]
+        for a, b in zip(levels, levels[1:]):
+            if b > a + 1:
+                warns.append(f"heading hierarchy: level {a} jumps to level {b} (APA: no skipped levels)")
+                break
+    # His compound-term ruling, which overrides APA hyphenation.
+    # "insurance-claims" is an established compound noun: it needs no hyphen, and a de-hyphen
+    # ruling propagates to every sibling term rather than stopping at the one that was caught.
+    for bad, good in (("civic-tech", "civic tech"), ("builder-PMs", "builder PMs"),
+                      ("insurance-claims", "insurance claims")):
+        if re.search(r"(?<![a-z])" + bad + r"(?![a-z])", body, re.I):
+            warns.append(f'hyphenated compound: "{bad}" → "{good}" (his rule beats APA here)')
+
+    # dedupe, order-preserving
+    return list(dict.fromkeys(fails)), list(dict.fromkeys(warns))
+
+
+# ── kit#66 / BUG-172: SCAN THE CHANGE, NOT THE WHOLE FILE ──────────────────────────────────────
+# `_hook_write` used to `open(path).read()` and lint the ENTIRE file on every Write/Edit, so
+# editing a single clean paragraph into a legacy file with pre-existing violations reported those
+# pre-existing violations as if THIS edit had introduced them. Reproduced live 2026-08-21/22: a
+# 4-line, verified-clean addition to `documents/PROFILE.md` printed "4 hard issue(s)" that were all
+# 76 pre-existing em dashes and old "genuinely"/"utilization" uses elsewhere in the file. That
+# trains an operator to ignore the hook (the exact failure `pii_gate`'s kit#61 fix was named for:
+# "scan the change, not the whole artifact"), and it BURIES the case the hook actually exists to
+# catch — a violation the edit really did add — inside a wall of noise it did not add.
+#
+# The fix does not touch WHAT gets flagged, only WHAT TEXT gets scanned. `check()` itself is
+# unchanged; a violation inside newly-added text still fires exactly as before.
+def _edit_added_text(tool_input):
+    """The exact text an Edit call inserted — `new_string` IS the change, no diffing needed."""
+    return str(tool_input.get("new_string") or "")
+
+
+def _multiedit_added_text(tool_input):
+    """MultiEdit applies several (old_string, new_string) pairs in one call; every `new_string`
+    is added text, so concatenate them. Not currently wired (settings.json matches Write|Edit
+    only), kept for a future matcher and for direct invocation."""
+    edits = tool_input.get("edits")
+    if not isinstance(edits, list):
+        return ""
+    return "\n".join(str(e.get("new_string") or "") for e in edits if isinstance(e, dict))
+
+
+def _write_added_text(path, new_content):
+    """A Write replaces the WHOLE file, so 'the change' is whatever lines are new relative to the
+    file's last COMMITTED version — an overwrite of a legacy file that only touches one paragraph
+    must lint that paragraph, exactly like Edit's `new_string` does. A file with no committed
+    version at all (brand new, or `git show` fails for any reason — not a git repo, HEAD has no
+    commits yet, network-free `git show` still costs nothing to attempt) has no legacy content BY
+    DEFINITION, so the whole write is correctly the change: fails OPEN toward scanning MORE, never
+    less, which is the safe direction for a hook that only ever WARNS.
+
+    ⚠️ RELPATH-THEN-CHECK-`..`, NOT A BARE `startswith` (security review, before ship). A raw
+    `path.startswith(REPO)` has no path-separator boundary: `REPO="/repo"` matches a path under an
+    unrelated sibling directory like `/repo2/file.md` too, computing a `rel` of
+    `"../repo2/file.md"` for a file that was never inside this tree at all. `git show` rejects that
+    as an out-of-repo pathspec, so today this fails open to whole-content-as-added (still the safe
+    direction) rather than silently diffing the wrong file — but relying on `git` to catch a bug
+    this function could avoid on its own is exactly the kind of thing that stops being true after
+    an unrelated future change. `is_exempt()` elsewhere in this file already solves the identical
+    problem the correct way (compute the relpath, then check whether it climbed out via `..`); this
+    reuses that same, already-proven pattern instead of a second, weaker one."""
+    rel = os.path.relpath(path, _repo())
+    if rel.startswith(".."):
+        rel = None
+    old_content = None
+    if rel:
+        try:
+            r = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=_repo(),
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                old_content = r.stdout
+        except (OSError, subprocess.SubprocessError):
+            old_content = None
+    if old_content is None:
+        return new_content
+    return _added_lines(old_content, new_content)
+
+
+def _added_lines(old_text, new_text):
+    """Lines present in `new_text` that were not in `old_text`, in `new_text`'s own order.
+
+    ⚠️ MULTISET MEMBERSHIP, NOT POSITIONAL DIFFING (found by security review before ship). A first
+    version used `difflib.SequenceMatcher.get_opcodes()`, which diffs by POSITION: it reports a
+    line as 'inserted' whenever it no longer sits in its old spot, even if that exact line already
+    existed elsewhere in the file. A Write that reorders two untouched paragraphs — no edit to
+    either one, just a swap — made the moved-but-unchanged paragraph read as newly added, which
+    would resurrect the ORIGINAL bug's symptom on a pre-existing violation sitting inside it: noise
+    from content the write did not touch. A line is a real addition only if the file has FEWER
+    copies of it now available than before; `Counter` tracks that directly, with no position
+    sensitivity at all. A single-word change mid-line still works exactly as before, because the
+    edited line's new exact text is not present in the old file (it isn't a MOVE, its content
+    genuinely changed), so it is correctly still counted as added."""
+    old_lines, new_lines = old_text.splitlines(), new_text.splitlines()
+    remaining = collections.Counter(old_lines)
+    added = []
+    for line in new_lines:
+        if remaining.get(line, 0) > 0:
+            remaining[line] -= 1
+        else:
+            added.append(line)
+    return "\n".join(added)
+
+
+def _changed_text_for_hook(tool_name, tool_input, path):
+    """The text THIS tool call actually added, scoped per kit#66/BUG-172 — or None when the call's
+    shape does not tell us (an unrecognized tool_name), which falls back to the pre-fix whole-file
+    behavior rather than silently scanning nothing."""
+    if tool_name == "Edit":
+        return _edit_added_text(tool_input)
+    if tool_name == "MultiEdit":
+        return _multiedit_added_text(tool_input)
+    if tool_name == "Write":
+        return _write_added_text(path, str(tool_input.get("content") or ""))
+    return None
+
+
+def _hook_write():
+    """PostToolUse on Write|Edit: lint the Markdown that just landed.
+
+    Advisory by design. The write already happened, so exit 2 does not block anything — it feeds
+    stderr back as revision feedback. Fails OPEN on every error: a linter that can wedge a file
+    write is worse than no linter.
+    """
+    import json
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        sys.exit(0)
+    tool_name = payload.get("tool_name") or ""
+    tool_input = payload.get("tool_input") or {}
+    path = tool_input.get("file_path")
+    if not path:
+        sys.exit(0)
+    if not str(path).lower().endswith(HOOK_SCANNED_EXTS):
+        _print_skip(path)
+        sys.exit(0)
+    if is_exempt(path):
+        sys.exit(0)
+    try:
+        text = open(path, encoding="utf-8", errors="ignore").read()
+    except Exception:
+        sys.exit(0)
+    changed = _changed_text_for_hook(tool_name, tool_input, path)
+    scan_text = text if changed is None else changed
+    # A .tex used to fall through this gate, so the hook said nothing on every résumé build.
+    if str(path).lower().endswith(".tex"):
+        fails, warns = check(strip_latex(scan_text), mode="resume", is_markdown=False)
+    else:
+        fails, warns = check(scan_text, mode="prose", is_markdown=True)
+    if not fails:
+        sys.exit(0)
+    rel = os.path.relpath(path, _repo()) if path.startswith(_repo()) else path
+    print(f"⚠️  house-style: {len(fails)} hard issue(s) in {rel} — fix before this ships:",
+          file=sys.stderr)
+    for f in fails:
+        print(f"   🔴 {f}", file=sys.stderr)
+    for w in warns[:4]:
+        print(f"   🟡 {w}", file=sys.stderr)
+    print("   (rules: .claude/skills/house-style/ · if this file quotes slop on purpose, "
+          "add it to EXEMPT_GLOBS in scripts/check_style.py)", file=sys.stderr)
+    sys.exit(2)
+
+
+def _hook_stop(strict=False):
+    """Stop hook: lint the final assistant message of the turn.
+
+    ADVISORY ONLY unless --strict. A Stop hook that exits 2 blocks the turn from ending and can
+    loop, so v1 reports at exit 0 and lets you decide on --strict once the false-positive rate
+    is known. Chat prose is the one surface with no other gate, which is why it is worth watching
+    even without teeth.
+    """
+    import json
+    try:
+        payload = json.load(sys.stdin)
+        tpath = payload.get("transcript_path")
+        if not tpath or not os.path.exists(os.path.expanduser(tpath)):
+            sys.exit(0)
+        last = ""
+        with open(os.path.expanduser(tpath), encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                try:
+                    ev = json.loads(line)
+                except Exception:
+                    continue
+                if ev.get("type") != "assistant":
+                    continue
+                content = (ev.get("message") or {}).get("content") or []
+                text = "".join(c.get("text", "") for c in content
+                               if isinstance(c, dict) and c.get("type") == "text")
+                if text.strip():
+                    last = text
+    except Exception:
+        sys.exit(0)
+    if not last:
+        sys.exit(0)
+    fails, _ = check(last, mode="chat", is_markdown=True)
+    if not fails:
+        sys.exit(0)
+    out = sys.stderr if strict else sys.stdout
+    print(f"🟡 house-style (chat): {len(fails)} slop finding(s) in the last reply — "
+          + "; ".join(fails[:6]), file=out)
+    sys.exit(2 if strict else 0)
+
+
+def main():
+    argv = sys.argv[1:]
+    if "--hook-write" in argv:
+        _hook_write()
+    if "--hook-stop" in argv:
+        _hook_stop(strict="--strict" in argv)
+
+    mode, hook, use_stdin, paths = "prose", False, False, []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--mode" and i + 1 < len(argv):
+            mode = argv[i + 1].strip().lower(); i += 2; continue
+        if a == "--hook":
+            hook = True; i += 1; continue
+        if a == "--stdin":
+            use_stdin = True; i += 1; continue
+        paths.append(a); i += 1
+
+    if mode not in ("prose", "outreach", "resume", "chat"):
+        print(f"unknown --mode '{mode}'. One of: prose | outreach | resume | chat")
+        sys.exit(2)
+
+    if use_stdin:
+        # Chat IS Markdown. The old `mode != "chat"` skipped strip_noise entirely on this path, so
+        # the documented way to lint a chat reply by hand lit up on the CONTENTS of every code
+        # block — and HARD-INVARIANTS *requires* drafts be shown inside fences, so every outreach
+        # review tripped it. The Stop hook that lints the same text already passes is_markdown=True
+        # (see _hook_stop); the two chat paths disagreed, and the hook was the correct one.
+        text, label, is_md = sys.stdin.read(), "(stdin)", True
+        fails, warns = check(text, mode=mode, is_markdown=is_md)
+        _report_one(label, mode, fails, warns, hook)
+        sys.exit(_final_exit([(fails, warns)], hook))
+
+    if not paths:
+        print(__doc__.split("Usage:")[1].split("Exit:")[0].strip())
+        sys.exit(2)
+
+    # kit #123: several paths can be given at once (e.g. a batch re-lint). Each is judged on its
+    # own — a scanned file is checked exactly as a lone invocation would check it, an unscanned
+    # extension prints its own skip line and exits this file 0 — and the run's exit code is the
+    # worst of them.
+    results = []
+    for path in paths:
+        if hook and is_exempt(path):
+            continue   # exempt file, advisory run: say nothing
+        if not os.path.exists(path):
+            print(f"file not found: {path}")
+            if hook:
+                continue
+            sys.exit(2)
+        if not path.lower().endswith(CLI_SCANNED_EXTS):
+            _print_skip(path)
+            continue
+        raw = open(path, encoding="utf-8", errors="ignore").read()
+        if path.lower().endswith(".tex"):
+            # A .tex used to exit 0 silently here. It is a résumé, so it gets the résumé mode
+            # (honesty guardrails on) and the markup comes off before the rules run.
+            text, label, is_md = strip_latex(raw), path, False
+            file_mode = "resume" if mode == "prose" else mode
+        else:
+            text, label, is_md = raw, path, True
+            file_mode = mode
+        fails, warns = check(text, mode=file_mode, is_markdown=is_md)
+        _report_one(label, file_mode, fails, warns, hook)
+        results.append((fails, warns))
+
+    sys.exit(_final_exit(results, hook))
+
+
+def _report_one(label, mode, fails, warns, hook):
+    """Print one file's (or stdin's) findings, in the CLI or --hook shape."""
+    if hook:
+        # PostToolUse advisory. The write already landed; exit 2 feeds stderr back as revision
+        # feedback rather than blocking anything. Silence on a clean file keeps the transcript quiet.
+        if fails:
+            print(f"⚠️  house-style: {len(fails)} hard issue(s) in {label} — fix before this ships:",
+                  file=sys.stderr)
+            for f in fails:
+                print(f"   🔴 {f}", file=sys.stderr)
+            for w in warns[:4]:
+                print(f"   🟡 {w}", file=sys.stderr)
+            print("   (rules: .claude/skills/house-style/ · exempt this path in check_style.py "
+                  "if it quotes slop on purpose)", file=sys.stderr)
+        return
+
+    print(f"── house-style: {label} (mode={mode}) ──")
+    for f in fails:
+        print(f"   🔴 {f}")
+    for w in warns:
+        print(f"   🟡 {w}")
+    if not fails and not warns:
+        print("   ✅ clean")
+    print(f"\n{len(fails)} hard · {len(warns)} advisory")
+
+
+def _final_exit(results, hook):
+    """The worst exit code across every path that was actually scanned. A skipped extension
+    contributes nothing here (it already exited 0 for its own line, kit #123) — it is simply
+    absent from `results`."""
+    any_fails = any(fails for fails, _ in results)
+    any_warns = any(warns for _, warns in results)
+    if hook:
+        return 2 if any_fails else 0
+    return 2 if any_fails else (1 if any_warns else 0)
+
+
+if __name__ == "__main__":
+    main()

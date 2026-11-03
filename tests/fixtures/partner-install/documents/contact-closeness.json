@@ -1,0 +1,16 @@
+{
+ "contacts": {
+  "Fake Person One": {
+   "closeness": "know-well",
+   "source": "stated-by-owner"
+  },
+  "Fake Person Two": {
+   "closeness": "worked-together",
+   "source": "stated-by-owner"
+  },
+  "Fake Person Five": {
+   "closeness": "met-once",
+   "source": "stated-by-owner"
+  }
+ }
+}

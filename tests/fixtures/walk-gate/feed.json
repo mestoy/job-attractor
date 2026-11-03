@@ -1,0 +1,307 @@
+{
+ "_walk_gate_note": "Obviously fake fixture (example.invalid, invented company). One card shaped like a real one; never his feed.",
+ "after": [
+  {
+   "company": "Quill & Marrow Insurance",
+   "followup_due": "none",
+   "person": "Leandro Voss",
+   "replied": null,
+   "reply_date": null,
+   "retired_silent": false,
+   "rung": "cold boss-hunt",
+   "sent_date": "2026-09-01"
+  },
+  {
+   "company": "Northbridge Claims",
+   "followup_due": "none",
+   "person": "Odalys Ferreira",
+   "replied": false,
+   "reply_date": null,
+   "retired_silent": false,
+   "rung": "warm 1st-degree",
+   "sent_date": "2026-08-20"
+  },
+  {
+   "company": "Hallowell Underwriting",
+   "followup_due": "none",
+   "person": "Tomas Reyk",
+   "replied": true,
+   "reply_date": "2026-09-10",
+   "retired_silent": false,
+   "rung": "cold boss-hunt",
+   "sent_date": "2026-09-09"
+  }
+ ],
+ "cards": [
+  {
+   "age_days": 1.0,
+   "boss": {
+    "confidence": "primary-sourced",
+    "name": "Marcus Ibe",
+    "title": "VP of Product",
+    "verified": true
+   },
+   "company": "Cordwainer Health",
+   "gates": [
+    {
+     "key": "dedup",
+     "name": "Dedup",
+     "state": "pass",
+     "why": "Not seen before."
+    },
+    {
+     "key": "blocked",
+     "name": "Blocked list",
+     "state": "pass",
+     "why": "Not on blocked-employers-list.md."
+    },
+    {
+     "key": "remote",
+     "name": "Remote reality",
+     "state": "pass",
+     "why": "Product-titled req: 'Remote (US)', no relocation."
+    },
+    {
+     "key": "industry",
+     "name": "Deal-breaker industries",
+     "state": "pass",
+     "why": "Healthcare workflow software, not a drug developer."
+    },
+    {
+     "key": "politics",
+     "name": "Politics",
+     "state": "pass",
+     "why": "No political signal from founder or leadership."
+    },
+    {
+     "key": "culture",
+     "name": "Culture / leadership",
+     "state": "pass",
+     "why": "Glassdoor 4.4/5, newest review 3 months old, no leadership flags."
+    },
+    {
+     "key": "commoditization",
+     "name": "Commoditization",
+     "state": "pass",
+     "why": "Proprietary claims-audit dataset; not absorbed by a general assistant."
+    },
+    {
+     "key": "boss",
+     "name": "Boss identified + verified",
+     "state": "pass",
+     "why": "Marcus Ibe confirmed on the company's own leadership page."
+    },
+    {
+     "key": "praise",
+     "name": "Praise source",
+     "state": "pass",
+     "why": "A podcast episode on claims automation, credited to him by name."
+    },
+    {
+     "key": "live_role",
+     "name": "Live role",
+     "state": "pass",
+     "why": "VP Product - Claims Platform req confirmed live via the company's ATS API."
+    }
+   ],
+   "html": "https://example.invalid/cards/cordwainer-health.html",
+   "mean": 82.0,
+   "owed": [],
+   "panel_history": [
+    {
+     "date": "2026-09-08",
+     "mean": 82.0,
+     "note": "Single panel, cleared on first pass"
+    }
+   ],
+   "panel_seats": [
+    {
+     "name": "CPO",
+     "score": 84,
+     "why": "A regulated system of record with a named champion is exactly his lane."
+    },
+    {
+     "name": "CTO",
+     "score": 80,
+     "why": "Small eng team means a builder-PM's own code lands directly in prod."
+    },
+    {
+     "name": "CEO",
+     "score": 82,
+     "why": "Founder-owned, no PE, growth-stage stability looks real."
+    }
+   ],
+   "queue_status": "CARDED_UNRULED",
+   "remote": "permanent remote, US incl FL",
+   "research": {
+    "praise": {
+     "source": "podcast",
+     "status": "sourced",
+     "url": "https://example.invalid/podcast",
+     "value": "You shipped the claims automation podcast episode this spring."
+    }
+   },
+   "seats": {
+    "ceo": 82,
+    "cpo": 84,
+    "cto": 80
+   },
+   "segment": "regulated-workflow",
+   "slug": "cordwainer-health",
+   "sources": [
+    {
+     "establishes": "live role + remote",
+     "label": "ATS API",
+     "url": "https://example.invalid/cordwainer/api/jobs/104"
+    },
+    {
+     "establishes": "praise source",
+     "label": "Podcast",
+     "url": "https://example.invalid/podcasts/claims-automation-ep12"
+    }
+   ],
+   "stop": null,
+   "verdict": "CARDED_UNRULED"
+  }
+ ],
+ "disagreements": [],
+ "fixture": false,
+ "floors": {
+  "cards": {
+   "floor": 30,
+   "value": 8
+  }
+ },
+ "generated_at": "2026-09-12T04:30:00Z",
+ "ladder": {
+  "dated_replies": 1,
+  "replied": 3,
+  "reply_rate": 25,
+  "sent": 12,
+  "unknown_replied": 4
+ },
+ "rates": {
+  "sends_per_day": 1.2
+ },
+ "recall": {
+  "ask": [
+   "I would love to be considered for the open VP Product seat.",
+   "I want to help build the claims platform."
+  ],
+  "close": [
+   "Would a short call this week work?\nthe owner\nowner.example"
+  ],
+  "give_back": [
+   "I can share my reconciliation playbook with your team.",
+   "Happy to walk your team through what worked for us."
+  ],
+  "proof": [
+   "Cut intake processing from nine days to two with automated reconciliation.",
+   "Shipped a reconciliation tool that saved 200 hours a month."
+  ]
+ },
+ "recommended": {},
+ "screen": {
+  "blocked": 1164,
+  "by_filter": [
+   {
+    "canonical_label": "Deal-breaker industries",
+    "count": 214,
+    "days_since_last": 1,
+    "examples": [
+     {
+      "company": "Redoubt Tactical Systems",
+      "ruled_on": "2026-09-11",
+      "source": "https://example.invalid/redoubt/about"
+     },
+     {
+      "company": "Vantage Lending Group",
+      "ruled_on": "2026-09-10",
+      "source": "https://example.invalid/vantage/products"
+     }
+    ],
+    "filter": 3,
+    "kind": "value",
+    "kind_why": "His own line on what he will not build for.",
+    "label": "Deal-breaker industries",
+    "label_matches_canonical": true,
+    "last_ruled_on": "2026-09-11",
+    "share_of_blocked_pct": 18.4,
+    "undated": 6
+   },
+   {
+    "canonical_label": "Remote reality",
+    "count": 587,
+    "days_since_last": 0,
+    "examples": [
+     {
+      "company": "Corrigan Freight Analytics",
+      "ruled_on": "2026-09-12",
+      "source": "https://example.invalid/corrigan/careers"
+     },
+     {
+      "company": "Millrace Data Co",
+      "ruled_on": "2026-09-05",
+      "source": "https://example.invalid/millrace/jobs/9"
+     }
+    ],
+    "filter": 12,
+    "kind": "mechanism",
+    "kind_why": "Reads what a posting says; a wrong fire here is a bug.",
+    "label": "Remote reality",
+    "label_matches_canonical": true,
+    "last_ruled_on": "2026-09-12",
+    "share_of_blocked_pct": 50.4,
+    "undated": 40
+   },
+   {
+    "canonical_label": "PE-owned default pass",
+    "count": 118,
+    "days_since_last": 4,
+    "examples": [
+     {
+      "company": "Palisade Growth Capital Portfolio Co",
+      "ruled_on": "2026-09-08",
+      "source": "https://example.invalid/news/palisade-buyout-2025"
+     }
+    ],
+    "filter": 7,
+    "kind": "value",
+    "kind_why": "His own line on ownership structure.",
+    "label": "PE-owned default pass",
+    "label_matches_canonical": true,
+    "last_ruled_on": "2026-09-08",
+    "share_of_blocked_pct": 10.1,
+    "undated": 2
+   },
+   {
+    "canonical_label": "Federal suitability",
+    "count": 9,
+    "days_since_last": 13,
+    "examples": [],
+    "filter": 21,
+    "kind": "unclassified",
+    "kind_why": "",
+    "label": "Unclassified screening rule",
+    "label_matches_canonical": false,
+    "last_ruled_on": "2026-08-30",
+    "share_of_blocked_pct": 0.8,
+    "undated": 9
+   }
+  ],
+  "by_filter_complete": true,
+  "cleared": 46,
+  "rules_total": 21,
+  "seen": 1210,
+  "unlabeled_examples": [],
+  "unlabelled": 12
+ },
+ "voice": {
+  "cold_boss": [
+   {
+    "n": 1,
+    "text": "> Hi Marcus,\n>\n> I really like the claims automation work your team shipped this year. I cut intake processing time in half using automated reconciliation last year. I would love to be your next product manager there. I can share my reconciliation playbook with your team.\n>\n> The owner\n> owner.example\n\nReceipt: sent 2026-01-01, replied: no"
+   }
+  ]
+ }
+}
