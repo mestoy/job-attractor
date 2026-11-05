@@ -285,10 +285,10 @@ def bounced_listed(path):
     return out
 
 
-def resend_into(items, row, company, to_name, subject, listed):
+def resend_into(items, row, company, to_name, subject, listed, day=None):
     """THE ONE RESEND, ON THE SAME ROW: when a `bounced` row for this company and person (the subject stands in when there is no person) has no `resent_date`, `row` replaces it IN
     PLACE with the new address, the original date and sent_ts, `resent_date` today and the bounce history carried forward. Returns True when it did, False when no such row exists (or the
-    address is the bounced one or is listed). Raises ResendBlocked when the matched row already had its resend. The live writer (mail-draft.sh) and the fold both call this one function."""
+    address is the bounced one or is listed). `day` is the send day to stamp (a folded entry passes the day it was spooled, BUG-698); None means today. Raises ResendBlocked when the matched row already had its resend. The live writer (mail-draft.sh) and the fold both call this one function."""
     norm = lambda a: (a or "").strip().lower()
     to = row.get("to")
     for i in range(len(items) - 1, -1, -1):
@@ -304,7 +304,7 @@ def resend_into(items, row, company, to_name, subject, listed):
         row["date"] = r.get("date", row.get("date"))
         if r.get("sent_ts"):
             row["sent_ts"] = r["sent_ts"]
-        row["resent_date"] = _send_day()
+        row["resent_date"] = day or _send_day()
         row["bounced_to"] = r.get("bounced_to") or r.get("to")
         row["first_bounced_at"] = r.get("first_bounced_at") or r.get("bounced_at") or ""
         if r.get("bounced_at"):
@@ -334,7 +334,8 @@ def apply_entry(items, e, path=None):
                     return "applied", ""
         if key.get("resend"):                              # a spooled resend after a bounce: the same in-place rewrite the live writer does
             try:
-                if resend_into(items, new, key.get("company"), key.get("to_name"), key.get("subject"), bounced_listed(path) if path else set()):
+                spooled_day = _local_day.day_of(e.get("at")) if _local_day and e.get("at") else ""     # BUG-698: the day it was spooled, not the day the fold runs
+                if resend_into(items, new, key.get("company"), key.get("to_name"), key.get("subject"), bounced_listed(path) if path else set(), day=spooled_day or None):
                     return "applied", ""
             except ResendBlocked:
                 return "refused", "this thread already had its one resend; the person pivot or LinkedIn is next"

@@ -53,6 +53,12 @@ class _Sandbox:
         p = self.path(rel)
         return open(p, encoding="utf-8", errors="ignore").read() if os.path.exists(p) else ""
 
+    def write(self, rel, text):
+        p = self.path(rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        open(p, "w", encoding="utf-8").write(text)
+        return p
+
     def lines(self, rel):
         return [ln for ln in self.read(rel).splitlines() if ln.strip()]
 
@@ -81,6 +87,21 @@ class SandboxTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls._root, ignore_errors=True)
+
+    def probe(self, module, body):
+        """Run a snippet against the kit's scripts dir, out of process, and return its stdout (a
+        subprocess so importing a module never leaves its scripts/ on this process's sys.path)."""
+        src = "import sys; sys.path.insert(0, %r)\nimport %s\n%s" % (_SCRIPTS, module, body)
+        r = subprocess.run([sys.executable, "-c", src], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout
+
+    def assertExit(self, res, code, msg=""):
+        self.assertEqual(
+            res.returncode, code,
+            f"{msg}\nexpected exit {code}, got {res.returncode}\n"
+            f"--- stdout ---\n{res.stdout[-1500:]}\n--- stderr ---\n{res.stderr[-1500:]}",
+        )
 
 
 # ── WHERE THE HOOK EXAMPLE LIVES, and why it takes a function ───────────────────────────────────

@@ -1265,6 +1265,154 @@ def _next_rise8_activity(repo=None):
         return ""
 
 
+# ⛔ THE GIG LANE NEVER LEADS EITHER (G2, documents/state/gig-stories-2026-09-13.md, STANDS
+# 2026-09-13). Same shape as NEVER_DEFAULT_BUGS just above: "search loses time in seat" when gig
+# status competes for his attention, so the gig line is an alternate only, appended after the
+# branch alternates and BEFORE bug_alternate so bugs stay last. Asserted at derivation, same as
+# the bug guard, so a future decide() branch cannot quietly promote it.
+NEVER_DEFAULT_GIG = re.compile(r"\bgig lane\b", re.I)
+
+# Screened-row flags that mean the row still needs his call or is otherwise not a clean next
+# step -- G2's own acceptance language: "first screened row without a later or hold flag".
+_GIG_HOLD_FLAGS = ("needs his call (a16z-led)", "below floor")
+
+
+def _gig_report_json(repo=None):
+    """`gig.py report --json`, parsed. Run as a subprocess against gig.py's OWN --json contract
+    rather than re-deriving stage/income math a second time here (G2: "reads gig.report(json)
+    ... never re-derive"). Fails to {} on any error -- gig.py not being wired yet, or its store
+    being empty or unreadable, must degrade the alternate to None, never break the brief.
+    """
+    try:
+        import subprocess
+        r = repo or REPO
+        out = subprocess.run(
+            [sys.executable, os.path.join(r, "scripts", "gig.py"), "report", "--json"],
+            capture_output=True, text=True, timeout=10, check=True, cwd=r,
+        )
+        return json.loads(out.stdout)
+    except Exception:
+        return {}
+
+
+def _gig_lane_enabled():
+    """Story 7 (2026-09-13): the gig lane is opt-in, off by default. Reads the SAME env var as
+    gig.py's own `gig_lane_enabled()` (GIG_LANE_ENV_VAR there) -- duplicated here rather than
+    imported because this module reaches gig.py only through a subprocess boundary
+    (`_gig_report_json`), never by importing it directly. A missing or malformed value is off.
+    """
+    raw = (os.environ.get("GIG_LANE_ENABLED") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _gig_label(row):
+    """Platform, plus the opportunity when it differs from the platform's own name."""
+    platform = row.get("platform")
+    opp = row.get("opportunity")
+    return platform if not opp or opp == platform else f"{platform}: {opp}"
+
+
+def _gig_card_json(repo=None, today=None):
+    """`gig.py card --json`, parsed, through the same subprocess seam as _gig_report_json. {} on any
+    error, so a gig.py that is missing or unreadable can never break the brief."""
+    try:
+        import subprocess
+        r = repo or REPO
+        out = subprocess.run(
+            [sys.executable, os.path.join(r, "scripts", "gig.py"), "card", "--json",
+             *(["--today", str(today)[:10]] if today else [])],
+            capture_output=True, text=True, timeout=10, check=True, cwd=r,
+        )
+        return json.loads(out.stdout)
+    except Exception:
+        return {}
+
+
+def _gig_card_pair(repo=None, today=None):
+    """(card, income_line, ok, first_run_step) for the brief. ok is False with the lane off or gig.py
+    unreadable, and the brief then shows nothing gig-card at all (byte-identical to a brief without
+    this code). first_run_step is None once the first income row exists (gig slice 2)."""
+    if not _gig_lane_enabled():
+        return None, None, False, None
+    data = _gig_card_json(repo, today)
+    if not data.get("enabled"):
+        return None, None, False, None
+    return data.get("card"), data.get("income_line"), True, data.get("first_run")
+
+
+def gig_card(repo=None):
+    """The one gig card (pay, time, why it fits, one next action, its commands), or None."""
+    return _gig_card_pair(repo)[0]
+
+
+def gig_income_line(repo=None):
+    """The one income line, or None with the lane off. Never a bare $0 beside real income."""
+    return _gig_card_pair(repo)[1]
+
+
+def gig_card_block(card, step=None):
+    """The GIG CARD block's lines. The commands are NOT here: they go in the COMMANDS fence. While the
+    first run is unfinished (gig slice 2) the step's label and four lines come first, then slice 1's
+    card line when there is one."""
+    out = ["GIG CARD"]
+    if step:
+        out.append(f"  {step['label']}")
+        out += [f"    {k.upper()}: {step[k]}" for k in ("now", "next", "where", "meanwhile")]
+        card = step.get("card")
+        if not card:
+            out.append("")
+            return out
+    if not card:
+        return ["GIG CARD", "  Gig card: none to show; bank one with gig.py bank", ""]
+    opp = "" if card["opportunity"] == card["platform"] else f": {card['opportunity']}"
+    out.append(f"  {card['action']}: {card['platform']}{opp} · {card['pay']} · {card['time']}")
+    if card.get("why"):
+        out.append(f"  why it fits: {card['why']}")
+    out.append("")
+    return out
+
+
+def gig_alternate(repo=None):
+    """The gig lane's one alternate (G2), shaped like bug_alternate(): a state line plus the
+    loudest open item. None when the gig lane is disabled (story 7, default) or there are no gig
+    rows at all.
+
+    Label: "Gig lane: <n> to apply, $X / Yh trailing 7 days" -- n is the count of SCREENED
+    platforms (their own next_step is "apply", per gig.py's NEXT_STEP table). The state names the
+    next platform to apply to (the first screened row carrying no hold/later flag) and the
+    trailing 7-day dollars and hours with the denominator, straight from gig.py's own report.
+
+    ⛔ NEVER THE 🧭 DEFAULT BADGE (badge is 💼) -- see NEVER_DEFAULT_GIG in derive(), the same
+    never-default assertion pattern bug_alternate rides on.
+    """
+    if not _gig_lane_enabled():
+        return None
+    data = _gig_report_json(repo)
+    queue = data.get("queue", {})
+    if not any(queue.get(s) for s in queue):
+        return None
+    screened = queue.get("screened", [])
+    next_platform = None
+    for row in screened:
+        if not any(f in _GIG_HOLD_FLAGS for f in row.get("red_flags", [])):
+            next_platform = _gig_label(row)
+            break
+    if next_platform is None and screened:
+        next_platform = _gig_label(screened[0])
+    seven = data.get("trailing_7_days") or {"earned": 0, "hours": 0, "denominator_days": 7}
+    label = (f"Gig lane: {len(screened)} to apply, "
+             f"${seven.get('earned', 0):.0f} / {seven.get('hours', 0):.1f}h trailing 7 days")
+    if next_platform:
+        state = (f"next to apply: {next_platform} · trailing 7 days "
+                 f"${seven.get('earned', 0):.2f} / {seven.get('hours', 0):.1f}h "
+                 f"(of {seven.get('denominator_days', 7)} days)")
+    else:
+        state = (f"no screened platform ready · trailing 7 days "
+                 f"${seven.get('earned', 0):.2f} / {seven.get('hours', 0):.1f}h "
+                 f"(of {seven.get('denominator_days', 7)} days)")
+    return {"badge": "💼", "label": label, "state": state}
+
+
 def derive(today=None, repo=None):
     d = decide(gather(today, repo))
     # The one shape that can never be derived, asserted at the point of derivation rather than
@@ -1280,6 +1428,12 @@ def derive(today=None, repo=None):
         d["andy_read"] = ["Bugs and tests never interrupt the 3-3-3 unless you ask for it. "
                           "Falling back to a new initial contact; the bug row is still "
                           "available as the last alternate."]
+    # Rule 1c: gig lane status never leads either (G2). Same shape as Rule 1 above.
+    if NEVER_DEFAULT_GIG.search(d["default"]):
+        d["default"] = "Next initial contact: run discovery to refill the board"
+        d["andy_read"] = ["The gig lane never interrupts 3-3-3 (G2, 2026-09-13). Falling back "
+                          "to a new initial contact; the gig line is still available as an "
+                          "alternate, immediately before the bug row."]
     # Rule 1b: NOT ON A WEEKEND, and NEVER "REST". A send-shaped default on a Saturday is the pipeline nagging about a loop that is not running, so it is
     # swapped for the next piece of work, never the absence of work. The ladder is still shown, because the number is a fact. A declared work day
     # (see _workday_declared) beats the weekend assumption. When a next Rise8 activity is named, Rule 1d below governs every day.
@@ -1328,6 +1482,10 @@ def derive(today=None, repo=None):
     # Rule 2: bug work is always present and always LAST. Appended after every branch's own
     # alternates AND after the release-notes row, so its position never depends on which priority
     # fired or on which optional rows happened to be added.
+    # Gig goes first of the two so bugs stay the very last alternate (off unless GIG_LANE_ENABLED).
+    _galt = gig_alternate(repo)
+    if _galt:
+        d["alternates"] = list(d.get("alternates", [])) + [_galt]
     _alt = bug_alternate(repo)
     if _alt:
         d["alternates"] = list(d.get("alternates", [])) + [_alt]
@@ -1358,9 +1516,16 @@ def render(full=False, today=None, repo=None):
            "STAMP (paste this INTO the picker, verbatim)", f"  {stamp(today, repo)}", ""]
     try:
         import balancer
-        out += [balancer.render(balancer.recommend(repo=repo or REPO)), ""]
+        out += [balancer.render(balancer.recommend(repo=repo or REPO))]
+        _blank = True
     except Exception:
-        pass
+        _blank = False
+    # Gig slice 1: the income line sits directly under NEXT; lane off adds nothing.
+    gig_c, gig_l, gig_ok, gig_s = _gig_card_pair(repo, today)
+    if gig_l:
+        out.append(gig_l)
+    if _blank or gig_l:
+        out.append("")
     note = spooled_orphans_note(repo)
     if note:
         out += [note, ""]
@@ -1382,6 +1547,11 @@ def render(full=False, today=None, repo=None):
     for a in d["alternates"]:
         out.append(f"  {a['badge']} {a['label']}  ·  {a['state']}")
     out.append("")
+    if gig_ok:
+        out += gig_card_block(gig_c, gig_s)
+        _cmds = list(((gig_s or gig_c) or {}).get("commands", []))
+        if _cmds:
+            out += ["COMMANDS (for the gig card above; run in the Terminal, <...> is filled in)", "```", *_cmds, "```", ""]
     out.append("PICKER QUESTION + HEADER (use these verbatim; build vocabulary self-blocks)")
     out.append(f"  question: {question_for(today, repo)}")
     out.append(f"  header:   {HEADER_TEMPLATE}")
@@ -1392,6 +1562,7 @@ def render(full=False, today=None, repo=None):
 
 def as_json(today=None, repo=None):
     d = derive(today, repo)
+    gig_c, gig_l, _, gig_s = _gig_card_pair(repo, today)
     return {
         "stamp": stamp(today, repo),
         "marker": PAIR_MARKER,
@@ -1405,6 +1576,9 @@ def as_json(today=None, repo=None):
         "evidence": d.get("evidence", []),
         "ladder_compact": ladder_compact(today, repo),
         "provenance": PRIORITY_PROVENANCE,
+        "gig_card": gig_c,
+        "gig_income_line": gig_l,
+        "gig_first_run": gig_s,
     }
 
 
